@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>QuestBoard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark">Q</div>
+          <div class="brand-copy">
+            <strong>QuestBoard</strong>
+            <span>Shared work queue</span>
+          </div>
+        </div>
+
+        <section class="sidebar-section project-section">
+          <div class="section-label">Project</div>
+          <select id="project-select" aria-label="Project"></select>
+          <button id="new-project-button" class="button secondary full-width" type="button">New project</button>
+        </section>
+
+        <section class="sidebar-section sidebar-status" aria-label="Connection status">
+          <div class="section-label">Connection</div>
+          <div class="connection-row">
+            <span class="pulse-dot"></span>
+            <strong id="connection-label">Local board</strong>
+          </div>
+          <span class="sidebar-note">Changes are recorded under the active actor.</span>
+        </section>
+
+        <details class="identity-settings sidebar-section">
+          <summary>
+            <span>Actor</span>
+            <span class="actor-summary">identity</span>
+          </summary>
+          <div class="identity-fields">
+            <label>Actor ID <input id="actor-id" autocomplete="off" /></label>
+            <label>Provider <input id="actor-provider" autocomplete="off" /></label>
+            <button id="save-actor-button" class="button secondary" type="button">Save actor</button>
+          </div>
+        </details>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div class="workspace-heading">
+            <h1 id="workspace-title">Quest Board</h1>
+            <span id="workspace-subtitle">Tasks across agents and humans</span>
+          </div>
+          <div class="toolbar">
+            <div id="view-switch" class="view-switch" role="group" aria-label="Board view">
+              <button class="view-switch-button active" type="button" data-board-view="quest" aria-pressed="true">Quest</button>
+              <button class="view-switch-button" type="button" data-board-view="investigation" aria-pressed="false">Investigation</button>
+            </div>
+            <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
+            <button id="new-task-button" class="button primary" type="button">New task</button>
+          </div>
+        </header>
+
+        <main>
+          <section id="board-shell" class="board-shell" aria-live="polite">
+            <div id="board-loading" class="state-card">Loading board…</div>
+            <div id="board-empty" class="state-card hidden">
+              <div class="state-icon">＋</div>
+              <strong>No tasks yet</strong>
+              <span>Create a task to start this project.</span>
+              <button id="empty-new-task-button" class="button primary" type="button">Create first task</button>
+            </div>
+            <div id="project-empty" class="state-card hidden">
+              <div class="state-icon">◇</div>
+              <strong>No project yet</strong>
+              <span>Create a project to open your first board.</span>
+              <button id="empty-new-project-button" class="button primary" type="button">Create project</button>
+            </div>
+            <div id="kanban-board" class="kanban-board hidden"></div>
+            <div id="investigation-board" class="investigation-board hidden" aria-label="Investigation board">
+              <div id="investigation-canvas" class="investigation-canvas">
+                <svg id="investigation-edges" class="investigation-edges" aria-hidden="true"></svg>
+                <div id="investigation-nodes" class="investigation-nodes"></div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <aside id="task-drawer" class="task-drawer" aria-hidden="true">
+      <div class="drawer-header">
+        <div class="drawer-heading-copy">
+          <div id="drawer-status" class="status-kicker"></div>
+          <h2 id="drawer-title">Task details</h2>
+        </div>
+        <button id="close-drawer-button" class="icon-button" type="button" aria-label="Close task detail">×</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </aside>
+    <div id="drawer-scrim" class="drawer-scrim hidden"></div>
+
+    <dialog id="task-dialog" class="quest-dialog">
+      <form id="task-form" method="dialog">
+        <div class="dialog-header">
+          <div>
+            <div class="dialog-label">Task</div>
+            <h2 id="task-dialog-title">New task</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="task-dialog" aria-label="Close">×</button>
+        </div>
+        <input id="task-id" type="hidden" />
+        <label class="field wide">Title <input id="task-title" required maxlength="180" /></label>
+        <label class="field wide">Description <textarea id="task-description" rows="5"></textarea></label>
+        <div class="field-grid">
+          <label class="field">Status <select id="task-status"></select></label>
+          <label class="field">Priority <select id="task-priority"></select></label>
+        </div>
+        <label class="field wide">Tags <input id="task-tags" placeholder="api, ui, foundation" /></label>
+        <div class="dialog-actions">
+          <button class="button secondary" type="button" data-close-dialog="task-dialog">Cancel</button>
+          <button class="button primary" type="submit">Save task</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="project-dialog" class="quest-dialog small">
+      <form id="project-form" method="dialog">
+        <div class="dialog-header">
+          <div>
+            <div class="dialog-label">Project</div>
+            <h2>New project</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="project-dialog" aria-label="Close">×</button>
+        </div>
+        <label class="field wide">Name <input id="project-name" required maxlength="120" /></label>
+        <label class="field wide">Description <textarea id="project-description" rows="4"></textarea></label>
+        <div class="dialog-actions">
+          <button class="button secondary" type="button" data-close-dialog="project-dialog">Cancel</button>
+          <button class="button primary" type="submit">Create project</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

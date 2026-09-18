@@ -1,0 +1,26 @@
+{
+  "name": "questboard",
+  "version": "0.0.0",
+  "description": "Local-first shared work board for humans and multiple AI agents.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:web": "node --check web/app.js",
+    "test": "npm run build && node --test dist/tests/**/*.test.js",
+    "start": "node dist/src/server/main.js",
+    "start:tailnet": "node dist/src/server/main.js --tailnet",
+    "cli": "node dist/src/adapters/cli/main.js",
+    "mcp": "node dist/src/adapters/mcp/main.js",
+    "test:race": "npm run build && node dist/src/testing/claim-race-main.js",
+    "verify": "npm run typecheck && npm run check:web && npm test && npm run test:race"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

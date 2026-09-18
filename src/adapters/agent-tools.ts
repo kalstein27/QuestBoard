@@ -1,0 +1,468 @@
+import type {
+  ActivityType,
+  ActorRef,
+  ArtifactType,
+  RelationEntityType,
+  TaskPriority,
+  TaskStatus,
+} from "../core/domain.js";
+import { ARTIFACT_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
+import {
+  ClaimConflictError,
+  ClaimGenerationConflictError,
+  ClaimNotFoundError,
+  ClaimOwnershipError,
+  EntityNotFoundError,
+  MutationRequestConflictError,
+  RevisionConflictError,
+} from "../core/errors.js";
+import type {
+  CreateArtifactInput,
+  CreateRelationInput,
+  CreateTaskInput,
+  QuestBoardService,
+  UpdateTaskInput,
+} from "../application/quest-board-service.js";
+
+const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
+
+export interface QuestBoardAgentToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+const actorSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", minLength: 1, description: "Stable neutral actor id." },
+    provider: { type: "string", minLength: 1, description: "Neutral provider/client identifier." },
+    displayName: { type: "string" },
+  },
+  required: ["id", "provider"],
+} as const;
+
+export const QUESTBOARD_AGENT_TOOLS = [
+  {
+    name: "questboard_list_projects",
+    description: "List QuestBoard projects.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "questboard_list_tasks",
+    description: "List tasks, optionally filtered by project and status.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        status: { type: "string", enum: TASK_STATUSES },
+      },
+    },
+  },
+  {
+    name: "questboard_get_task",
+    description: "Read one task and its current claim.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_create_task",
+    description: "Create a task and record the neutral actor that created it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        status: { type: "string", enum: TASK_STATUSES },
+        priority: { type: "string", enum: TASK_PRIORITIES },
+        tags: { type: "array", items: { type: "string" } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_update_task",
+    description: "Update task fields and append the matching Activity entry.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1, description: "Optional strict-CAS compatibility check. Usually omit it." },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        status: { type: "string", enum: TASK_STATUSES },
+        priority: { type: "string", enum: TASK_PRIORITIES },
+        tags: { type: "array", items: { type: "string" } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_get_claim",
+    description: "Read the current active claim for a task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_claim_task",
+    description: "Claim a task as a cooperative coordination signal; claims do not block normal task mutations.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 }, requestId: { type: "string", minLength: 8, maxLength: 128 }, actor: actorSchema },
+      required: ["taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_release_task",
+    description: "Release a task claim owned by the supplied actor.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        claimId: { type: "string", minLength: 1, description: "Optional opaque claim identity for stale-release protection." },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_list_activity",
+    description: "List append-only Activity history for one task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_add_activity",
+    description: "Append a note or agent handoff Activity to one task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        type: { type: "string", enum: CLIENT_ACTIVITY_TYPES },
+        summary: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "type", "summary", "actor"],
+    },
+  },
+  {
+    name: "questboard_list_artifacts",
+    description: "List evidence artifacts attached to one task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_get_artifact",
+    description: "Read one evidence artifact.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { artifactId: { type: "string", minLength: 1 } },
+      required: ["artifactId"],
+    },
+  },
+  {
+    name: "questboard_add_artifact",
+    description: "Attach a file, URL, commit, screenshot, operation, log, or other evidence artifact to a task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        type: { type: "string", enum: ARTIFACT_TYPES },
+        title: { type: "string", minLength: 1 },
+        locator: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "type", "title", "locator", "actor"],
+    },
+  },
+  {
+    name: "questboard_list_relations",
+    description: "List Task/Artifact relations that touch one task or its attached artifacts.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_add_relation",
+    description: "Create a vendor-neutral directed relation between Task/Artifact endpoints in the same project.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fromType: { type: "string", enum: RELATION_ENTITY_TYPES },
+        fromId: { type: "string", minLength: 1 },
+        toType: { type: "string", enum: RELATION_ENTITY_TYPES },
+        toId: { type: "string", minLength: 1 },
+        kind: { type: "string", minLength: 1 },
+        label: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["fromType", "fromId", "toType", "toId", "kind", "actor"],
+    },
+  },
+] as const satisfies readonly QuestBoardAgentToolDefinition[];
+
+export type QuestBoardAgentToolName = (typeof QUESTBOARD_AGENT_TOOLS)[number]["name"];
+
+export function executeQuestBoardAgentTool(
+  service: QuestBoardService,
+  name: string,
+  input: unknown = {},
+): unknown {
+  const args = requireObject(input, "arguments");
+
+  switch (name) {
+    case "questboard_list_projects":
+      return { projects: service.listProjects() };
+    case "questboard_list_tasks": {
+      const projectId = optionalString(args, "projectId");
+      const status = optionalEnum(args, "status", TASK_STATUSES);
+      return {
+        tasks: service.listTasks({
+          ...(projectId !== undefined ? { projectId } : {}),
+          ...(status !== undefined ? { status } : {}),
+        }),
+      };
+    }
+    case "questboard_get_task": {
+      const taskId = requireString(args, "taskId");
+      return { task: service.getTask(taskId), claim: service.getTaskClaim(taskId) ?? null };
+    }
+    case "questboard_create_task": {
+      const inputValue: CreateTaskInput = {
+        projectId: requireString(args, "projectId"),
+        title: requireString(args, "title"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalEnumProperty(args, "status", TASK_STATUSES),
+        ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
+        ...optionalStringArrayProperty(args, "tags"),
+      };
+      return { task: service.createTask(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_update_task": {
+      const patch: UpdateTaskInput = {
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        ...optionalStringProperty(args, "title"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalEnumProperty(args, "status", TASK_STATUSES),
+        ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
+        ...optionalStringArrayProperty(args, "tags"),
+      };
+      return { task: service.updateTask(requireString(args, "taskId"), patch, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_get_claim": {
+      const taskId = requireString(args, "taskId");
+      return { claim: service.getTaskClaim(taskId) ?? null };
+    }
+    case "questboard_claim_task":
+      return { claim: service.claimTask(requireString(args, "taskId"), requireActor(args), mutationOptions(args)) };
+    case "questboard_release_task":
+      return {
+        claim: service.releaseTask(requireString(args, "taskId"), requireActor(args), {
+          ...mutationOptions(args),
+          ...optionalStringProperty(args, "claimId"),
+        }),
+      };
+    case "questboard_list_activity":
+      return { activities: service.listTaskActivity(requireString(args, "taskId")) };
+    case "questboard_add_activity":
+      return {
+        activity: service.appendTaskActivity(
+          requireString(args, "taskId"),
+          requireEnum(args, "type", CLIENT_ACTIVITY_TYPES),
+          requireString(args, "summary"),
+          requireActor(args),
+          mutationOptions(args),
+        ),
+      };
+    case "questboard_list_artifacts":
+      return { artifacts: service.listTaskArtifacts(requireString(args, "taskId")) };
+    case "questboard_get_artifact":
+      return { artifact: service.getArtifact(requireString(args, "artifactId")) };
+    case "questboard_add_artifact": {
+      const inputValue: CreateArtifactInput = {
+        taskId: requireString(args, "taskId"),
+        type: requireEnum(args, "type", ARTIFACT_TYPES) as ArtifactType,
+        title: requireString(args, "title"),
+        locator: requireString(args, "locator"),
+        ...optionalStringProperty(args, "description"),
+      };
+      return { artifact: service.createArtifact(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_list_relations":
+      return { relations: service.listTaskRelations(requireString(args, "taskId")) };
+    case "questboard_add_relation": {
+      const inputValue: CreateRelationInput = {
+        fromType: requireEnum(args, "fromType", RELATION_ENTITY_TYPES) as RelationEntityType,
+        fromId: requireString(args, "fromId"),
+        toType: requireEnum(args, "toType", RELATION_ENTITY_TYPES) as RelationEntityType,
+        toId: requireString(args, "toId"),
+        kind: requireString(args, "kind"),
+        ...optionalStringProperty(args, "label"),
+      };
+      return { relation: service.createRelation(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    default:
+      throw new TypeError(`Unknown QuestBoard tool: ${name}`);
+  }
+}
+
+export function describeQuestBoardError(error: unknown): { code: string; message: string } {
+  if (error instanceof EntityNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof ClaimConflictError) return { code: "claim_conflict", message: error.message };
+  if (error instanceof ClaimNotFoundError) return { code: "claim_not_found", message: error.message };
+  if (error instanceof ClaimOwnershipError) return { code: "claim_ownership", message: error.message };
+  if (error instanceof ClaimGenerationConflictError) return { code: "claim_changed", message: error.message };
+  if (error instanceof MutationRequestConflictError) return { code: "request_conflict", message: error.message };
+  if (error instanceof RevisionConflictError) return { code: "revision_conflict", message: error.message };
+  if (error instanceof TypeError) return { code: "bad_request", message: error.message };
+  return { code: "internal_error", message: "Internal error" };
+}
+
+function requireActor(args: Record<string, unknown>): ActorRef {
+  const actor = requireObject(args.actor, "actor");
+  const displayName = optionalString(actor, "displayName");
+  return {
+    id: requireString(actor, "id"),
+    provider: requireString(actor, "provider"),
+    ...(displayName !== undefined ? { displayName } : {}),
+  };
+}
+
+function requireObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireString(value: Record<string, unknown>, key: string): string {
+  const item = value[key];
+  if (typeof item !== "string" || !item.trim()) throw new TypeError(`${key} must be a non-empty string`);
+  return item;
+}
+
+function requirePositiveInteger(value: Record<string, unknown>, key: string): number {
+  const item = value[key];
+  if (!Number.isSafeInteger(item) || (item as number) < 1) {
+    throw new TypeError(`${key} must be a positive integer`);
+  }
+  return item as number;
+}
+
+function optionalPositiveIntegerProperty<K extends string>(
+  value: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, number>> {
+  if (!(key in value) || value[key] === undefined) return {};
+  return { [key]: requirePositiveInteger(value, key) } as Partial<Record<K, number>>;
+}
+
+function mutationOptions(args: Record<string, unknown>): { requestId?: string } {
+  const requestId = optionalString(args, "requestId");
+  return requestId === undefined ? {} : { requestId };
+}
+
+function optionalString(value: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in value)) return undefined;
+  const item = value[key];
+  if (typeof item !== "string") throw new TypeError(`${key} must be a string`);
+  const normalized = item.trim();
+  return normalized || undefined;
+}
+
+function optionalStringProperty<K extends string>(
+  value: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, string>> {
+  if (!(key in value)) return {};
+  const item = value[key];
+  if (typeof item !== "string") throw new TypeError(`${key} must be a string`);
+  return { [key]: item } as Partial<Record<K, string>>;
+}
+
+function optionalStringArrayProperty<K extends string>(
+  value: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, string[]>> {
+  if (!(key in value)) return {};
+  const item = value[key];
+  if (!Array.isArray(item) || !item.every((entry) => typeof entry === "string")) {
+    throw new TypeError(`${key} must be an array of strings`);
+  }
+  return { [key]: item as string[] } as Partial<Record<K, string[]>>;
+}
+
+function requireEnum<const T extends readonly string[]>(
+  value: Record<string, unknown>,
+  key: string,
+  values: T,
+): T[number] {
+  const item = requireString(value, key);
+  return parseEnum(item, key, values);
+}
+
+function optionalEnum<const T extends readonly string[]>(
+  value: Record<string, unknown>,
+  key: string,
+  values: T,
+): T[number] | undefined {
+  if (!(key in value)) return undefined;
+  const item = value[key];
+  if (typeof item !== "string") throw new TypeError(`${key} must be a string`);
+  return parseEnum(item, key, values);
+}
+
+function optionalEnumProperty<K extends string, const T extends readonly string[]>(
+  value: Record<string, unknown>,
+  key: K,
+  values: T,
+): Partial<Record<K, T[number]>> {
+  const item = optionalEnum(value, key, values);
+  return item === undefined ? {} : ({ [key]: item } as Partial<Record<K, T[number]>>);
+}
+
+function parseEnum<const T extends readonly string[]>(item: string, key: string, values: T): T[number] {
+  if (!(values as readonly string[]).includes(item)) {
+    throw new TypeError(`${key} must be one of: ${values.join(", ")}`);
+  }
+  return item as T[number];
+}
