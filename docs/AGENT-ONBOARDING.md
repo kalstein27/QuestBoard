@@ -42,7 +42,7 @@ Use the compiled MCP entry point. This one process serves both the stdio MCP ada
 }
 ```
 
-With the MCP process alive, the Web UI is available at `http://127.0.0.1:4317` by default. Set `QUESTBOARD_TAILNET=1` or pass `--tailnet` when the Web UI must be reachable on the machine's Tailscale IPv4. MCP protocol output stays on stdout; runtime diagnostics stay on stderr.
+With the MCP process alive, the Web UI is available at `http://127.0.0.1:4317` by default. Set `QUESTBOARD_HOST` to the machine's private LAN IP when another device on the same LAN needs browser access; `0.0.0.0` is supported but exposes every IPv4 interface. Set `QUESTBOARD_TAILNET=1` or pass `--tailnet` when the Web UI must be reachable on the machine's Tailscale IPv4. Tailnet mode takes precedence over `QUESTBOARD_HOST`. MCP protocol output stays on stdout; runtime diagnostics stay on stderr. See `docs/NETWORK-ACCESS.md` for network and firewall guidance.
 
 ### CLI
 

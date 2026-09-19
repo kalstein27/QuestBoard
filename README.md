@@ -74,11 +74,20 @@ The server binds to `127.0.0.1` by default. The Web UI lets you create Projects 
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `QUESTBOARD_DB_PATH` | SQLite database path | `.questboard/questboard.sqlite` |
+| `QUESTBOARD_HOST` | HTTP/Web bind host | `127.0.0.1` |
 | `QUESTBOARD_PORT` | HTTP/Web port | `4317` |
 | `QUESTBOARD_TAILNET` | Set to `1` to use Tailnet binding | unset |
 | `QUESTBOARD_ACTOR_ID` | Default CLI actor ID | `cli:local` |
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
+
+For access from another device on the same LAN, bind to the host machine's private LAN address:
+
+```bash
+QUESTBOARD_HOST=192.168.0.20 npm start
+```
+
+Then open `http://192.168.0.20:4317` from the other device. `QUESTBOARD_HOST=0.0.0.0` also works, but it listens on every IPv4 interface and is broader than necessary. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) for LAN, firewall, C2CT-managed MCP, Tailnet, and public-Internet guidance.
 
 For Tailnet-only access from another device signed into the same Tailscale network:
 
@@ -86,7 +95,7 @@ For Tailnet-only access from another device signed into the same Tailscale netwo
 npm run start:tailnet
 ```
 
-QuestBoard selects an active Tailscale IPv4 address in `100.64.0.0/10` and binds specifically to that address. This is private-network reachability, **not authentication**.
+QuestBoard selects an active Tailscale IPv4 address in `100.64.0.0/10` and binds specifically to that address. Tailnet mode takes precedence over `QUESTBOARD_HOST`. This is private-network reachability, **not authentication**.
 
 ## Concurrency model: lockless outside, strict inside
 
@@ -166,7 +175,7 @@ An MCP client can launch the compiled entry point directly:
 }
 ```
 
-While that MCP process is running, open `http://127.0.0.1:4317` in a browser. MCP JSON-RPC remains exclusively on stdout; Web/API startup and diagnostic messages go to stderr so they cannot corrupt the stdio protocol. Set `QUESTBOARD_TAILNET=1` (or launch the entry point with `--tailnet`) to bind the bundled Web/API server to the machine's Tailscale IPv4 instead of localhost. Tailnet reachability is not authentication.
+While that MCP process is running, open `http://127.0.0.1:4317` in a browser. MCP JSON-RPC remains exclusively on stdout; Web/API startup and diagnostic messages go to stderr so they cannot corrupt the stdio protocol. Set `QUESTBOARD_HOST` to a specific LAN IP (preferred) or `0.0.0.0` when the bundled Web/API must be reachable from another device on the same LAN. Set `QUESTBOARD_TAILNET=1` (or launch the entry point with `--tailnet`) to bind to the machine's Tailscale IPv4 instead. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the listener beyond localhost.
 
 The adapter exposes:
 

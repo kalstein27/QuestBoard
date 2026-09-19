@@ -448,7 +448,7 @@ CLI는 자동화/디버깅/비-MCP 에이전트용 얇은 surface다.
 
 ## 17. MCP 방향
 
-현재 MCP adapter는 stdio JSON-RPC surface이며, MCP executable이 같은 프로세스에서 Web UI/API runtime도 함께 소유한다. 기본 브라우저 endpoint는 `127.0.0.1:4317`이고 Tailnet bind는 명시적으로 선택한다.
+현재 MCP adapter는 stdio JSON-RPC surface이며, MCP executable이 같은 프로세스에서 Web UI/API runtime도 함께 소유한다. 기본 브라우저 endpoint는 `127.0.0.1:4317`이고, 같은 LAN 노출은 `QUESTBOARD_HOST`, Tailnet bind는 `QUESTBOARD_TAILNET=1` 또는 `--tailnet`으로 명시적으로 선택한다. 공개 인터넷 직접 노출은 여전히 지원 범위가 아니다.
 
 지원:
 - initialize

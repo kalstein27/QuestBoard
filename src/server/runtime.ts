@@ -11,6 +11,7 @@ export const DEFAULT_QUESTBOARD_PORT = 4317;
 
 export interface QuestBoardHttpRuntimeOptions {
   port?: number;
+  host?: string;
   tailnetMode?: boolean;
   webRoot?: string;
   log?: (message: string) => void;
@@ -20,7 +21,7 @@ export interface QuestBoardHttpRuntime {
   server: Server;
   host: string;
   port: number;
-  scope: "localhost" | "tailnet";
+  scope: "localhost" | "network" | "tailnet";
   url: string;
   close(): Promise<void>;
 }
@@ -30,7 +31,8 @@ export async function startQuestBoardHttpRuntime(
   options: QuestBoardHttpRuntimeOptions = {},
 ): Promise<QuestBoardHttpRuntime> {
   const tailnetMode = options.tailnetMode ?? false;
-  const host = tailnetMode ? requireTailscaleIpv4() : LOCAL_HOST;
+  const configuredHost = options.host ?? process.env.QUESTBOARD_HOST;
+  const host = tailnetMode ? requireTailscaleIpv4() : parseQuestBoardHost(configuredHost);
   const requestedPort = options.port ?? parseQuestBoardPort(process.env.QUESTBOARD_PORT);
   validateListenPort(requestedPort);
 
@@ -40,8 +42,8 @@ export async function startQuestBoardHttpRuntime(
 
   const address = server.address() as AddressInfo;
   const port = address.port;
-  const scope = tailnetMode ? "tailnet" : "localhost";
-  const url = `http://${host}:${port}`;
+  const scope = tailnetMode ? "tailnet" : isLoopbackHost(host) ? "localhost" : "network";
+  const url = `http://${formatHostForUrl(host)}:${port}`;
   options.log?.(`QuestBoard Web/API listening on ${url} (${scope})`);
 
   return {
@@ -63,6 +65,13 @@ export function parseQuestBoardPort(value: string | undefined): number {
   return port;
 }
 
+export function parseQuestBoardHost(value: string | undefined): string {
+  if (value === undefined) return LOCAL_HOST;
+  const host = value.trim();
+  if (!host) throw new TypeError("QUESTBOARD_HOST must not be empty");
+  return host;
+}
+
 function validateListenPort(port: number): void {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new TypeError("QuestBoard listen port must be an integer between 0 and 65535");
@@ -75,6 +84,14 @@ function requireTailscaleIpv4(): string {
     throw new Error("No active Tailscale IPv4 address was found. Connect Tailscale before using Tailnet mode.");
   }
   return address;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function formatHostForUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 async function listen(server: Server, port: number, host: string): Promise<void> {

@@ -16,7 +16,9 @@ test("MCP entrypoint also serves the QuestBoard Web UI/API without contaminating
     env: {
       ...process.env,
       QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
+      QUESTBOARD_HOST: "127.0.0.1",
       QUESTBOARD_PORT: String(port),
+      QUESTBOARD_TAILNET: "0",
       QUESTBOARD_CONCURRENCY_LOG: "0",
     },
     stdio: ["pipe", "pipe", "pipe"],
@@ -59,6 +61,42 @@ test("MCP entrypoint also serves the QuestBoard Web UI/API without contaminating
     assert.equal(exitCode, 0);
 
     await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+  } finally {
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("MCP entrypoint can explicitly expose the bundled Web/API runtime to the local network", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-mcp-lan-runtime-"));
+  const port = await findFreePort();
+  const child = spawn(process.execPath, ["dist/src/adapters/mcp/main.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
+      QUESTBOARD_HOST: "0.0.0.0",
+      QUESTBOARD_PORT: String(port),
+      QUESTBOARD_TAILNET: "0",
+      QUESTBOARD_CONCURRENCY_LOG: "0",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  try {
+    await withTimeout(
+      waitForText(child.stderr, `QuestBoard Web/API listening on http://0.0.0.0:${port} (network)`),
+      STARTUP_TIMEOUT_MS,
+      "MCP network Web/API runtime did not start",
+    );
+
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
+
+    child.stdin.end();
+    const exitCode = await withTimeout(waitForExit(child), STARTUP_TIMEOUT_MS, "MCP network runtime did not exit");
+    assert.equal(exitCode, 0);
   } finally {
     if (child.exitCode === null) child.kill("SIGTERM");
     await rm(tempRoot, { recursive: true, force: true });
