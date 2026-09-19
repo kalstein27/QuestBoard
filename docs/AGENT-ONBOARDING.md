@@ -27,19 +27,22 @@ Do not commit the live database to Git.
 
 ## 2. Choose an adapter
 
-### MCP stdio
+### MCP stdio + Web/API runtime
 
-Use the compiled MCP entry point:
+Use the compiled MCP entry point. This one process serves both the stdio MCP adapter and the browser-facing Web/API runtime:
 
 ```json
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
   "env": {
-    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite"
+    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite",
+    "QUESTBOARD_PORT": "4317"
   }
 }
 ```
+
+With the MCP process alive, the Web UI is available at `http://127.0.0.1:4317` by default. Set `QUESTBOARD_TAILNET=1` or pass `--tailnet` when the Web UI must be reachable on the machine's Tailscale IPv4. MCP protocol output stays on stdout; runtime diagnostics stay on stderr.
 
 ### CLI
 
@@ -54,9 +57,9 @@ export QUESTBOARD_ACTOR_ID=agent:my-worker
 export QUESTBOARD_ACTOR_PROVIDER=my-agent
 ```
 
-### HTTP
+### Standalone HTTP
 
-Start the server:
+`npm start` remains available when an HTTP/Web-only process is desired without MCP:
 
 ```bash
 npm start

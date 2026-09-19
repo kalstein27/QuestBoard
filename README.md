@@ -147,7 +147,7 @@ Run `npm run cli -- help` for the command summary.
 
 ## MCP
 
-QuestBoard includes a dependency-free MCP stdio adapter. Build it first:
+QuestBoard includes a dependency-free MCP stdio adapter. The MCP executable is also the default QuestBoard runtime: when an MCP client launches it, the same process starts the Web UI/API on `127.0.0.1:4317` unless configured otherwise. Build it first:
 
 ```bash
 npm run build
@@ -160,10 +160,13 @@ An MCP client can launch the compiled entry point directly:
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
   "env": {
-    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite"
+    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite",
+    "QUESTBOARD_PORT": "4317"
   }
 }
 ```
+
+While that MCP process is running, open `http://127.0.0.1:4317` in a browser. MCP JSON-RPC remains exclusively on stdout; Web/API startup and diagnostic messages go to stderr so they cannot corrupt the stdio protocol. Set `QUESTBOARD_TAILNET=1` (or launch the entry point with `--tailnet`) to bind the bundled Web/API server to the machine's Tailscale IPv4 instead of localhost. Tailnet reachability is not authentication.
 
 The adapter exposes:
 
