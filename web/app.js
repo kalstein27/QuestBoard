@@ -872,7 +872,7 @@ async function api(path, options = {}) {
     headers.set("x-questboard-actor-provider", state.actor.provider);
   }
   if (method !== "GET" && method !== "HEAD") {
-    headers.set("x-questboard-request-id", `web:${crypto.randomUUID()}`);
+    headers.set("x-questboard-request-id", createWebRequestId());
   }
   if (options.body !== undefined) headers.set("content-type", "application/json");
   const response = await fetch(path, {
@@ -885,6 +885,24 @@ async function api(path, options = {}) {
     throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
   }
   return payload;
+}
+
+function createWebRequestId() {
+  const browserCrypto = globalThis.crypto;
+  if (typeof browserCrypto?.randomUUID === "function") {
+    return `web:${browserCrypto.randomUUID()}`;
+  }
+
+  if (typeof browserCrypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    browserCrypto.getRandomValues(bytes);
+    const randomHex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `web:${randomHex}`;
+  }
+
+  const timestamp = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2);
+  return `web:${timestamp}:${randomPart}`;
 }
 
 function showBoardLoading(show) {
