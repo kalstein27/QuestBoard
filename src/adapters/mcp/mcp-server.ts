@@ -18,6 +18,15 @@ const MUTATING_TOOLS = new Set([
   "questboard_add_activity",
   "questboard_add_artifact",
   "questboard_add_relation",
+  "questboard_create_investigation_node",
+  "questboard_update_investigation_node",
+  "questboard_add_investigation_item",
+  "questboard_update_investigation_item",
+  "questboard_link_task_to_investigation_item",
+  "questboard_unlink_task_from_investigation_item",
+  "questboard_create_task_for_investigation_item",
+  "questboard_link_investigation_item_to_node",
+  "questboard_unlink_investigation_item_from_node",
 ]);
 
 interface JsonRpcRequest {

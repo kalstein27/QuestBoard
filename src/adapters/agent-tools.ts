@@ -12,16 +12,23 @@ import {
   ClaimGenerationConflictError,
   ClaimNotFoundError,
   ClaimOwnershipError,
+  EntityRevisionConflictError,
   EntityNotFoundError,
   MutationRequestConflictError,
   RevisionConflictError,
 } from "../core/errors.js";
 import type {
   CreateArtifactInput,
+  CreateInvestigationItemInput,
+  CreateInvestigationItemLinkInput,
+  CreateInvestigationLinkedTaskInput,
+  CreateInvestigationNodeInput,
   CreateProjectInput,
   CreateRelationInput,
   CreateTaskInput,
   QuestBoardService,
+  UpdateInvestigationItemInput,
+  UpdateInvestigationNodeInput,
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
 
@@ -255,6 +262,164 @@ export const QUESTBOARD_AGENT_TOOLS = [
       required: ["fromType", "fromId", "toType", "toId", "kind", "actor"],
     },
   },
+  {
+    name: "questboard_get_investigation_graph",
+    description: "Read the project flow graph: Investigation Nodes, Items, Item-to-Node flow links, Item-to-Task links, canonical Tasks, and positions.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { projectId: { type: "string", minLength: 1 } },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_create_investigation_node",
+    description: "Create a standalone Investigation Node representing a project flow, component, responsibility, idea, or TODO cluster.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        kind: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_update_investigation_node",
+    description: "Update an Investigation Node title, description, or kind.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        nodeId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        kind: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["nodeId", "actor"],
+    },
+  },
+  {
+    name: "questboard_add_investigation_item",
+    description: "Add a titled, described Item inside an Investigation Node.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        nodeId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["nodeId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_update_investigation_item",
+    description: "Update an Investigation Item title or description.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        itemId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["itemId", "actor"],
+    },
+  },
+  {
+    name: "questboard_link_task_to_investigation_item",
+    description: "Link an existing canonical QuestBoard Task to an Investigation Item without duplicating the Task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        itemId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["itemId", "taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_unlink_task_from_investigation_item",
+    description: "Remove an Investigation Item-to-Task link without deleting the canonical Task.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        itemId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["itemId", "taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_create_task_for_investigation_item",
+    description: "Create a canonical QuestBoard Task and immediately link it to an Investigation Item.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        itemId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        status: { type: "string", enum: TASK_STATUSES },
+        priority: { type: "string", enum: TASK_PRIORITIES },
+        tags: { type: "array", items: { type: "string" } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["itemId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_link_investigation_item_to_node",
+    description: "Create a directed project-flow link from one Investigation Item to another Investigation Node.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fromItemId: { type: "string", minLength: 1 },
+        toNodeId: { type: "string", minLength: 1 },
+        label: { type: "string" },
+        kind: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["fromItemId", "toNodeId", "actor"],
+    },
+  },
+  {
+    name: "questboard_unlink_investigation_item_from_node",
+    description: "Remove one Investigation Item-to-Node flow link by link id.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        linkId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["linkId", "actor"],
+    },
+  },
 ] as const satisfies readonly QuestBoardAgentToolDefinition[];
 
 export type QuestBoardAgentToolName = (typeof QUESTBOARD_AGENT_TOOLS)[number]["name"];
@@ -365,6 +530,75 @@ export function executeQuestBoardAgentTool(
       };
       return { relation: service.createRelation(inputValue, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_get_investigation_graph":
+      return service.getInvestigationGraph(requireString(args, "projectId"));
+    case "questboard_create_investigation_node": {
+      const inputValue: CreateInvestigationNodeInput = {
+        projectId: requireString(args, "projectId"),
+        title: requireString(args, "title"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalStringProperty(args, "kind"),
+      };
+      return { node: service.createInvestigationNode(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_update_investigation_node": {
+      const patch: UpdateInvestigationNodeInput = {
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        ...optionalStringProperty(args, "title"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalStringProperty(args, "kind"),
+      };
+      return { node: service.updateInvestigationNode(requireString(args, "nodeId"), patch, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_add_investigation_item": {
+      const inputValue: CreateInvestigationItemInput = {
+        nodeId: requireString(args, "nodeId"),
+        title: requireString(args, "title"),
+        ...optionalStringProperty(args, "description"),
+      };
+      return { item: service.createInvestigationItem(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_update_investigation_item": {
+      const patch: UpdateInvestigationItemInput = {
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        ...optionalStringProperty(args, "title"),
+        ...optionalStringProperty(args, "description"),
+      };
+      return { item: service.updateInvestigationItem(requireString(args, "itemId"), patch, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_link_task_to_investigation_item":
+      return {
+        link: service.linkTaskToInvestigationItem(
+          requireString(args, "itemId"), requireString(args, "taskId"), requireActor(args), mutationOptions(args),
+        ),
+      };
+    case "questboard_unlink_task_from_investigation_item":
+      service.unlinkTaskFromInvestigationItem(
+        requireString(args, "itemId"), requireString(args, "taskId"), requireActor(args), mutationOptions(args),
+      );
+      return { removed: true };
+    case "questboard_create_task_for_investigation_item": {
+      const inputValue: CreateInvestigationLinkedTaskInput = {
+        title: requireString(args, "title"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalEnumProperty(args, "status", TASK_STATUSES),
+        ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
+        ...optionalStringArrayProperty(args, "tags"),
+      };
+      return service.createTaskForInvestigationItem(requireString(args, "itemId"), inputValue, requireActor(args), mutationOptions(args));
+    }
+    case "questboard_link_investigation_item_to_node": {
+      const inputValue: CreateInvestigationItemLinkInput = {
+        fromItemId: requireString(args, "fromItemId"),
+        toNodeId: requireString(args, "toNodeId"),
+        ...optionalStringProperty(args, "label"),
+        ...optionalStringProperty(args, "kind"),
+      };
+      return { link: service.createInvestigationItemLink(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_unlink_investigation_item_from_node":
+      service.removeInvestigationItemLink(requireString(args, "linkId"), requireActor(args), mutationOptions(args));
+      return { removed: true };
     default:
       throw new TypeError(`Unknown QuestBoard tool: ${name}`);
   }
@@ -378,6 +612,7 @@ export function describeQuestBoardError(error: unknown): { code: string; message
   if (error instanceof ClaimGenerationConflictError) return { code: "claim_changed", message: error.message };
   if (error instanceof MutationRequestConflictError) return { code: "request_conflict", message: error.message };
   if (error instanceof RevisionConflictError) return { code: "revision_conflict", message: error.message };
+  if (error instanceof EntityRevisionConflictError) return { code: "revision_conflict", message: error.message };
   if (error instanceof TypeError) return { code: "bad_request", message: error.message };
   return { code: "internal_error", message: "Internal error" };
 }

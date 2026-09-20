@@ -75,6 +75,15 @@ button { color: inherit; }
 .view-switch { display: flex; padding: 2px; border: 1px solid var(--line-strong); border-radius: 8px; background: #0c0f13; }
 .view-switch-button { border: 0; border-radius: 5px; padding: 6px 8px; background: transparent; color: #737c88; font-size: 9px; font-weight: 750; cursor: pointer; }
 .view-switch-button.active { background: var(--surface-3); color: #e5e8ed; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.investigation-controls { position: sticky; top: 8px; left: 8px; z-index: 12; width: max-content; display: flex; align-items: center; height: 28px; margin: 8px 0 -36px 8px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(12,15,19,.94); box-shadow: 0 5px 18px rgba(0,0,0,.28); backdrop-filter: blur(10px); }
+.investigation-control-button, .investigation-zoom-label { height: 22px; border: 0; border-radius: 5px; background: transparent; color: #a0a8b3; cursor: pointer; }
+.investigation-add-node { height: 22px; padding: 0 7px; border: 0; border-radius: 5px; background: var(--accent-soft); color: #aeb7ff; font-size: 9px; font-weight: 800; cursor: pointer; }
+.investigation-add-node:hover { background: rgba(116,134,255,.2); color: #d5daff; }
+.investigation-control-button { width: 24px; padding: 0; font-size: 14px; line-height: 1; }
+.investigation-zoom-label { min-width: 42px; padding: 0 5px; font-size: 9px; font-weight: 750; }
+.investigation-control-button:hover, .investigation-zoom-label:hover { background: var(--surface-3); color: #e5e8ed; }
+.investigation-control-button:disabled { opacity: .32; cursor: default; background: transparent; }
+.investigation-control-divider { width: 1px; height: 14px; margin: 0 2px; background: var(--line-strong); }
 
 select, input, textarea {
   background: #0d1014; color: var(--text); border: 1px solid var(--line-strong);
@@ -121,7 +130,7 @@ main { min-width: 0; }
   background-size: 24px 24px;
   overscroll-behavior: contain;
 }
-.investigation-canvas { position: relative; min-width: 100%; min-height: 100%; }
+.investigation-canvas { position: relative; min-width: 100%; min-height: 100%; will-change: transform; }
 .investigation-edges { position: absolute; inset: 0; z-index: 1; overflow: visible; pointer-events: none; }
 .investigation-nodes { position: absolute; inset: 0; z-index: 2; }
 .investigation-node {
@@ -139,6 +148,38 @@ main { min-width: 0; }
 .investigation-task.status-border-review { border-left-color: #b978bd; }
 .investigation-task.status-border-done { border-left-color: #63ad79; }
 .investigation-artifact { border-color: rgba(85,167,161,.4); background: rgba(16,27,29,.96); }
+.investigation-graph-node { width: 330px; min-height: 130px; padding: 0; gap: 0; overflow: hidden; border-color: #354052; background: rgba(17,21,27,.98); }
+.investigation-graph-node > .investigation-node-head { padding: 12px 12px 8px; }
+.investigation-graph-identity { min-width: 0; display: grid; gap: 4px; }
+.graph-node-type { color: #98a4ff; }
+.investigation-graph-description { margin: 0; padding: 0 12px 11px; color: #929aa6; font-size: 10px; line-height: 1.45; user-select: text; }
+.graph-icon-button, .graph-item-action, .graph-add-button { border: 1px solid #2e3540; background: #11151a; color: #9aa3af; cursor: pointer; }
+.graph-icon-button { width: 25px; height: 25px; border-radius: 6px; }
+.investigation-item-list { display: grid; border-top: 1px solid #252c35; }
+.investigation-item { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #252c35; background: rgba(10,13,17,.32); user-select: text; }
+.investigation-item:hover { background: rgba(116,134,255,.035); }
+.investigation-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.investigation-item-title { min-width: 0; font-size: 10px; line-height: 1.35; }
+.investigation-item-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+.graph-item-action { min-height: 20px; padding: 2px 5px; border-radius: 5px; font-size: 8px; }
+.graph-item-action:hover, .graph-icon-button:hover, .graph-add-button:hover { border-color: #4a5565; color: #e1e5eb; background: #181d24; }
+.investigation-item-description { margin: 0; color: #76818e; font-size: 9px; line-height: 1.45; }
+.investigation-item-empty { padding: 14px 12px; color: #56606d; font-size: 9px; text-align: center; border-bottom: 1px solid #252c35; }
+.investigation-task-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.investigation-task-chip { max-width: 100%; min-width: 0; display: inline-flex; align-items: center; gap: 2px; padding: 3px 4px 3px 6px; border: 1px solid #2e3540; border-radius: 6px; background: #11151a; color: #9aa3af; font-size: 8px; }
+.investigation-task-chip:hover { border-color: #4a5565; color: #eef1f5; }
+.investigation-task-chip-main { min-width: 0; max-width: 250px; display: inline-flex; align-items: center; gap: 5px; padding: 1px 2px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.investigation-task-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.investigation-task-chip-priority { color: #6e7885; font-size: 7px; text-transform: uppercase; }
+.investigation-task-chip-claim { padding: 1px 3px; border-radius: 4px; background: rgba(116,134,255,.12); color: #9ba7ff; font-size: 7px; }
+.investigation-link-remove { flex: 0 0 auto; padding: 0 3px; border: 0; background: transparent; color: #59616c; font-size: 11px; line-height: 1; cursor: pointer; }
+.investigation-link-remove:hover { color: #e57b76; }
+.investigation-item-links { display: grid; gap: 3px; color: #8090d9; font-size: 8px; line-height: 1.35; }
+.investigation-item-link-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.investigation-item-link-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-add-button { margin: 9px 12px 11px; padding: 7px 9px; border-style: dashed; border-radius: 6px; font-size: 9px; }
+.investigation-flow-line { stroke: rgba(133,148,255,.72); stroke-width: 1.8; }
+.investigation-flow-label { fill: #9da8ff; }
 .investigation-node-head, .investigation-node-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .investigation-node-type { color: #818a96; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .investigation-node-type.evidence-node-type { color: #79bdb8; }

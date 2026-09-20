@@ -1,4 +1,17 @@
-import type { Activity, Artifact, BoardNodePosition, Claim, Project, Relation, Task, TaskStatus } from "../core/domain.js";
+import type {
+  Activity,
+  Artifact,
+  BoardNodePosition,
+  Claim,
+  InvestigationItem,
+  InvestigationItemLink,
+  InvestigationItemTaskLink,
+  InvestigationNode,
+  Project,
+  Relation,
+  Task,
+  TaskStatus,
+} from "../core/domain.js";
 
 export interface MutationRequest {
   requestId: string;
@@ -32,6 +45,7 @@ export interface QuestBoardRepository {
   updateTask(task: Task, activity: Activity, expectedRevision: number): void;
 
   getClaim(taskId: string): Claim | undefined;
+  listProjectClaims(projectId: string): Claim[];
   claimTask(claim: Claim, activity: Activity): Claim;
   releaseClaim(taskId: string, agentId: string, claimId: string, releasedAt: string, activity: Activity): Claim;
 
@@ -46,6 +60,25 @@ export interface QuestBoardRepository {
   createRelation(relation: Relation, activity: Activity): void;
   listTaskRelations(taskId: string): Relation[];
   listProjectRelations(projectId: string): Relation[];
+
+  createInvestigationNode(node: InvestigationNode): void;
+  getInvestigationNode(nodeId: string): InvestigationNode | undefined;
+  listInvestigationNodes(projectId: string): InvestigationNode[];
+  updateInvestigationNode(node: InvestigationNode, expectedRevision: number): void;
+
+  createInvestigationItem(item: InvestigationItem): void;
+  getInvestigationItem(itemId: string): InvestigationItem | undefined;
+  listInvestigationItems(projectId: string): InvestigationItem[];
+  listInvestigationNodeItems(nodeId: string): InvestigationItem[];
+  updateInvestigationItem(item: InvestigationItem, expectedRevision: number): void;
+
+  createInvestigationItemLink(link: InvestigationItemLink): void;
+  listInvestigationItemLinks(projectId: string): InvestigationItemLink[];
+  deleteInvestigationItemLink(linkId: string): void;
+
+  createInvestigationItemTaskLink(link: InvestigationItemTaskLink): InvestigationItemTaskLink;
+  listInvestigationItemTaskLinks(projectId: string): InvestigationItemTaskLink[];
+  deleteInvestigationItemTaskLink(itemId: string, taskId: string): void;
 
   listBoardPositions(projectId: string): BoardNodePosition[];
   upsertBoardPosition(position: BoardNodePosition): BoardNodePosition;

@@ -5,8 +5,13 @@ import type {
   ActorRef,
   Artifact,
   ArtifactType,
+  BoardEntityType,
   BoardNodePosition,
   Claim,
+  InvestigationItem,
+  InvestigationItemLink,
+  InvestigationItemTaskLink,
+  InvestigationNode,
   Project,
   ProjectStatus,
   Relation,
@@ -20,6 +25,7 @@ import {
   ClaimGenerationConflictError,
   ClaimNotFoundError,
   ClaimOwnershipError,
+  EntityRevisionConflictError,
   EntityNotFoundError,
   MutationRequestConflictError,
   RevisionConflictError,
@@ -87,10 +93,58 @@ export interface CreateRelationInput {
 }
 
 export interface SetBoardPositionInput {
-  entityType: RelationEntityType;
+  entityType: BoardEntityType;
   entityId: string;
   x: number;
   y: number;
+}
+
+export interface CreateInvestigationNodeInput {
+  projectId: string;
+  title: string;
+  description?: string;
+  kind?: string;
+}
+
+export interface UpdateInvestigationNodeInput {
+  expectedRevision?: number;
+  title?: string;
+  description?: string;
+  kind?: string;
+}
+
+export interface CreateInvestigationItemInput {
+  nodeId: string;
+  title: string;
+  description?: string;
+}
+
+export interface UpdateInvestigationItemInput {
+  expectedRevision?: number;
+  title?: string;
+  description?: string;
+  sortOrder?: number;
+}
+
+export interface CreateInvestigationItemLinkInput {
+  fromItemId: string;
+  toNodeId: string;
+  label?: string;
+  kind?: string;
+}
+
+export type CreateInvestigationLinkedTaskInput = Omit<CreateTaskInput, "projectId">;
+
+export interface InvestigationGraphSnapshot {
+  nodes: InvestigationNode[];
+  items: InvestigationItem[];
+  itemLinks: InvestigationItemLink[];
+  itemTaskLinks: InvestigationItemTaskLink[];
+  tasks: Task[];
+  claims: Claim[];
+  artifacts: Artifact[];
+  relations: Relation[];
+  positions: BoardNodePosition[];
 }
 
 type Now = () => string;
@@ -500,6 +554,201 @@ export class QuestBoardService {
     return this.repository.listProjectRelations(projectId);
   }
 
+  createInvestigationNode(input: CreateInvestigationNodeInput, actor: ActorRef, options: MutationOptions = {}): InvestigationNode {
+    return this.runMutation("investigation.node.create", actor, options, input, undefined, () => {
+      this.getProject(input.projectId);
+      const timestamp = this.now();
+      const kind = input.kind?.trim();
+      const node: InvestigationNode = {
+        id: this.newId(),
+        projectId: input.projectId,
+        title: requiredText(input.title, "Investigation node title"),
+        description: input.description?.trim() ?? "",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 1,
+        ...(kind ? { kind } : {}),
+      };
+      this.repository.createInvestigationNode(node);
+      return node;
+    });
+  }
+
+  getInvestigationNode(nodeId: string): InvestigationNode {
+    const node = this.repository.getInvestigationNode(nodeId);
+    if (!node) throw new EntityNotFoundError("InvestigationNode", nodeId);
+    return node;
+  }
+
+  listInvestigationNodes(projectId: string): InvestigationNode[] {
+    this.getProject(projectId);
+    return this.repository.listInvestigationNodes(projectId);
+  }
+
+  updateInvestigationNode(nodeId: string, patch: UpdateInvestigationNodeInput, actor: ActorRef, options: MutationOptions = {}): InvestigationNode {
+    const explicitRevision = patch.expectedRevision === undefined ? undefined : requireRevision(patch.expectedRevision);
+    return this.runMutation("investigation.node.update", actor, options, { nodeId, patch }, undefined, () => {
+      for (let attempt = 1; attempt <= MAX_INTERNAL_UPDATE_ATTEMPTS; attempt += 1) {
+        const current = this.getInvestigationNode(nodeId);
+        if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+          throw new EntityRevisionConflictError("InvestigationNode", nodeId, explicitRevision, current.revision);
+        }
+        const kind = patch.kind !== undefined ? patch.kind.trim() : current.kind;
+        const updated: InvestigationNode = {
+          ...current,
+          ...(patch.title !== undefined ? { title: requiredText(patch.title, "Investigation node title") } : {}),
+          ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
+          updatedAt: this.now(),
+          revision: current.revision + 1,
+          ...(kind ? { kind } : {}),
+        };
+        if (!kind) delete updated.kind;
+        try {
+          this.repository.updateInvestigationNode(updated, explicitRevision ?? current.revision);
+          return updated;
+        } catch (error) {
+          if (!(error instanceof EntityRevisionConflictError) || explicitRevision !== undefined || attempt === MAX_INTERNAL_UPDATE_ATTEMPTS) throw error;
+        }
+      }
+      throw new Error("Investigation node update retry loop exhausted");
+    });
+  }
+
+  createInvestigationItem(input: CreateInvestigationItemInput, actor: ActorRef, options: MutationOptions = {}): InvestigationItem {
+    return this.runMutation("investigation.item.create", actor, options, input, undefined, () => {
+      const parent = this.getInvestigationNode(input.nodeId);
+      const timestamp = this.now();
+      const item: InvestigationItem = {
+        id: this.newId(),
+        nodeId: parent.id,
+        title: requiredText(input.title, "Investigation item title"),
+        description: input.description?.trim() ?? "",
+        sortOrder: nextSortOrder(this.repository.listInvestigationNodeItems(parent.id)),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 1,
+      };
+      this.repository.createInvestigationItem(item);
+      return item;
+    });
+  }
+
+  getInvestigationItem(itemId: string): InvestigationItem {
+    const item = this.repository.getInvestigationItem(itemId);
+    if (!item) throw new EntityNotFoundError("InvestigationItem", itemId);
+    return item;
+  }
+
+  listInvestigationItems(projectId: string): InvestigationItem[] {
+    this.getProject(projectId);
+    return this.repository.listInvestigationItems(projectId);
+  }
+
+  updateInvestigationItem(itemId: string, patch: UpdateInvestigationItemInput, actor: ActorRef, options: MutationOptions = {}): InvestigationItem {
+    const explicitRevision = patch.expectedRevision === undefined ? undefined : requireRevision(patch.expectedRevision);
+    return this.runMutation("investigation.item.update", actor, options, { itemId, patch }, undefined, () => {
+      for (let attempt = 1; attempt <= MAX_INTERNAL_UPDATE_ATTEMPTS; attempt += 1) {
+        const current = this.getInvestigationItem(itemId);
+        if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+          throw new EntityRevisionConflictError("InvestigationItem", itemId, explicitRevision, current.revision);
+        }
+        const updated: InvestigationItem = {
+          ...current,
+          ...(patch.title !== undefined ? { title: requiredText(patch.title, "Investigation item title") } : {}),
+          ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
+          ...(patch.sortOrder !== undefined ? { sortOrder: requireNonNegativeInteger(patch.sortOrder, "sortOrder") } : {}),
+          updatedAt: this.now(),
+          revision: current.revision + 1,
+        };
+        try {
+          this.repository.updateInvestigationItem(updated, explicitRevision ?? current.revision);
+          return updated;
+        } catch (error) {
+          if (!(error instanceof EntityRevisionConflictError) || explicitRevision !== undefined || attempt === MAX_INTERNAL_UPDATE_ATTEMPTS) throw error;
+        }
+      }
+      throw new Error("Investigation item update retry loop exhausted");
+    });
+  }
+
+  linkTaskToInvestigationItem(itemId: string, taskId: string, actor: ActorRef, options: MutationOptions = {}): InvestigationItemTaskLink {
+    return this.runMutation("investigation.item.task.link", actor, options, { itemId, taskId }, taskId, () => {
+      const item = this.getInvestigationItem(itemId);
+      const node = this.getInvestigationNode(item.nodeId);
+      const task = this.getTask(taskId);
+      if (node.projectId !== task.projectId) throw new TypeError("Investigation item and Task must belong to the same project");
+      const current = this.repository.listInvestigationItemTaskLinks(node.projectId).filter((link) => link.itemId === itemId);
+      const existing = current.find((link) => link.taskId === taskId);
+      if (existing) return existing;
+      const link: InvestigationItemTaskLink = { itemId, taskId, sortOrder: nextSortOrder(current), createdAt: this.now() };
+      return this.repository.createInvestigationItemTaskLink(link);
+    });
+  }
+
+  unlinkTaskFromInvestigationItem(itemId: string, taskId: string, actor: ActorRef, options: MutationOptions = {}): void {
+    this.runMutation("investigation.item.task.unlink", actor, options, { itemId, taskId }, taskId, () => {
+      this.getInvestigationItem(itemId);
+      this.getTask(taskId);
+      this.repository.deleteInvestigationItemTaskLink(itemId, taskId);
+      return null;
+    });
+  }
+
+  createTaskForInvestigationItem(itemId: string, input: CreateInvestigationLinkedTaskInput, actor: ActorRef, options: MutationOptions = {}): { task: Task; link: InvestigationItemTaskLink } {
+    return this.runMutation("investigation.item.task.create", actor, options, { itemId, input }, undefined, () => {
+      const item = this.getInvestigationItem(itemId);
+      const node = this.getInvestigationNode(item.nodeId);
+      const task = this.createTask({ ...input, projectId: node.projectId }, actor);
+      const current = this.repository.listInvestigationItemTaskLinks(node.projectId).filter((link) => link.itemId === itemId);
+      const link: InvestigationItemTaskLink = { itemId, taskId: task.id, sortOrder: nextSortOrder(current), createdAt: this.now() };
+      return { task, link: this.repository.createInvestigationItemTaskLink(link) };
+    });
+  }
+
+  createInvestigationItemLink(input: CreateInvestigationItemLinkInput, actor: ActorRef, options: MutationOptions = {}): InvestigationItemLink {
+    return this.runMutation("investigation.item.node.link", actor, options, input, undefined, () => {
+      const item = this.getInvestigationItem(input.fromItemId);
+      const fromNode = this.getInvestigationNode(item.nodeId);
+      const toNode = this.getInvestigationNode(input.toNodeId);
+      if (fromNode.projectId !== toNode.projectId) throw new TypeError("Investigation link endpoints must belong to the same project");
+      if (fromNode.id === toNode.id) throw new TypeError("Investigation item cannot link back to its own Node");
+      const link: InvestigationItemLink = {
+        id: this.newId(),
+        projectId: fromNode.projectId,
+        fromItemId: item.id,
+        toNodeId: toNode.id,
+        label: input.label?.trim() ?? "",
+        kind: input.kind?.trim() || "flow",
+        createdBy: actor.id,
+        createdAt: this.now(),
+      };
+      this.repository.createInvestigationItemLink(link);
+      return link;
+    });
+  }
+
+  removeInvestigationItemLink(linkId: string, actor: ActorRef, options: MutationOptions = {}): void {
+    this.runMutation("investigation.item.node.unlink", actor, options, { linkId }, undefined, () => {
+      this.repository.deleteInvestigationItemLink(linkId);
+      return null;
+    });
+  }
+
+  getInvestigationGraph(projectId: string): InvestigationGraphSnapshot {
+    this.getProject(projectId);
+    return {
+      nodes: this.repository.listInvestigationNodes(projectId),
+      items: this.repository.listInvestigationItems(projectId),
+      itemLinks: this.repository.listInvestigationItemLinks(projectId),
+      itemTaskLinks: this.repository.listInvestigationItemTaskLinks(projectId),
+      tasks: this.repository.listTasks({ projectId }),
+      claims: this.repository.listProjectClaims(projectId),
+      artifacts: this.repository.listProjectArtifacts(projectId),
+      relations: this.repository.listProjectRelations(projectId),
+      positions: this.repository.listBoardPositions(projectId),
+    };
+  }
+
   listBoardPositions(projectId: string): BoardNodePosition[] {
     this.getProject(projectId);
     return this.repository.listBoardPositions(projectId);
@@ -508,8 +757,8 @@ export class QuestBoardService {
   setBoardPosition(projectId: string, input: SetBoardPositionInput, actor: ActorRef, options: MutationOptions = {}): BoardNodePosition {
     return this.runMutation("board.position", actor, options, { projectId, input }, undefined, () => {
       this.getProject(projectId);
-      const endpoint = this.resolveRelationEndpoint(input.entityType, input.entityId);
-      if (endpoint.projectId !== projectId) {
+      const entityProjectId = this.resolveBoardEntityProject(input.entityType, input.entityId);
+      if (entityProjectId !== projectId) {
         throw new TypeError("Board node must belong to the requested project");
       }
       const position: BoardNodePosition = {
@@ -589,6 +838,11 @@ export class QuestBoardService {
     return { projectId: artifact.projectId, task };
   }
 
+  private resolveBoardEntityProject(type: BoardEntityType, id: string): string {
+    if (type === "investigation_node") return this.getInvestigationNode(id).projectId;
+    return this.resolveRelationEndpoint(type, id).projectId;
+  }
+
   private activityFor(
     task: Task,
     actor: ActorRef,
@@ -624,6 +878,15 @@ function requireRevision(value: number): number {
     throw new TypeError("expectedRevision must be a positive integer");
   }
   return value;
+}
+
+function requireNonNegativeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${label} must be a non-negative integer`);
+  return value;
+}
+
+function nextSortOrder(items: readonly { sortOrder: number }[]): number {
+  return items.reduce((highest, item) => Math.max(highest, item.sortOrder), -1) + 1;
 }
 
 function normalizeRequestId(value: string | undefined): string | undefined {

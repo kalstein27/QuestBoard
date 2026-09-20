@@ -54,3 +54,15 @@ export class RevisionConflictError extends Error {
     this.name = "RevisionConflictError";
   }
 }
+
+export class EntityRevisionConflictError extends Error {
+  constructor(
+    readonly entity: string,
+    readonly entityId: string,
+    readonly expectedRevision: number,
+    readonly actualRevision: number,
+  ) {
+    super(`${entity} ${entityId} revision conflict: expected ${expectedRevision}, current ${actualRevision}`);
+    this.name = "EntityRevisionConflictError";
+  }
+}

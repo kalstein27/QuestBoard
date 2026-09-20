@@ -79,6 +79,16 @@
             </div>
             <div id="kanban-board" class="kanban-board hidden"></div>
             <div id="investigation-board" class="investigation-board hidden" aria-label="Investigation board">
+              <div id="investigation-controls" class="investigation-controls hidden" role="group" aria-label="Investigation board controls">
+                <button id="investigation-add-node" class="investigation-add-node" type="button" title="Create a standalone Investigation node">+ Node</button>
+                <span class="investigation-control-divider" aria-hidden="true"></span>
+                <button id="investigation-undo" class="investigation-control-button" type="button" aria-label="Undo node move" title="Undo node move (⌘/Ctrl+Z)">↶</button>
+                <button id="investigation-redo" class="investigation-control-button" type="button" aria-label="Redo node move" title="Redo node move (⌘/Ctrl+Shift+Z)">↷</button>
+                <span class="investigation-control-divider" aria-hidden="true"></span>
+                <button id="investigation-zoom-out" class="investigation-control-button" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+                <button id="investigation-zoom-reset" class="investigation-zoom-label" type="button" aria-label="Reset zoom" title="Reset zoom">100%</button>
+                <button id="investigation-zoom-in" class="investigation-control-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+              </div>
               <div id="investigation-canvas" class="investigation-canvas">
                 <svg id="investigation-edges" class="investigation-edges" aria-hidden="true"></svg>
                 <div id="investigation-nodes" class="investigation-nodes"></div>

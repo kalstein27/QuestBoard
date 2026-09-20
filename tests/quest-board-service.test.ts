@@ -105,6 +105,34 @@ test("persists the first Project/Task/Claim/Activity vertical slice", async () =
       [`artifact:${artifact.id}`, `task:${task.id}`],
     );
     assert.equal(service.getTask(task.id).revision, 2);
+
+    const loginNode = service.createInvestigationNode(
+      { projectId: project.id, title: "Login flow", description: "Authentication to session creation" },
+      human,
+    );
+    const tokenItem = service.createInvestigationItem(
+      { nodeId: loginNode.id, title: "Validate token", description: "JWT, expiry, and refresh" },
+      human,
+    );
+    const reorderedTokenItem = service.updateInvestigationItem(tokenItem.id, { sortOrder: 3 }, human);
+    const fallbackItem = service.createInvestigationItem({ nodeId: loginNode.id, title: "Fallback path" }, human);
+    assert.equal(reorderedTokenItem.sortOrder, 3);
+    assert.equal(fallbackItem.sortOrder, 4);
+    const sessionNode = service.createInvestigationNode({ projectId: project.id, title: "Session creation" }, human);
+    const taskLink = service.linkTaskToInvestigationItem(tokenItem.id, task.id, human);
+    const duplicateTaskLink = service.linkTaskToInvestigationItem(tokenItem.id, task.id, human);
+    assert.deepEqual(duplicateTaskLink, taskLink);
+    const flowLink = service.createInvestigationItemLink(
+      { fromItemId: tokenItem.id, toNodeId: sessionNode.id, label: "valid" },
+      human,
+    );
+    service.setBoardPosition(project.id, { entityType: "investigation_node", entityId: loginNode.id, x: 80, y: 90 }, human);
+    const graph = service.getInvestigationGraph(project.id);
+    assert.deepEqual(graph.nodes.map((node) => node.id), [loginNode.id, sessionNode.id]);
+    assert.deepEqual(graph.items.map((item) => item.id), [tokenItem.id, fallbackItem.id]);
+    assert.equal(graph.itemTaskLinks.length, 1);
+    assert.equal(graph.itemTaskLinks[0]?.taskId, taskLink.taskId);
+    assert.equal(graph.itemLinks[0]?.id, flowLink.id);
     const activityTypes = service.listTaskActivity(task.id).map((activity) => activity.type);
     assert.deepEqual(activityTypes, [
       "task_created",
@@ -126,11 +154,44 @@ test("persists the first Project/Task/Claim/Activity vertical slice", async () =
     assert.equal(reopenedService.listTaskActivity(task.id).length, 7);
     assert.equal(reopenedService.listTaskArtifacts(task.id)[0]?.id, artifact.id);
     assert.equal(reopenedService.listTaskRelations(task.id)[0]?.kind, "evidence_for");
-    assert.equal(reopenedService.listBoardPositions(project.id).length, 2);
+    assert.equal(reopenedService.listBoardPositions(project.id).length, 3);
+    const reopenedGraph = reopenedService.getInvestigationGraph(project.id);
+    assert.equal(reopenedGraph.nodes.length, 2);
+    assert.equal(reopenedGraph.items[0]?.description, "JWT, expiry, and refresh");
+    assert.equal(reopenedGraph.itemTaskLinks[0]?.taskId, task.id);
+    assert.equal(reopenedGraph.itemLinks[0]?.toNodeId, sessionNode.id);
     assert.equal(reopenedService.getTask(task.id).revision, 2);
     reopenedRepository.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Investigation Task links keep stable ordering across unlink and relink", () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  try {
+    const project = service.createProject({ name: "Investigation ordering" }, human);
+    const node = service.createInvestigationNode({ projectId: project.id, title: "Flow" }, human);
+    const item = service.createInvestigationItem({ nodeId: node.id, title: "Step" }, human);
+    const first = service.createTask({ projectId: project.id, title: "First" }, human);
+    const second = service.createTask({ projectId: project.id, title: "Second" }, human);
+
+    const firstLink = service.linkTaskToInvestigationItem(item.id, first.id, human);
+    const secondLink = service.linkTaskToInvestigationItem(item.id, second.id, human);
+    assert.equal(firstLink.sortOrder, 0);
+    assert.equal(secondLink.sortOrder, 1);
+
+    service.unlinkTaskFromInvestigationItem(item.id, first.id, human);
+    const relinked = service.linkTaskToInvestigationItem(item.id, first.id, human);
+    assert.equal(relinked.sortOrder, 2);
+    assert.deepEqual(service.linkTaskToInvestigationItem(item.id, first.id, human), relinked);
+    assert.deepEqual(
+      service.getInvestigationGraph(project.id).itemTaskLinks.map((link) => [link.taskId, link.sortOrder]),
+      [[second.id, 1], [first.id, 2]],
+    );
+  } finally {
+    repository.close();
   }
 });
 

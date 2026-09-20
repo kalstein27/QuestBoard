@@ -164,14 +164,16 @@ QuestBoard는 두 개의 축으로 성장한다.
 
 ### Investigation Board
 
-문제 해결/증거 연결 관점.
+프로젝트 동작 구조와 그 위치의 실제 작업을 함께 보는 실행 지도 관점.
 
-- Task와 Artifact를 자유 배치
-- Relation line
-- Activity/handoff 연결
-- 파일/스크린샷/로그를 단서처럼 붙임
+- 독립적인 Investigation Node로 기능/흐름/컴포넌트/아이디어를 표현
+- Node마다 설명과 여러 Item을 보유하고, Item마다 별도 설명을 기록
+- 하나의 Item에 여러 canonical Task를 연결해 Quest Board와 동일한 작업 상태를 공유
+- 특정 Item에서 다른 Investigation Node로 방향성 flow edge 연결
+- 아직 어디에도 연결하지 않은 Node도 TODO/후보 구조로 유지
+- 기존 Artifact/Relation은 증거 관계로 보존하고 기존 Task/Artifact free-layout도 Graph 도입 전 프로젝트의 호환 화면으로 유지
 
-Investigation Board MVP는 Task/Artifact 자유 배치, Relation line 시각화, drag 좌표 영속화까지 구현되었다. 좌표는 Task revision/Activity와 분리한 layout metadata로 저장한다. 확대/축소, 캔버스 pan 전용 UX, Relation 직접 연결 gesture 등은 후속 단계로 둔다.
+1차 Investigation Graph는 Node/Item/Task overlay/Item-origin flow link의 SQLite·service·HTTP·Web·agent-tool/MCP 수직 슬라이스를 구현한다. Node 위치는 Task revision/Activity와 분리된 `board_positions`에 저장하며 기존 위치 이동 undo/redo와 50~150% 확대/축소를 그대로 사용한다. 검색/필터, Item reorder, 전용 pan, semantic zoom, 더 풍부한 편집 UI는 후속 단계다.
 
 ---
 

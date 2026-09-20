@@ -23,8 +23,16 @@ const state = {
   relations: [],
   projectArtifacts: [],
   projectRelations: [],
+  investigationGraphNodes: [],
+  investigationGraphItems: [],
+  investigationItemLinks: [],
+  investigationItemTaskLinks: [],
   boardPositions: new Map(),
   displayPositions: new Map(),
+  investigationZoom: loadInvestigationZoom(),
+  investigationUndo: [],
+  investigationRedo: [],
+  investigationHistoryBusy: false,
   actor: loadActor(),
   busy: false,
 };
@@ -45,6 +53,8 @@ function collectElements() {
     "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty",
     "project-empty", "kanban-board", "empty-new-task-button", "empty-new-project-button",
     "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
+    "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
+    "investigation-zoom-reset", "investigation-zoom-in", "investigation-add-node",
     "workspace-title", "workspace-subtitle", "view-switch",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
     "drawer-scrim", "task-dialog", "task-form", "task-dialog-title", "task-id", "task-title",
@@ -73,6 +83,12 @@ function bindEvents() {
   el["view-switch"].querySelectorAll("[data-board-view]").forEach((button) => {
     button.addEventListener("click", () => setViewMode(button.dataset.boardView));
   });
+  el["investigation-undo"].addEventListener("click", () => void undoInvestigationMove());
+  el["investigation-redo"].addEventListener("click", () => void redoInvestigationMove());
+  el["investigation-zoom-out"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom - 0.1));
+  el["investigation-zoom-reset"].addEventListener("click", () => setInvestigationZoom(1));
+  el["investigation-zoom-in"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom + 0.1));
+  el["investigation-add-node"].addEventListener("click", () => void createInvestigationNodeFromPrompt());
   el["save-actor-button"].addEventListener("click", saveActor);
   el["task-form"].addEventListener("submit", (event) => void saveTask(event));
   el["project-form"].addEventListener("submit", (event) => void saveProject(event));
@@ -83,7 +99,22 @@ function bindEvents() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeDrawer();
+    if (state.viewMode !== "investigation" || isEditingTarget(event.target)) return;
+    const modifier = event.metaKey || event.ctrlKey;
+    if (modifier && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      if (event.shiftKey) void redoInvestigationMove();
+      else void undoInvestigationMove();
+    } else if (modifier && event.key.toLowerCase() === "y") {
+      event.preventDefault();
+      void redoInvestigationMove();
+    }
   });
+}
+
+function isEditingTarget(target) {
+  return target instanceof HTMLElement
+    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 }
 
 async function boot() {
@@ -138,24 +169,30 @@ async function loadBoard() {
     state.claims.clear();
     state.projectArtifacts = [];
     state.projectRelations = [];
+    state.investigationGraphNodes = [];
+    state.investigationGraphItems = [];
+    state.investigationItemLinks = [];
+    state.investigationItemTaskLinks = [];
     state.boardPositions.clear();
     state.displayPositions.clear();
+    resetInvestigationHistory();
     renderBoard();
     return;
   }
   showBoardLoading(true);
-  const { tasks, artifacts, relations, positions } = await api(
-    `/projects/${encodeURIComponent(state.projectId)}/investigation`,
+  const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = await api(
+    `/projects/${encodeURIComponent(state.projectId)}/investigation/graph`,
   );
   state.tasks = tasks;
   state.projectArtifacts = artifacts;
   state.projectRelations = relations;
+  state.investigationGraphNodes = nodes;
+  state.investigationGraphItems = items;
+  state.investigationItemLinks = itemLinks;
+  state.investigationItemTaskLinks = itemTaskLinks;
   state.boardPositions = new Map(positions.map((position) => [boardNodeKey(position.entityType, position.entityId), position]));
-  const claimPairs = await Promise.all(tasks.map(async (task) => {
-    const { claim } = await api(`/tasks/${encodeURIComponent(task.id)}/claim`);
-    return [task.id, claim];
-  }));
-  state.claims = new Map(claimPairs);
+  resetInvestigationHistory();
+  state.claims = new Map(claims.map((claim) => [claim.taskId, claim]));
   renderBoard();
 }
 
@@ -163,12 +200,11 @@ function renderBoard() {
   showBoardLoading(false);
   const noProject = !state.projectId;
   const hasQuestContent = state.tasks.length > 0;
-  const hasInvestigationContent = state.tasks.length + state.projectArtifacts.length > 0;
-  const hasCurrentContent = state.viewMode === "investigation" ? hasInvestigationContent : hasQuestContent;
+  const hasCurrentContent = state.viewMode === "investigation" ? Boolean(state.projectId) : hasQuestContent;
   el["project-empty"].classList.toggle("hidden", !noProject);
   el["board-empty"].classList.toggle("hidden", noProject || hasCurrentContent);
   el["kanban-board"].classList.toggle("hidden", noProject || !hasQuestContent || state.viewMode !== "quest");
-  el["investigation-board"].classList.toggle("hidden", noProject || !hasInvestigationContent || state.viewMode !== "investigation");
+  el["investigation-board"].classList.toggle("hidden", noProject || state.viewMode !== "investigation");
   renderViewSwitch();
   if (noProject || !hasCurrentContent) {
     if (state.viewMode === "quest") el["kanban-board"].replaceChildren();
@@ -223,6 +259,11 @@ function loadViewMode() {
   return localStorage.getItem("questboard.viewMode") === "investigation" ? "investigation" : "quest";
 }
 
+function loadInvestigationZoom() {
+  const stored = Number(localStorage.getItem("questboard.investigationZoom"));
+  return Number.isFinite(stored) ? clamp(stored, 0.5, 1.5) : 1;
+}
+
 function renderViewSwitch() {
   el["view-switch"].querySelectorAll("[data-board-view]").forEach((button) => {
     const active = button.dataset.boardView === state.viewMode;
@@ -230,20 +271,37 @@ function renderViewSwitch() {
     button.setAttribute("aria-pressed", String(active));
   });
   const investigation = state.viewMode === "investigation";
+  el["investigation-controls"].classList.toggle("hidden", !investigation);
   el["workspace-title"].textContent = investigation ? "Investigation Board" : "Quest Board";
   el["workspace-subtitle"].textContent = investigation
-    ? "Tasks, evidence, and their connections"
+    ? "Project flow with work attached where it belongs"
     : "Tasks across agents and humans";
+  renderInvestigationControls();
 }
 
 function renderInvestigationBoard() {
   const canvas = el["investigation-canvas"];
   const nodesLayer = el["investigation-nodes"];
   const canvasWidth = 1800;
-  const canvasHeight = Math.max(1000, 420 + Math.ceil((state.tasks.length + state.projectArtifacts.length) / 4) * 190);
+  const graphMode = state.investigationGraphNodes.length > 0;
+  const entityCount = graphMode ? state.investigationGraphNodes.length : state.tasks.length + state.projectArtifacts.length;
+  const canvasHeight = Math.max(1000, 420 + Math.ceil(entityCount / 4) * 230);
   canvas.style.width = `${canvasWidth}px`;
   canvas.style.height = `${canvasHeight}px`;
+  applyInvestigationZoom();
   state.displayPositions = new Map();
+
+  if (graphMode) {
+    const graphNodes = state.investigationGraphNodes.map((graphNode, index) => {
+      const position = investigationPosition("investigation_node", graphNode.id, index, false);
+      const card = investigationGraphNode(graphNode, position);
+      state.displayPositions.set(boardNodeKey("investigation_node", graphNode.id), position);
+      return card;
+    });
+    nodesLayer.replaceChildren(...graphNodes);
+    requestAnimationFrame(drawInvestigationEdges);
+    return;
+  }
 
   const taskNodes = state.tasks.map((task, index) => {
     const position = investigationPosition("task", task.id, index, false);
@@ -311,9 +369,272 @@ function investigationArtifactNode(artifact, position) {
   return card;
 }
 
+function investigationGraphNode(graphNode, position) {
+  const card = node("article", "investigation-node investigation-graph-node");
+  card.dataset.entityType = "investigation_node";
+  card.dataset.entityId = graphNode.id;
+  setInvestigationNodePosition(card, position);
+
+  const head = node("div", "investigation-node-head");
+  const identity = node("div", "investigation-graph-identity");
+  identity.append(
+    node("span", "investigation-node-type graph-node-type", graphNode.kind || "Flow node"),
+    node("strong", "investigation-node-title", graphNode.title),
+  );
+  const edit = node("button", "graph-icon-button", "✎");
+  edit.type = "button";
+  edit.title = "Edit node";
+  edit.addEventListener("click", () => void editInvestigationNodeFromPrompt(graphNode));
+  head.append(identity, edit);
+  card.append(head, node("p", "investigation-graph-description", graphNode.description || "No node description yet."));
+
+  const items = state.investigationGraphItems
+    .filter((item) => item.nodeId === graphNode.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
+  const itemList = node("div", "investigation-item-list");
+  items.forEach((item) => itemList.append(investigationGraphItem(item)));
+  if (items.length === 0) itemList.append(node("div", "investigation-item-empty", "No items yet. Add the first step or responsibility."));
+  card.append(itemList);
+
+  const addItem = node("button", "graph-add-button", "+ Add item");
+  addItem.type = "button";
+  addItem.addEventListener("click", () => void addInvestigationItemFromPrompt(graphNode.id));
+  card.append(addItem);
+  attachInvestigationDrag(card, "investigation_node", graphNode.id);
+  return card;
+}
+
+function investigationGraphItem(item) {
+  const wrapper = node("section", "investigation-item");
+  wrapper.dataset.investigationItemId = item.id;
+  const head = node("div", "investigation-item-head");
+  const title = node("strong", "investigation-item-title", item.title);
+  const actions = node("div", "investigation-item-actions");
+  const edit = graphActionButton("✎", "Edit item", () => void editInvestigationItemFromPrompt(item));
+  const task = graphActionButton("+ Task", "Link or create a Task", () => void addTaskToInvestigationItem(item));
+  const connect = graphActionButton("Connect", "Connect this item to another Node", () => void connectInvestigationItemToNode(item));
+  actions.append(edit, task, connect);
+  head.append(title, actions);
+  wrapper.append(head);
+  if (item.description) wrapper.append(node("p", "investigation-item-description", item.description));
+
+  const taskLinks = state.investigationItemTaskLinks
+    .filter((link) => link.itemId === item.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  if (taskLinks.length > 0) {
+    const chips = node("div", "investigation-task-chips");
+    taskLinks.forEach((link) => {
+      const linkedTask = state.tasks.find((candidate) => candidate.id === link.taskId);
+      if (!linkedTask) return;
+      const claim = state.claims.get(linkedTask.id);
+      const chip = node("div", `investigation-task-chip status-${linkedTask.status}`);
+      const open = node("button", "investigation-task-chip-main");
+      open.type = "button";
+      open.title = `${labelForStatus(linkedTask.status)} · ${linkedTask.priority}`;
+      open.append(
+        node("span", `status-dot status-${linkedTask.status}`),
+        node("span", "investigation-task-chip-title", linkedTask.title),
+        node("span", "investigation-task-chip-priority", linkedTask.priority),
+      );
+      if (claim) open.append(node("span", "investigation-task-chip-claim", shortActor(claim.agentId)));
+      open.addEventListener("click", () => void openTask(linkedTask.id));
+      const unlink = node("button", "investigation-link-remove", "×");
+      unlink.type = "button";
+      unlink.title = `Unlink Task: ${linkedTask.title}`;
+      unlink.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void unlinkTaskFromInvestigationItem(item.id, linkedTask.id);
+      });
+      chip.append(open, unlink);
+      chips.append(chip);
+    });
+    wrapper.append(chips);
+  }
+
+  const outgoing = state.investigationItemLinks.filter((link) => link.fromItemId === item.id);
+  if (outgoing.length > 0) {
+    const links = node("div", "investigation-item-links");
+    outgoing.forEach((link) => {
+      const target = state.investigationGraphNodes.find((candidate) => candidate.id === link.toNodeId);
+      const row = node("div", "investigation-item-link-row");
+      const copy = node(
+        "span",
+        "investigation-item-link-copy",
+        `${link.label ? `${link.label} → ` : "→ "}${target?.title || "Connected node"}`,
+      );
+      const remove = node("button", "investigation-link-remove", "×");
+      remove.type = "button";
+      remove.title = `Remove connection to ${target?.title || "node"}`;
+      remove.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void removeInvestigationItemConnection(link.id);
+      });
+      row.append(copy, remove);
+      links.append(row);
+    });
+    wrapper.append(links);
+  }
+  return wrapper;
+}
+
+function graphActionButton(label, title, onClick) {
+  const button = node("button", "graph-item-action", label);
+  button.type = "button";
+  button.title = title;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+async function createInvestigationNodeFromPrompt() {
+  if (!state.projectId) return;
+  const title = window.prompt("Node title");
+  if (!title?.trim()) return;
+  const description = window.prompt("Node description (optional)", "") ?? "";
+  try {
+    const { node: created } = await api(`/projects/${encodeURIComponent(state.projectId)}/investigation/nodes`, {
+      method: "POST", actor: true, body: { title, description },
+    });
+    const board = el["investigation-board"];
+    const position = {
+      x: clamp((board.scrollLeft + board.clientWidth / 2) / state.investigationZoom - 160, 16, 1450),
+      y: clamp((board.scrollTop + board.clientHeight / 2) / state.investigationZoom - 80, 16, 820),
+    };
+    await persistInvestigationPosition("investigation_node", created.id, position);
+    await loadBoard();
+    toast("Investigation node created");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function editInvestigationNodeFromPrompt(graphNode) {
+  const title = window.prompt("Node title", graphNode.title);
+  if (!title?.trim()) return;
+  const description = window.prompt("Node description", graphNode.description) ?? graphNode.description;
+  try {
+    await api(`/investigation/nodes/${encodeURIComponent(graphNode.id)}`, {
+      method: "PATCH", actor: true, body: { title, description, expectedRevision: graphNode.revision },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function addInvestigationItemFromPrompt(nodeId) {
+  const title = window.prompt("Item title");
+  if (!title?.trim()) return;
+  const description = window.prompt("Item description (optional)", "") ?? "";
+  try {
+    await api(`/investigation/nodes/${encodeURIComponent(nodeId)}/items`, {
+      method: "POST", actor: true, body: { title, description },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function editInvestigationItemFromPrompt(item) {
+  const title = window.prompt("Item title", item.title);
+  if (!title?.trim()) return;
+  const description = window.prompt("Item description", item.description) ?? item.description;
+  try {
+    await api(`/investigation/items/${encodeURIComponent(item.id)}`, {
+      method: "PATCH", actor: true, body: { title, description, expectedRevision: item.revision },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function addTaskToInvestigationItem(item) {
+  const createNew = window.confirm("Create a new Task for this item?\n\nOK = create new\nCancel = link an existing Task");
+  if (createNew) {
+    const title = window.prompt("New Task title");
+    if (!title?.trim()) return;
+    const description = window.prompt("Task description (optional)", "") ?? "";
+    try {
+      await api(`/investigation/items/${encodeURIComponent(item.id)}/tasks/new`, {
+        method: "POST", actor: true, body: { title, description, status: "inbox", priority: "normal" },
+      });
+      await loadBoard();
+    } catch (error) {
+      fail(error);
+    }
+    return;
+  }
+
+  const linkedIds = new Set(state.investigationItemTaskLinks.filter((link) => link.itemId === item.id).map((link) => link.taskId));
+  const candidates = state.tasks.filter((candidate) => !linkedIds.has(candidate.id));
+  const selected = chooseInvestigationCandidate("Link which existing Task?", candidates, (candidate) => `${candidate.title} · ${labelForStatus(candidate.status)}`);
+  if (!selected) return;
+  try {
+    await api(`/investigation/items/${encodeURIComponent(item.id)}/tasks`, {
+      method: "POST", actor: true, body: { taskId: selected.id },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function connectInvestigationItemToNode(item) {
+  const candidates = state.investigationGraphNodes.filter((candidate) => candidate.id !== item.nodeId);
+  const selected = chooseInvestigationCandidate("Connect this item to which Node?", candidates, (candidate) => candidate.title);
+  if (!selected) return;
+  const label = window.prompt("Connection label (optional)", "") ?? "";
+  try {
+    await api("/investigation/item-links", {
+      method: "POST", actor: true, body: { fromItemId: item.id, toNodeId: selected.id, label },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function unlinkTaskFromInvestigationItem(itemId, taskId) {
+  try {
+    await api(`/investigation/items/${encodeURIComponent(itemId)}/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE", actor: true,
+    });
+    await loadBoard();
+    toast("Task link removed");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function removeInvestigationItemConnection(linkId) {
+  try {
+    await api(`/investigation/item-links/${encodeURIComponent(linkId)}`, {
+      method: "DELETE", actor: true,
+    });
+    await loadBoard();
+    toast("Flow connection removed");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function chooseInvestigationCandidate(promptTitle, candidates, labeler) {
+  if (candidates.length === 0) {
+    toast("Nothing available to link");
+    return null;
+  }
+  const menu = candidates.map((candidate, index) => `${index + 1}. ${labeler(candidate)}`).join("\n");
+  const raw = window.prompt(`${promptTitle}\n\n${menu}\n\nEnter a number:`);
+  if (raw === null) return null;
+  const index = Number.parseInt(raw, 10) - 1;
+  return Number.isInteger(index) && index >= 0 && index < candidates.length ? candidates[index] : null;
+}
+
 function attachInvestigationDrag(card, entityType, entityId) {
   card.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || state.investigationHistoryBusy) return;
+    if (event.target instanceof Element && event.target.closest("button, input, textarea, select, a")) return;
     const key = boardNodeKey(entityType, entityId);
     const start = state.displayPositions.get(key);
     if (!start) return;
@@ -326,8 +647,8 @@ function attachInvestigationDrag(card, entityType, entityId) {
 
     const onMove = (moveEvent) => {
       if (moveEvent.pointerId !== event.pointerId) return;
-      const dx = moveEvent.clientX - startClientX;
-      const dy = moveEvent.clientY - startClientY;
+      const dx = (moveEvent.clientX - startClientX) / state.investigationZoom;
+      const dy = (moveEvent.clientY - startClientY) / state.investigationZoom;
       if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
       latest = {
         x: clamp(start.x + dx, 16, 1540),
@@ -345,13 +666,101 @@ function attachInvestigationDrag(card, entityType, entityId) {
       card.classList.remove("dragging-node");
       if (moved) {
         card._suppressClick = true;
-        void persistInvestigationPosition(entityType, entityId, latest);
+        void commitInvestigationMove(entityType, entityId, start, latest);
       }
     };
     card.addEventListener("pointermove", onMove);
     card.addEventListener("pointerup", onEnd);
     card.addEventListener("pointercancel", onEnd);
   });
+}
+
+async function commitInvestigationMove(entityType, entityId, from, to) {
+  state.investigationHistoryBusy = true;
+  renderInvestigationControls();
+  const saved = await persistInvestigationPosition(entityType, entityId, to);
+  if (saved) {
+    state.investigationUndo.push({ entityType, entityId, from: { ...from }, to: { x: saved.x, y: saved.y } });
+    if (state.investigationUndo.length > 100) state.investigationUndo.shift();
+    state.investigationRedo = [];
+  }
+  state.investigationHistoryBusy = false;
+  renderInvestigationControls();
+}
+
+async function undoInvestigationMove() {
+  if (state.investigationHistoryBusy || state.investigationUndo.length === 0) return;
+  const entry = state.investigationUndo[state.investigationUndo.length - 1];
+  if (await applyInvestigationHistoryPosition(entry, entry.from)) {
+    state.investigationUndo.pop();
+    state.investigationRedo.push(entry);
+  }
+  renderInvestigationControls();
+}
+
+async function redoInvestigationMove() {
+  if (state.investigationHistoryBusy || state.investigationRedo.length === 0) return;
+  const entry = state.investigationRedo[state.investigationRedo.length - 1];
+  if (await applyInvestigationHistoryPosition(entry, entry.to)) {
+    state.investigationRedo.pop();
+    state.investigationUndo.push(entry);
+  }
+  renderInvestigationControls();
+}
+
+async function applyInvestigationHistoryPosition(entry, position) {
+  state.investigationHistoryBusy = true;
+  renderInvestigationControls();
+  const key = boardNodeKey(entry.entityType, entry.entityId);
+  state.displayPositions.set(key, { ...position });
+  const card = [...el["investigation-nodes"].children].find((candidate) => (
+    candidate.dataset.entityType === entry.entityType && candidate.dataset.entityId === entry.entityId
+  ));
+  if (card) setInvestigationNodePosition(card, position);
+  drawInvestigationEdges();
+  const saved = await persistInvestigationPosition(entry.entityType, entry.entityId, position);
+  state.investigationHistoryBusy = false;
+  return Boolean(saved);
+}
+
+function resetInvestigationHistory() {
+  state.investigationUndo = [];
+  state.investigationRedo = [];
+  state.investigationHistoryBusy = false;
+  renderInvestigationControls();
+}
+
+function renderInvestigationControls() {
+  if (!el["investigation-undo"]) return;
+  el["investigation-undo"].disabled = state.investigationHistoryBusy || state.investigationUndo.length === 0;
+  el["investigation-redo"].disabled = state.investigationHistoryBusy || state.investigationRedo.length === 0;
+  el["investigation-zoom-out"].disabled = state.investigationZoom <= 0.5;
+  el["investigation-zoom-in"].disabled = state.investigationZoom >= 1.5;
+  el["investigation-zoom-reset"].textContent = `${Math.round(state.investigationZoom * 100)}%`;
+}
+
+function setInvestigationZoom(value) {
+  const next = Math.round(clamp(value, 0.5, 1.5) * 10) / 10;
+  if (next === state.investigationZoom) return;
+  const board = el["investigation-board"];
+  const oldZoom = state.investigationZoom;
+  const centerX = (board.scrollLeft + board.clientWidth / 2) / oldZoom;
+  const centerY = (board.scrollTop + board.clientHeight / 2) / oldZoom;
+  state.investigationZoom = next;
+  localStorage.setItem("questboard.investigationZoom", String(next));
+  applyInvestigationZoom();
+  renderInvestigationControls();
+  requestAnimationFrame(() => {
+    board.scrollLeft = Math.max(0, centerX * next - board.clientWidth / 2);
+    board.scrollTop = Math.max(0, centerY * next - board.clientHeight / 2);
+  });
+}
+
+function applyInvestigationZoom() {
+  if (!el["investigation-canvas"]) return;
+  el["investigation-canvas"].style.transform = `scale(${state.investigationZoom})`;
+  el["investigation-canvas"].style.transformOrigin = "top left";
+  el["investigation-board"].style.backgroundSize = `${24 * state.investigationZoom}px ${24 * state.investigationZoom}px`;
 }
 
 function setInvestigationNodePosition(card, position) {
@@ -364,6 +773,40 @@ function drawInvestigationEdges() {
   svg.setAttribute("width", String(el["investigation-canvas"].clientWidth || 1800));
   svg.setAttribute("height", String(el["investigation-canvas"].clientHeight || 1000));
   const children = [];
+  if (state.investigationGraphNodes.length > 0) {
+    state.investigationItemLinks.forEach((link) => {
+      const itemElement = [...el["investigation-nodes"].querySelectorAll("[data-investigation-item-id]")]
+        .find((candidate) => candidate.dataset.investigationItemId === link.fromItemId);
+      const sourceCard = itemElement?.closest("[data-entity-type='investigation_node']");
+      const targetCard = [...el["investigation-nodes"].children]
+        .find((candidate) => candidate.dataset.entityType === "investigation_node" && candidate.dataset.entityId === link.toNodeId);
+      if (!itemElement || !sourceCard || !targetCard) return;
+      const source = state.displayPositions.get(boardNodeKey("investigation_node", sourceCard.dataset.entityId));
+      const target = state.displayPositions.get(boardNodeKey("investigation_node", link.toNodeId));
+      if (!source || !target) return;
+      const x1 = source.x + sourceCard.offsetWidth;
+      const y1 = source.y + itemElement.offsetTop + itemElement.offsetHeight / 2;
+      const x2 = target.x;
+      const y2 = target.y + Math.min(targetCard.offsetHeight / 2, 72);
+      const line = svgNode("line");
+      line.setAttribute("x1", String(x1));
+      line.setAttribute("y1", String(y1));
+      line.setAttribute("x2", String(x2));
+      line.setAttribute("y2", String(y2));
+      line.setAttribute("class", "investigation-edge-line investigation-flow-line");
+      children.push(line);
+      if (link.label) {
+        const label = svgNode("text");
+        label.setAttribute("x", String((x1 + x2) / 2));
+        label.setAttribute("y", String((y1 + y2) / 2 - 7));
+        label.setAttribute("class", "investigation-edge-label investigation-flow-label");
+        label.textContent = link.label;
+        children.push(label);
+      }
+    });
+    svg.replaceChildren(...children);
+    return;
+  }
   state.projectRelations.forEach((relation) => {
     const from = state.displayPositions.get(boardNodeKey(relation.fromType, relation.fromId));
     const to = state.displayPositions.get(boardNodeKey(relation.toType, relation.toId));
@@ -389,16 +832,18 @@ function drawInvestigationEdges() {
 }
 
 async function persistInvestigationPosition(entityType, entityId, position) {
-  if (!state.projectId) return;
+  if (!state.projectId) return null;
   try {
     const { position: saved } = await api(
       `/projects/${encodeURIComponent(state.projectId)}/investigation/positions/${entityType}/${encodeURIComponent(entityId)}`,
       { method: "PUT", actor: true, body: position },
     );
     state.boardPositions.set(boardNodeKey(entityType, entityId), saved);
+    return saved;
   } catch (error) {
     fail(error);
     await loadBoard();
+    return null;
   }
 }
 

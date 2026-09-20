@@ -19,6 +19,9 @@ export type ArtifactType = (typeof ARTIFACT_TYPES)[number];
 export const RELATION_ENTITY_TYPES = ["task", "artifact"] as const;
 export type RelationEntityType = (typeof RELATION_ENTITY_TYPES)[number];
 
+export const BOARD_ENTITY_TYPES = ["task", "artifact", "investigation_node"] as const;
+export type BoardEntityType = (typeof BOARD_ENTITY_TYPES)[number];
+
 export type ProjectStatus = "active" | "archived";
 export type ClaimState = "active" | "released";
 
@@ -97,9 +100,49 @@ export interface Relation {
   createdAt: string;
 }
 
+export interface InvestigationNode {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  kind?: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}
+
+export interface InvestigationItem {
+  id: string;
+  nodeId: string;
+  title: string;
+  description: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}
+
+export interface InvestigationItemLink {
+  id: string;
+  projectId: string;
+  fromItemId: string;
+  toNodeId: string;
+  label: string;
+  kind: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface InvestigationItemTaskLink {
+  itemId: string;
+  taskId: string;
+  sortOrder: number;
+  createdAt: string;
+}
+
 export interface BoardNodePosition {
   projectId: string;
-  entityType: RelationEntityType;
+  entityType: BoardEntityType;
   entityId: string;
   x: number;
   y: number;

@@ -32,7 +32,7 @@ The core contains only vendor-neutral concepts. `QuestBoardService` is the appli
 
 ## Current schema
 
-The SQLite database now contains eight primary tables:
+The SQLite database now contains twelve primary tables:
 
 - `projects`: human-readable project identity and optional local root metadata
 - `tasks`: title, description, status, priority, tags, actor, timestamps, and revision
@@ -41,7 +41,11 @@ The SQLite database now contains eight primary tables:
 - `mutation_receipts`: idempotency receipts keyed by client request ID and mutation fingerprint
 - `artifacts`: Task-attached evidence such as files, URLs, commits, screenshots, operation references, and logs
 - `relations`: directed, vendor-neutral edges between Task/Artifact endpoints inside one project
-- `board_positions`: free-layout Task/Artifact canvas coordinates, stored separately from workflow revision/history
+- `investigation_nodes`: project-flow/component/topic nodes with title, description, optional kind, and revision
+- `investigation_items`: ordered, independently described entries inside an Investigation Node
+- `investigation_item_links`: directed flow edges from a specific Item to another Investigation Node
+- `investigation_item_tasks`: many-to-many overlay from Investigation Items to canonical QuestBoard Tasks
+- `board_positions`: free-layout Task/Artifact/Investigation-Node canvas coordinates, stored separately from workflow revision/history
 
 Task mutations and their Activity rows are written in one SQLite transaction. Claim/release, Artifact attachment, and Relation creation are also paired with their Activity rows transactionally. When a mutation carries a request ID, its result receipt is persisted in the same transaction as the side effect.
 
@@ -61,7 +65,7 @@ Mutations can carry an idempotency `requestId`. SQLite stores the operation, act
 
 The first Web adapter is deliberately framework-free HTML, CSS, and JavaScript served by the same HTTP process. It adds no runtime dependency and talks only to the public HTTP boundary rather than importing core or SQLite modules.
 
-The UI provides two views. Quest Board renders the seven planned Task states as a horizontal Kanban board. Investigation Board renders Task/Artifact nodes on a scrollable free-layout canvas and draws Relation edges between them. Node dragging persists coordinates through the application/repository boundary without changing Task revision or writing Activity events. Project selection, task create/edit, current Claim display, Claim/Release, Activity history, note creation, Artifact attachment, and Task/Artifact Relation inspection/creation remain shared across the views.
+The UI provides two views. Quest Board renders the seven planned Task states as a horizontal Kanban board. Investigation Board is a project-flow execution map: first-class Investigation Nodes contain multiple described Items, an Item can overlay multiple canonical Tasks, and a directed flow edge originates from a specific Item and targets another Node. Standalone unconnected Nodes are valid first-class state. When a project has no first-class Investigation Nodes yet, the existing Task/Artifact free-layout Relation visualization remains as a compatibility view rather than being migrated or deleted automatically. Node dragging persists coordinates through the application/repository boundary without changing Task revision or writing Activity events. The Web adapter keeps a bounded move history so node-position changes can be undone/redone through that same persistence boundary, and the canvas supports 50–150% zoom with drag deltas normalized back into logical board coordinates.
 
 Only the fixed assets `/`, `/app.js`, and `/styles.css` are served. The server applies a same-origin Content Security Policy and `nosniff`; Web mutation calls still use the neutral actor id/provider headers. Actor identity in browser local storage is attribution metadata, not authentication.
 
@@ -69,7 +73,7 @@ For another device on the same Tailnet, the optional `start:tailnet` composition
 
 ## Shared agent-tool boundary
 
-`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project create/read, task reads/create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, and Relation reads/creation.
+`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project create/read, task reads/create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, Relation reads/creation, and Investigation Graph snapshot/Node/Item/Task-link/flow-link operations. MCP exposes the same definitions through `tools/list` and dispatches the same executor through `tools/call`.
 
 Mutation inputs carry an explicit neutral actor with `id` and `provider`. These values are attribution metadata used by Claim and Activity; provider names have no privileged meaning in the core. Claims are coordination signals rather than mutation locks, and a Claim does not prevent another client from updating the Task.
 
@@ -89,4 +93,4 @@ Executable Web/API, CLI, and MCP composition roots install the process concurren
 
 ## Boundary deliberately deferred
 
-Agent-specific adapters, authentication/authorization, public internet exposure, first-class Note graph nodes, canvas zoom/pan controls, relation-authoring gestures, and richer Investigation Board graph tooling are not part of this slice. Artifact/Relation persistence, internal optimistic concurrency with optional strict CAS, mutation idempotency receipts, and the first free-layout Investigation Board visualization are implemented.
+Agent-specific adapters, authentication/authorization, public internet exposure, first-class Note graph nodes, dedicated canvas pan controls, polished search/filter/navigation, Item reorder, and richer graph editing ergonomics are not part of this slice. Artifact/Relation persistence, first-class Investigation Nodes/Items, Task overlays, Item-origin flow links, internal optimistic concurrency with optional strict CAS, mutation idempotency receipts, legacy-layout compatibility, move undo/redo, and canvas zoom are implemented.

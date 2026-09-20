@@ -103,6 +103,28 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
     }) as { relations: Array<{ kind: string }> };
     assert.equal(relations.relations[0]?.kind, "evidence_for");
 
+    const graphNode = executeQuestBoardAgentTool(service, "questboard_create_investigation_node", {
+      projectId: project.id,
+      title: "Adapter flow",
+      description: "Flow modeled through the shared boundary",
+      actor: agent,
+    }) as { node: { id: string } };
+    const graphItem = executeQuestBoardAgentTool(service, "questboard_add_investigation_item", {
+      nodeId: graphNode.node.id,
+      title: "Execute adapter work",
+      actor: agent,
+    }) as { item: { id: string } };
+    executeQuestBoardAgentTool(service, "questboard_link_task_to_investigation_item", {
+      itemId: graphItem.item.id,
+      taskId: created.task.id,
+      actor: agent,
+    });
+    const graph = executeQuestBoardAgentTool(service, "questboard_get_investigation_graph", {
+      projectId: project.id,
+    }) as { nodes: Array<{ id: string }>; itemTaskLinks: Array<{ taskId: string }> };
+    assert.equal(graph.nodes[0]?.id, graphNode.node.id);
+    assert.equal(graph.itemTaskLinks[0]?.taskId, created.task.id);
+
     const activity = executeQuestBoardAgentTool(service, "questboard_list_activity", {
       taskId: created.task.id,
     }) as { activities: Array<{ type: string }> };
@@ -156,6 +178,9 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
     assert.ok(toolNames.includes("questboard_claim_task"));
     assert.ok(toolNames.includes("questboard_add_artifact"));
     assert.ok(toolNames.includes("questboard_add_relation"));
+    assert.ok(toolNames.includes("questboard_create_investigation_node"));
+    assert.ok(toolNames.includes("questboard_get_investigation_graph"));
+    assert.ok(toolNames.includes("questboard_link_task_to_investigation_item"));
     const content = messages[2]?.result.content as Array<{ text: string }>;
     const payload = JSON.parse(content[0]?.text ?? "{}") as { tasks: Array<{ title: string }> };
     assert.equal(payload.tasks[0]?.title, "Ready via MCP");

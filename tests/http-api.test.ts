@@ -177,6 +177,77 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     assert.equal(investigation.body.positions.length, 2);
     assert.equal(investigation.body.tasks[0]?.revision, 2);
 
+    const graphNodeCreated = await jsonRequest<{ node: { id: string; title: string } }>(
+      `${baseUrl}/projects/${projectId}/investigation/nodes`,
+      { method: "POST", actor: human, body: { title: "Login flow", description: "Auth pipeline" } },
+    );
+    const graphNodeId = graphNodeCreated.body.node.id;
+    const graphItemCreated = await jsonRequest<{ item: { id: string; title: string } }>(
+      `${baseUrl}/investigation/nodes/${graphNodeId}/items`,
+      { method: "POST", actor: human, body: { title: "Validate token", description: "JWT checks" } },
+    );
+    const graphItemId = graphItemCreated.body.item.id;
+    const taskLinked = await jsonRequest<{ link: { taskId: string } }>(
+      `${baseUrl}/investigation/items/${graphItemId}/tasks`,
+      { method: "POST", actor: human, body: { taskId } },
+    );
+    assert.equal(taskLinked.body.link.taskId, taskId);
+    const taskCreatedForItem = await jsonRequest<{ task: { id: string; title: string }; link: { taskId: string } }>(
+      `${baseUrl}/investigation/items/${graphItemId}/tasks/new`,
+      { method: "POST", actor: human, body: { title: "Add token cache", status: "ready", priority: "high" } },
+    );
+    assert.equal(taskCreatedForItem.response.status, 201);
+    assert.equal(taskCreatedForItem.body.task.title, "Add token cache");
+    assert.equal(taskCreatedForItem.body.link.taskId, taskCreatedForItem.body.task.id);
+    const nextNodeCreated = await jsonRequest<{ node: { id: string } }>(
+      `${baseUrl}/projects/${projectId}/investigation/nodes`,
+      { method: "POST", actor: human, body: { title: "Session creation" } },
+    );
+    const graphLinkCreated = await jsonRequest<{ link: { id: string; fromItemId: string; toNodeId: string } }>(
+      `${baseUrl}/investigation/item-links`,
+      { method: "POST", actor: human, body: { fromItemId: graphItemId, toNodeId: nextNodeCreated.body.node.id, label: "valid" } },
+    );
+    assert.equal(graphLinkCreated.body.link.fromItemId, graphItemId);
+    const graphPosition = await jsonRequest<{ position: { entityType: string; x: number } }>(
+      `${baseUrl}/projects/${projectId}/investigation/positions/investigation_node/${graphNodeId}`,
+      { method: "PUT", actor: human, body: { x: 120, y: 100 } },
+    );
+    assert.equal(graphPosition.body.position.entityType, "investigation_node");
+    const graphSnapshot = await jsonRequest<{
+      nodes: Array<{ id: string }>;
+      items: Array<{ id: string }>;
+      itemLinks: Array<{ fromItemId: string }>;
+      itemTaskLinks: Array<{ taskId: string }>;
+      claims: Array<{ taskId: string; agentId: string }>;
+      positions: Array<{ entityType: string }>;
+    }>(`${baseUrl}/projects/${projectId}/investigation/graph`);
+    assert.equal(graphSnapshot.body.nodes.length, 2);
+    assert.equal(graphSnapshot.body.items[0]?.id, graphItemId);
+    assert.equal(graphSnapshot.body.itemLinks[0]?.fromItemId, graphItemId);
+    assert.deepEqual(
+      graphSnapshot.body.itemTaskLinks.map((link) => link.taskId),
+      [taskId, taskCreatedForItem.body.task.id],
+    );
+    assert.deepEqual(graphSnapshot.body.claims.map((claim) => claim.taskId), [taskId]);
+    assert.ok(graphSnapshot.body.positions.some((position) => position.entityType === "investigation_node"));
+
+    const taskUnlinked = await jsonRequest<{ removed: boolean }>(
+      `${baseUrl}/investigation/items/${graphItemId}/tasks/${taskId}`,
+      { method: "DELETE", actor: human },
+    );
+    assert.equal(taskUnlinked.body.removed, true);
+    const flowUnlinked = await jsonRequest<{ removed: boolean }>(
+      `${baseUrl}/investigation/item-links/${graphLinkCreated.body.link.id}`,
+      { method: "DELETE", actor: human },
+    );
+    assert.equal(flowUnlinked.body.removed, true);
+    const graphAfterUnlink = await jsonRequest<{
+      itemLinks: Array<{ id: string }>;
+      itemTaskLinks: Array<{ taskId: string }>;
+    }>(`${baseUrl}/projects/${projectId}/investigation/graph`);
+    assert.deepEqual(graphAfterUnlink.body.itemTaskLinks.map((link) => link.taskId), [taskCreatedForItem.body.task.id]);
+    assert.deepEqual(graphAfterUnlink.body.itemLinks, []);
+
     await jsonRequest(`${baseUrl}/tasks/${taskId}/release`, {
       method: "POST",
       actor: chatgpt,

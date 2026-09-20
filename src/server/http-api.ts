@@ -5,27 +5,35 @@ import type {
   ActivityType,
   ActorRef,
   ArtifactType,
+  BoardEntityType,
   ProjectStatus,
   RelationEntityType,
   TaskPriority,
   TaskStatus,
 } from "../core/domain.js";
-import { ARTIFACT_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
+import { ARTIFACT_TYPES, BOARD_ENTITY_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
   ClaimNotFoundError,
   ClaimOwnershipError,
+  EntityRevisionConflictError,
   EntityNotFoundError,
   MutationRequestConflictError,
   RevisionConflictError,
 } from "../core/errors.js";
 import type {
   CreateArtifactInput,
+  CreateInvestigationItemInput,
+  CreateInvestigationItemLinkInput,
+  CreateInvestigationLinkedTaskInput,
+  CreateInvestigationNodeInput,
   CreateProjectInput,
   CreateRelationInput,
   CreateTaskInput,
   QuestBoardService,
+  UpdateInvestigationItemInput,
+  UpdateInvestigationNodeInput,
   UpdateProjectInput,
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
@@ -111,20 +119,157 @@ async function handleRequest(
   const investigationMatch = pathname.match(/^\/projects\/([^/]+)\/investigation$/);
   if (investigationMatch && method === "GET") {
     const projectId = decodePathPart(investigationMatch[1]);
-    service.getProject(projectId);
+    const graph = service.getInvestigationGraph(projectId);
     sendJson(response, 200, {
-      tasks: service.listTasks({ projectId }),
-      artifacts: service.listProjectArtifacts(projectId),
-      relations: service.listProjectRelations(projectId),
-      positions: service.listBoardPositions(projectId),
+      tasks: graph.tasks,
+      artifacts: graph.artifacts,
+      relations: graph.relations,
+      positions: graph.positions,
     });
     return;
   }
 
-  const positionMatch = pathname.match(/^\/projects\/([^/]+)\/investigation\/positions\/(task|artifact)\/([^/]+)$/);
+  const graphMatch = pathname.match(/^\/projects\/([^/]+)\/investigation\/graph$/);
+  if (graphMatch && method === "GET") {
+    sendJson(response, 200, service.getInvestigationGraph(decodePathPart(graphMatch[1])));
+    return;
+  }
+
+  const projectNodesMatch = pathname.match(/^\/projects\/([^/]+)\/investigation\/nodes$/);
+  if (projectNodesMatch) {
+    const projectId = decodePathPart(projectNodesMatch[1]);
+    if (method === "GET") {
+      sendJson(response, 200, { nodes: service.listInvestigationNodes(projectId) });
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJsonObject(request);
+      const input: CreateInvestigationNodeInput = {
+        projectId,
+        title: requireString(body, "title"),
+        ...optionalStringProperty(body, "description"),
+        ...optionalStringProperty(body, "kind"),
+      };
+      sendJson(response, 201, { node: service.createInvestigationNode(input, requireActor(request), mutationOptions(request)) });
+      return;
+    }
+  }
+
+  const graphNodeMatch = pathname.match(/^\/investigation\/nodes\/([^/]+)$/);
+  if (graphNodeMatch) {
+    const nodeId = decodePathPart(graphNodeMatch[1]);
+    if (method === "GET") {
+      sendJson(response, 200, { node: service.getInvestigationNode(nodeId) });
+      return;
+    }
+    if (method === "PATCH") {
+      const body = await readJsonObject(request);
+      const patch: UpdateInvestigationNodeInput = {
+        ...optionalPositiveIntegerProperty(body, "expectedRevision"),
+        ...optionalStringProperty(body, "title"),
+        ...optionalStringProperty(body, "description"),
+        ...optionalStringProperty(body, "kind"),
+      };
+      sendJson(response, 200, { node: service.updateInvestigationNode(nodeId, patch, requireActor(request), mutationOptions(request)) });
+      return;
+    }
+  }
+
+  const graphNodeItemsMatch = pathname.match(/^\/investigation\/nodes\/([^/]+)\/items$/);
+  if (graphNodeItemsMatch && method === "POST") {
+    const body = await readJsonObject(request);
+    const input: CreateInvestigationItemInput = {
+      nodeId: decodePathPart(graphNodeItemsMatch[1]),
+      title: requireString(body, "title"),
+      ...optionalStringProperty(body, "description"),
+    };
+    sendJson(response, 201, { item: service.createInvestigationItem(input, requireActor(request), mutationOptions(request)) });
+    return;
+  }
+
+  const graphItemMatch = pathname.match(/^\/investigation\/items\/([^/]+)$/);
+  if (graphItemMatch) {
+    const itemId = decodePathPart(graphItemMatch[1]);
+    if (method === "GET") {
+      sendJson(response, 200, { item: service.getInvestigationItem(itemId) });
+      return;
+    }
+    if (method === "PATCH") {
+      const body = await readJsonObject(request);
+      const patch: UpdateInvestigationItemInput = {
+        ...optionalPositiveIntegerProperty(body, "expectedRevision"),
+        ...optionalStringProperty(body, "title"),
+        ...optionalStringProperty(body, "description"),
+      };
+      sendJson(response, 200, { item: service.updateInvestigationItem(itemId, patch, requireActor(request), mutationOptions(request)) });
+      return;
+    }
+  }
+
+  const graphItemTasksMatch = pathname.match(/^\/investigation\/items\/([^/]+)\/tasks$/);
+  if (graphItemTasksMatch && method === "POST") {
+    const body = await readJsonObject(request);
+    const link = service.linkTaskToInvestigationItem(
+      decodePathPart(graphItemTasksMatch[1]),
+      requireString(body, "taskId"),
+      requireActor(request),
+      mutationOptions(request),
+    );
+    sendJson(response, 201, { link });
+    return;
+  }
+
+  const graphItemTaskMatch = pathname.match(/^\/investigation\/items\/([^/]+)\/tasks\/([^/]+)$/);
+  if (graphItemTaskMatch && method === "DELETE") {
+    service.unlinkTaskFromInvestigationItem(
+      decodePathPart(graphItemTaskMatch[1]),
+      decodePathPart(graphItemTaskMatch[2]),
+      requireActor(request),
+      mutationOptions(request),
+    );
+    sendJson(response, 200, { removed: true });
+    return;
+  }
+
+  const graphItemNewTaskMatch = pathname.match(/^\/investigation\/items\/([^/]+)\/tasks\/new$/);
+  if (graphItemNewTaskMatch && method === "POST") {
+    const body = await readJsonObject(request);
+    const input: CreateInvestigationLinkedTaskInput = {
+      title: requireString(body, "title"),
+      ...optionalStringProperty(body, "description"),
+      ...optionalEnumProperty(body, "status", TASK_STATUSES),
+      ...optionalEnumProperty(body, "priority", TASK_PRIORITIES),
+      ...optionalStringArrayProperty(body, "tags"),
+    };
+    sendJson(response, 201, service.createTaskForInvestigationItem(
+      decodePathPart(graphItemNewTaskMatch[1]), input, requireActor(request), mutationOptions(request),
+    ));
+    return;
+  }
+
+  if (pathname === "/investigation/item-links" && method === "POST") {
+    const body = await readJsonObject(request);
+    const input: CreateInvestigationItemLinkInput = {
+      fromItemId: requireString(body, "fromItemId"),
+      toNodeId: requireString(body, "toNodeId"),
+      ...optionalStringProperty(body, "label"),
+      ...optionalStringProperty(body, "kind"),
+    };
+    sendJson(response, 201, { link: service.createInvestigationItemLink(input, requireActor(request), mutationOptions(request)) });
+    return;
+  }
+
+  const graphItemLinkMatch = pathname.match(/^\/investigation\/item-links\/([^/]+)$/);
+  if (graphItemLinkMatch && method === "DELETE") {
+    service.removeInvestigationItemLink(decodePathPart(graphItemLinkMatch[1]), requireActor(request), mutationOptions(request));
+    sendJson(response, 200, { removed: true });
+    return;
+  }
+
+  const positionMatch = pathname.match(/^\/projects\/([^/]+)\/investigation\/positions\/(task|artifact|investigation_node)\/([^/]+)$/);
   if (positionMatch && method === "PUT") {
     const projectId = decodePathPart(positionMatch[1]);
-    const entityType = positionMatch[2] as RelationEntityType;
+    const entityType = parseEnum(positionMatch[2] ?? "", "entityType", BOARD_ENTITY_TYPES) as BoardEntityType;
     const entityId = decodePathPart(positionMatch[3]);
     const body = await readJsonObject(request);
     const position = service.setBoardPosition(
@@ -460,6 +605,17 @@ function sendError(response: ServerResponse, error: unknown): void {
     return;
   }
   if (error instanceof RevisionConflictError) {
+    sendJson(response, 409, {
+      error: {
+        code: "revision_conflict",
+        message: error.message,
+        expectedRevision: error.expectedRevision,
+        actualRevision: error.actualRevision,
+      },
+    });
+    return;
+  }
+  if (error instanceof EntityRevisionConflictError) {
     sendJson(response, 409, {
       error: {
         code: "revision_conflict",

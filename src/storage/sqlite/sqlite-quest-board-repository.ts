@@ -4,9 +4,14 @@ import type {
   ActivityType,
   Artifact,
   ArtifactType,
+  BoardEntityType,
   BoardNodePosition,
   Claim,
   ClaimState,
+  InvestigationItem,
+  InvestigationItemLink,
+  InvestigationItemTaskLink,
+  InvestigationNode,
   Project,
   ProjectStatus,
   Relation,
@@ -21,6 +26,7 @@ import {
   ClaimNotFoundError,
   ClaimOwnershipError,
   EntityNotFoundError,
+  EntityRevisionConflictError,
   MutationRequestConflictError,
   RevisionConflictError,
 } from "../../core/errors.js";
@@ -113,12 +119,52 @@ type RelationRow = {
 
 type BoardPositionRow = {
   project_id: string;
-  entity_type: RelationEntityType;
+  entity_type: BoardEntityType;
   entity_id: string;
   x: number;
   y: number;
   updated_by: string;
   updated_at: string;
+};
+
+type InvestigationNodeRow = {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string;
+  kind: string | null;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+};
+
+type InvestigationItemRow = {
+  id: string;
+  node_id: string;
+  title: string;
+  description: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+};
+
+type InvestigationItemLinkRow = {
+  id: string;
+  project_id: string;
+  from_item_id: string;
+  to_node_id: string;
+  label: string;
+  kind: string;
+  created_by: string;
+  created_at: string;
+};
+
+type InvestigationItemTaskLinkRow = {
+  item_id: string;
+  task_id: string;
+  sort_order: number;
+  created_at: string;
 };
 
 export class SqliteQuestBoardRepository implements QuestBoardRepository {
@@ -297,6 +343,16 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     return row ? mapClaim(row) : undefined;
   }
 
+  listProjectClaims(projectId: string): Claim[] {
+    const rows = this.db.prepare(`
+      SELECT c.* FROM claims c
+      JOIN tasks t ON t.id = c.task_id
+      WHERE t.project_id = ? AND c.state = 'active'
+      ORDER BY t.created_at ASC, t.id ASC
+    `).all(projectId) as ClaimRow[];
+    return rows.map(mapClaim);
+  }
+
   claimTask(claim: Claim, activity: Activity): Claim {
     return this.transaction(() => {
       const existing = this.getClaim(claim.taskId);
@@ -447,6 +503,115 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     return rows.map(mapRelation);
   }
 
+  createInvestigationNode(node: InvestigationNode): void {
+    this.db.prepare(`
+      INSERT INTO investigation_nodes (id, project_id, title, description, kind, created_at, updated_at, revision)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(node.id, node.projectId, node.title, node.description, node.kind ?? null, node.createdAt, node.updatedAt, node.revision);
+  }
+
+  getInvestigationNode(nodeId: string): InvestigationNode | undefined {
+    const row = this.db.prepare("SELECT * FROM investigation_nodes WHERE id = ?").get(nodeId) as InvestigationNodeRow | undefined;
+    return row ? mapInvestigationNode(row) : undefined;
+  }
+
+  listInvestigationNodes(projectId: string): InvestigationNode[] {
+    return (this.db.prepare("SELECT * FROM investigation_nodes WHERE project_id = ? ORDER BY created_at ASC, id ASC").all(projectId) as InvestigationNodeRow[])
+      .map(mapInvestigationNode);
+  }
+
+  updateInvestigationNode(node: InvestigationNode, expectedRevision: number): void {
+    const result = this.db.prepare(`
+      UPDATE investigation_nodes SET title = ?, description = ?, kind = ?, updated_at = ?, revision = ?
+      WHERE id = ? AND revision = ?
+    `).run(node.title, node.description, node.kind ?? null, node.updatedAt, node.revision, node.id, expectedRevision);
+    if (Number(result.changes) !== 1) {
+      const current = this.getInvestigationNode(node.id);
+      if (!current) throw new EntityNotFoundError("InvestigationNode", node.id);
+      throw new EntityRevisionConflictError("InvestigationNode", node.id, expectedRevision, current.revision);
+    }
+  }
+
+  createInvestigationItem(item: InvestigationItem): void {
+    this.db.prepare(`
+      INSERT INTO investigation_items (id, node_id, title, description, sort_order, created_at, updated_at, revision)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(item.id, item.nodeId, item.title, item.description, item.sortOrder, item.createdAt, item.updatedAt, item.revision);
+  }
+
+  getInvestigationItem(itemId: string): InvestigationItem | undefined {
+    const row = this.db.prepare("SELECT * FROM investigation_items WHERE id = ?").get(itemId) as InvestigationItemRow | undefined;
+    return row ? mapInvestigationItem(row) : undefined;
+  }
+
+  listInvestigationItems(projectId: string): InvestigationItem[] {
+    return (this.db.prepare(`
+      SELECT i.* FROM investigation_items i
+      JOIN investigation_nodes n ON n.id = i.node_id
+      WHERE n.project_id = ?
+      ORDER BY n.created_at ASC, i.sort_order ASC, i.created_at ASC, i.id ASC
+    `).all(projectId) as InvestigationItemRow[]).map(mapInvestigationItem);
+  }
+
+  listInvestigationNodeItems(nodeId: string): InvestigationItem[] {
+    return (this.db.prepare("SELECT * FROM investigation_items WHERE node_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC").all(nodeId) as InvestigationItemRow[])
+      .map(mapInvestigationItem);
+  }
+
+  updateInvestigationItem(item: InvestigationItem, expectedRevision: number): void {
+    const result = this.db.prepare(`
+      UPDATE investigation_items SET title = ?, description = ?, sort_order = ?, updated_at = ?, revision = ?
+      WHERE id = ? AND revision = ?
+    `).run(item.title, item.description, item.sortOrder, item.updatedAt, item.revision, item.id, expectedRevision);
+    if (Number(result.changes) !== 1) {
+      const current = this.getInvestigationItem(item.id);
+      if (!current) throw new EntityNotFoundError("InvestigationItem", item.id);
+      throw new EntityRevisionConflictError("InvestigationItem", item.id, expectedRevision, current.revision);
+    }
+  }
+
+  createInvestigationItemLink(link: InvestigationItemLink): void {
+    this.db.prepare(`
+      INSERT INTO investigation_item_links (id, project_id, from_item_id, to_node_id, label, kind, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(link.id, link.projectId, link.fromItemId, link.toNodeId, link.label, link.kind, link.createdBy, link.createdAt);
+  }
+
+  listInvestigationItemLinks(projectId: string): InvestigationItemLink[] {
+    return (this.db.prepare("SELECT * FROM investigation_item_links WHERE project_id = ? ORDER BY created_at ASC, id ASC").all(projectId) as InvestigationItemLinkRow[])
+      .map(mapInvestigationItemLink);
+  }
+
+  deleteInvestigationItemLink(linkId: string): void {
+    this.db.prepare("DELETE FROM investigation_item_links WHERE id = ?").run(linkId);
+  }
+
+  createInvestigationItemTaskLink(link: InvestigationItemTaskLink): InvestigationItemTaskLink {
+    this.db.prepare(`
+      INSERT INTO investigation_item_tasks (item_id, task_id, sort_order, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(item_id, task_id) DO NOTHING
+    `).run(link.itemId, link.taskId, link.sortOrder, link.createdAt);
+    const row = this.db.prepare("SELECT * FROM investigation_item_tasks WHERE item_id = ? AND task_id = ?")
+      .get(link.itemId, link.taskId) as InvestigationItemTaskLinkRow | undefined;
+    if (!row) throw new EntityNotFoundError("InvestigationItemTaskLink", `${link.itemId}:${link.taskId}`);
+    return mapInvestigationItemTaskLink(row);
+  }
+
+  listInvestigationItemTaskLinks(projectId: string): InvestigationItemTaskLink[] {
+    return (this.db.prepare(`
+      SELECT it.* FROM investigation_item_tasks it
+      JOIN investigation_items i ON i.id = it.item_id
+      JOIN investigation_nodes n ON n.id = i.node_id
+      WHERE n.project_id = ?
+      ORDER BY i.sort_order ASC, it.sort_order ASC, it.created_at ASC
+    `).all(projectId) as InvestigationItemTaskLinkRow[]).map(mapInvestigationItemTaskLink);
+  }
+
+  deleteInvestigationItemTaskLink(itemId: string, taskId: string): void {
+    this.db.prepare("DELETE FROM investigation_item_tasks WHERE item_id = ? AND task_id = ?").run(itemId, taskId);
+  }
+
   listBoardPositions(projectId: string): BoardNodePosition[] {
     const rows = this.db
       .prepare("SELECT * FROM board_positions WHERE project_id = ? ORDER BY entity_type ASC, entity_id ASC")
@@ -577,9 +742,60 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       CREATE INDEX IF NOT EXISTS relations_from_idx ON relations(from_type, from_id);
       CREATE INDEX IF NOT EXISTS relations_to_idx ON relations(to_type, to_id);
 
+      CREATE TABLE IF NOT EXISTS investigation_nodes (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        kind TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1)
+      );
+
+      CREATE INDEX IF NOT EXISTS investigation_nodes_project_created_idx ON investigation_nodes(project_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS investigation_items (
+        id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL REFERENCES investigation_nodes(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1)
+      );
+
+      CREATE INDEX IF NOT EXISTS investigation_items_node_order_idx ON investigation_items(node_id, sort_order, created_at);
+
+      CREATE TABLE IF NOT EXISTS investigation_item_links (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        from_item_id TEXT NOT NULL REFERENCES investigation_items(id) ON DELETE CASCADE,
+        to_node_id TEXT NOT NULL REFERENCES investigation_nodes(id) ON DELETE CASCADE,
+        label TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'flow',
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS investigation_item_links_project_idx ON investigation_item_links(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS investigation_item_links_from_idx ON investigation_item_links(from_item_id);
+      CREATE INDEX IF NOT EXISTS investigation_item_links_to_idx ON investigation_item_links(to_node_id);
+
+      CREATE TABLE IF NOT EXISTS investigation_item_tasks (
+        item_id TEXT NOT NULL REFERENCES investigation_items(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (item_id, task_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS investigation_item_tasks_task_idx ON investigation_item_tasks(task_id);
+
       CREATE TABLE IF NOT EXISTS board_positions (
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        entity_type TEXT NOT NULL CHECK (entity_type IN ('task', 'artifact')),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('task', 'artifact', 'investigation_node')),
         entity_id TEXT NOT NULL,
         x REAL NOT NULL,
         y REAL NOT NULL,
@@ -593,6 +809,28 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     if (!claimColumns.some((column) => column.name === "claim_id")) {
       this.db.exec("ALTER TABLE claims ADD COLUMN claim_id TEXT");
       this.db.exec("UPDATE claims SET claim_id = 'legacy:' || task_id WHERE claim_id IS NULL");
+    }
+
+    const boardPositionDefinition = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'board_positions'").get() as { sql: string } | undefined;
+    if (boardPositionDefinition && !boardPositionDefinition.sql.includes("investigation_node")) {
+      this.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE board_positions RENAME TO board_positions_legacy;
+          CREATE TABLE board_positions (
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL CHECK (entity_type IN ('task', 'artifact', 'investigation_node')),
+            entity_id TEXT NOT NULL,
+            x REAL NOT NULL,
+            y REAL NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, entity_type, entity_id)
+          );
+          INSERT INTO board_positions (project_id, entity_type, entity_id, x, y, updated_by, updated_at)
+          SELECT project_id, entity_type, entity_id, x, y, updated_by, updated_at FROM board_positions_legacy;
+          DROP TABLE board_positions_legacy;
+        `);
+      });
     }
   }
 
@@ -728,4 +966,47 @@ function mapBoardPosition(row: BoardPositionRow): BoardNodePosition {
     updatedBy: row.updated_by,
     updatedAt: row.updated_at,
   };
+}
+
+function mapInvestigationNode(row: InvestigationNodeRow): InvestigationNode {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    description: row.description,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+    ...(row.kind ? { kind: row.kind } : {}),
+  };
+}
+
+function mapInvestigationItem(row: InvestigationItemRow): InvestigationItem {
+  return {
+    id: row.id,
+    nodeId: row.node_id,
+    title: row.title,
+    description: row.description,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+  };
+}
+
+function mapInvestigationItemLink(row: InvestigationItemLinkRow): InvestigationItemLink {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    fromItemId: row.from_item_id,
+    toNodeId: row.to_node_id,
+    label: row.label,
+    kind: row.kind,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
+}
+
+function mapInvestigationItemTaskLink(row: InvestigationItemTaskLinkRow): InvestigationItemTaskLink {
+  return { itemId: row.item_id, taskId: row.task_id, sortOrder: row.sort_order, createdAt: row.created_at };
 }
