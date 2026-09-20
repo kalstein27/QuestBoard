@@ -412,6 +412,7 @@ UI/MCP/CLI 모두 같은 의미를 사용한다.
 
 ```text
 questboard_list_projects
+questboard_create_project
 questboard_list_tasks
 questboard_get_task
 questboard_create_task

@@ -10,6 +10,7 @@ import {
 
 const SUPPORTED_PROTOCOL_VERSION = "2025-06-18";
 const MUTATING_TOOLS = new Set([
+  "questboard_create_project",
   "questboard_create_task",
   "questboard_update_task",
   "questboard_claim_task",

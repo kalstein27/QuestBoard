@@ -180,6 +180,7 @@ While that MCP process is running, open `http://127.0.0.1:4317` in a browser. MC
 The adapter exposes:
 
 - `questboard_list_projects`
+- `questboard_create_project`
 - `questboard_list_tasks`
 - `questboard_get_task`
 - `questboard_create_task`

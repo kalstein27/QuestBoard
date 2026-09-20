@@ -18,6 +18,7 @@ import {
 } from "../core/errors.js";
 import type {
   CreateArtifactInput,
+  CreateProjectInput,
   CreateRelationInput,
   CreateTaskInput,
   QuestBoardService,
@@ -48,6 +49,22 @@ export const QUESTBOARD_AGENT_TOOLS = [
     name: "questboard_list_projects",
     description: "List QuestBoard projects.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "questboard_create_project",
+    description: "Create a QuestBoard project and record the neutral actor that created it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        name: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        rootPath: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["name", "actor"],
+    },
   },
   {
     name: "questboard_list_tasks",
@@ -252,6 +269,14 @@ export function executeQuestBoardAgentTool(
   switch (name) {
     case "questboard_list_projects":
       return { projects: service.listProjects() };
+    case "questboard_create_project": {
+      const inputValue: CreateProjectInput = {
+        name: requireString(args, "name"),
+        ...optionalStringProperty(args, "description"),
+        ...optionalStringProperty(args, "rootPath"),
+      };
+      return { project: service.createProject(inputValue, requireActor(args), mutationOptions(args)) };
+    }
     case "questboard_list_tasks": {
       const projectId = optionalString(args, "projectId");
       const status = optionalEnum(args, "status", TASK_STATUSES);

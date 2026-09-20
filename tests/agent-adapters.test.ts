@@ -19,7 +19,13 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
   try {
-    const project = service.createProject({ name: "Adapters" }, owner);
+    const projectResult = executeQuestBoardAgentTool(service, "questboard_create_project", {
+      name: "Adapters",
+      description: "Created through the shared agent boundary",
+      actor: owner,
+    }) as { project: { id: string; name: string } };
+    const project = projectResult.project;
+    assert.equal(project.name, "Adapters");
     const created = executeQuestBoardAgentTool(service, "questboard_create_task", {
       projectId: project.id,
       title: "Connect agents",
@@ -146,6 +152,7 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
     assert.equal(messages.length, 3);
     assert.equal((messages[0]?.result.serverInfo as { name: string }).name, "questboard");
     const toolNames = (messages[1]?.result.tools as Array<{ name: string }>).map((tool) => tool.name);
+    assert.ok(toolNames.includes("questboard_create_project"));
     assert.ok(toolNames.includes("questboard_claim_task"));
     assert.ok(toolNames.includes("questboard_add_artifact"));
     assert.ok(toolNames.includes("questboard_add_relation"));

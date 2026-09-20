@@ -69,7 +69,7 @@ For another device on the same Tailnet, the optional `start:tailnet` composition
 
 ## Shared agent-tool boundary
 
-`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project/task reads, task create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, and Relation reads/creation.
+`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project create/read, task reads/create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, and Relation reads/creation.
 
 Mutation inputs carry an explicit neutral actor with `id` and `provider`. These values are attribution metadata used by Claim and Activity; provider names have no privileged meaning in the core. Claims are coordination signals rather than mutation locks, and a Claim does not prevent another client from updating the Task.
 
