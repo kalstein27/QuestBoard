@@ -2,7 +2,7 @@
 
 This guide is intentionally provider-neutral. It describes how an AI agent or automation client should join a QuestBoard workspace without depending on ChatGPT, Claude, Codex, or any other specific runtime.
 
-## 1. Build and choose the shared database
+## 1. Build and start the shared daemon
 
 QuestBoard requires Node.js 24 or newer.
 
@@ -11,13 +11,13 @@ npm ci
 npm run build
 ```
 
-All participating adapters must point at the same SQLite file. The default is:
+The QuestBoard daemon is the single normal runtime owner of SQLite and `QuestBoardService`. Its default database is:
 
 ```text
 .questboard/questboard.sqlite
 ```
 
-To choose another file:
+To choose another file, set this on the daemon process:
 
 ```bash
 export QUESTBOARD_DB_PATH=/absolute/path/to/questboard.sqlite
@@ -25,30 +25,39 @@ export QUESTBOARD_DB_PATH=/absolute/path/to/questboard.sqlite
 
 Do not commit the live database to Git.
 
+Start one daemon before launching agent clients:
+
+```bash
+npm run daemon
+```
+
+By default it serves Web/API and the local client bridge at `http://127.0.0.1:4317`.
+
 ## 2. Choose an adapter
 
-### MCP stdio + Web/API runtime
+### MCP stdio proxy
 
-Use the compiled MCP entry point. This one process serves both the stdio MCP adapter and the browser-facing Web/API runtime:
+Each agent session may launch the compiled MCP entry point. It is a lightweight stdio proxy to the already-running daemon and does not open SQLite or own the Web/API listener:
 
 ```json
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
   "env": {
-    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite",
-    "QUESTBOARD_PORT": "4317"
+    "QUESTBOARD_DAEMON_URL": "http://127.0.0.1:4317"
   }
 }
 ```
 
-With the MCP process alive, the Web UI is available at `http://127.0.0.1:4317` by default. Set `QUESTBOARD_HOST` to the machine's private LAN IP when another device on the same LAN needs browser access; `0.0.0.0` is supported but exposes every IPv4 interface. Set `QUESTBOARD_TAILNET=1` or pass `--tailnet` when the Web UI must be reachable on the machine's Tailscale IPv4. Tailnet mode takes precedence over `QUESTBOARD_HOST`. MCP protocol output stays on stdout; runtime diagnostics stay on stderr. See `docs/NETWORK-ACCESS.md` for network and firewall guidance.
+Every proxy generates a stable session id for its lifetime, so automatic MCP mutation request IDs stay isolated by session. Closing one proxy does not stop the daemon or any other MCP session.
 
 ### CLI
 
 ```bash
 npm run cli -- tasks --status ready
 ```
+
+The CLI is also a daemon client. Set `QUESTBOARD_DAEMON_URL` when it should use a non-default daemon endpoint.
 
 Set a stable neutral actor identity if desired:
 
@@ -57,12 +66,12 @@ export QUESTBOARD_ACTOR_ID=agent:my-worker
 export QUESTBOARD_ACTOR_PROVIDER=my-agent
 ```
 
-### Standalone HTTP
+### Daemon / Web/API
 
-`npm start` remains available when an HTTP/Web-only process is desired without MCP:
+`npm run daemon` is the canonical long-lived runtime. `npm start` remains an alias-compatible way to launch the same Web/API + database owner:
 
 ```bash
-npm start
+npm run daemon
 ```
 
 HTTP mutations require attribution headers:

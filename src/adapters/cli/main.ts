@@ -1,26 +1,23 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import type { ActorRef } from "../../core/domain.js";
-import { QuestBoardService } from "../../application/quest-board-service.js";
-import { createStderrConcurrencyDiagnosticSink } from "../../observability/concurrency-log.js";
-import { SqliteQuestBoardRepository } from "../../storage/sqlite/sqlite-quest-board-repository.js";
+import { QuestBoardDaemonClient, resolveQuestBoardDaemonUrl } from "../daemon-client.js";
 import { runQuestBoardCli } from "./cli.js";
 
-const configuredDatabasePath = process.env.QUESTBOARD_DB_PATH;
-const databasePath = configuredDatabasePath
-  ? resolve(configuredDatabasePath)
-  : resolve(".questboard/questboard.sqlite");
-mkdirSync(dirname(databasePath), { recursive: true });
-
-const repository = new SqliteQuestBoardRepository(databasePath);
-const service = new QuestBoardService(repository, undefined, undefined, createStderrConcurrencyDiagnosticSink());
 const defaultActor: ActorRef = {
   id: process.env.QUESTBOARD_ACTOR_ID?.trim() || "cli:local",
   provider: process.env.QUESTBOARD_ACTOR_PROVIDER?.trim() || "cli",
 };
+const daemonUrl = resolveQuestBoardDaemonUrl();
+const client = new QuestBoardDaemonClient(daemonUrl);
 
 try {
-  process.exitCode = runQuestBoardCli(service, process.argv.slice(2), { defaultActor });
-} finally {
-  repository.close();
+  await client.assertHealthy();
+  process.exitCode = await runQuestBoardCli(
+    (name, input) => client.callAgentTool(name, input),
+    process.argv.slice(2),
+    { defaultActor },
+  );
+} catch (error) {
+  const message = error instanceof Error ? error.message : "QuestBoard daemon connection failed";
+  process.stderr.write(`${JSON.stringify({ error: { code: "daemon_unavailable", message } }, null, 2)}\n`);
+  process.exitCode = 1;
 }

@@ -16,17 +16,22 @@ export interface QuestBoardCliOptions {
   io?: QuestBoardCliIo;
 }
 
+export type QuestBoardAgentToolInvoker = (name: string, input?: unknown) => unknown | Promise<unknown>;
+
 const DEFAULT_ACTOR: ActorRef = { id: "cli:local", provider: "cli" };
 
-export function runQuestBoardCli(
-  service: QuestBoardService,
+export async function runQuestBoardCli(
+  target: QuestBoardService | QuestBoardAgentToolInvoker,
   argv: readonly string[],
   options: QuestBoardCliOptions = {},
-): number {
+): Promise<number> {
   const io = options.io ?? {
     stdout: (value: string) => process.stdout.write(`${value}\n`),
     stderr: (value: string) => process.stderr.write(`${value}\n`),
   };
+  const execute: QuestBoardAgentToolInvoker = typeof target === "function"
+    ? target
+    : (name, input) => executeQuestBoardAgentTool(target, name, input);
 
   try {
     const parsed = parseArgs(argv);
@@ -42,21 +47,21 @@ export function runQuestBoardCli(
 
     switch (command) {
       case "projects":
-        result = executeQuestBoardAgentTool(service, "questboard_list_projects");
+        result = await execute("questboard_list_projects");
         break;
       case "tasks":
-        result = executeQuestBoardAgentTool(service, "questboard_list_tasks", compact({
+        result = await execute("questboard_list_tasks", compact({
           projectId: parsed.flags.get("project"),
           status: parsed.flags.get("status"),
         }));
         break;
       case "task":
-        result = executeQuestBoardAgentTool(service, "questboard_get_task", {
+        result = await execute("questboard_get_task", {
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
       case "create-task":
-        result = executeQuestBoardAgentTool(service, "questboard_create_task", compact({
+        result = await execute("questboard_create_task", compact({
           projectId: requiredFlag(parsed.flags, "project"),
           title: requiredFlag(parsed.flags, "title"),
           description: parsed.flags.get("description"),
@@ -68,7 +73,7 @@ export function runQuestBoardCli(
         }));
         break;
       case "update-task":
-        result = executeQuestBoardAgentTool(service, "questboard_update_task", compact({
+        result = await execute("questboard_update_task", compact({
           taskId: positional(parsed.positionals, 1, "task id"),
           expectedRevision: optionalPositiveIntegerFlag(parsed.flags, "revision"),
           title: parsed.flags.get("title"),
@@ -81,14 +86,14 @@ export function runQuestBoardCli(
         }));
         break;
       case "claim":
-        result = executeQuestBoardAgentTool(service, "questboard_claim_task", {
+        result = await execute("questboard_claim_task", {
           taskId: positional(parsed.positionals, 1, "task id"),
           requestId,
           actor,
         });
         break;
       case "release":
-        result = executeQuestBoardAgentTool(service, "questboard_release_task", {
+        result = await execute("questboard_release_task", {
           taskId: positional(parsed.positionals, 1, "task id"),
           claimId: parsed.flags.get("claim-id"),
           requestId,
@@ -96,17 +101,17 @@ export function runQuestBoardCli(
         });
         break;
       case "claim-status":
-        result = executeQuestBoardAgentTool(service, "questboard_get_claim", {
+        result = await execute("questboard_get_claim", {
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
       case "activity":
-        result = executeQuestBoardAgentTool(service, "questboard_list_activity", {
+        result = await execute("questboard_list_activity", {
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
       case "add-activity":
-        result = executeQuestBoardAgentTool(service, "questboard_add_activity", {
+        result = await execute("questboard_add_activity", {
           taskId: positional(parsed.positionals, 1, "task id"),
           type: requiredFlag(parsed.flags, "type"),
           summary: requiredFlag(parsed.flags, "summary"),
@@ -115,17 +120,17 @@ export function runQuestBoardCli(
         });
         break;
       case "artifacts":
-        result = executeQuestBoardAgentTool(service, "questboard_list_artifacts", {
+        result = await execute("questboard_list_artifacts", {
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
       case "artifact":
-        result = executeQuestBoardAgentTool(service, "questboard_get_artifact", {
+        result = await execute("questboard_get_artifact", {
           artifactId: positional(parsed.positionals, 1, "artifact id"),
         });
         break;
       case "add-artifact":
-        result = executeQuestBoardAgentTool(service, "questboard_add_artifact", compact({
+        result = await execute("questboard_add_artifact", compact({
           taskId: positional(parsed.positionals, 1, "task id"),
           type: requiredFlag(parsed.flags, "type"),
           title: requiredFlag(parsed.flags, "title"),
@@ -136,12 +141,12 @@ export function runQuestBoardCli(
         }));
         break;
       case "relations":
-        result = executeQuestBoardAgentTool(service, "questboard_list_relations", {
+        result = await execute("questboard_list_relations", {
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
       case "add-relation":
-        result = executeQuestBoardAgentTool(service, "questboard_add_relation", compact({
+        result = await execute("questboard_add_relation", compact({
           fromType: requiredFlag(parsed.flags, "from-type"),
           fromId: requiredFlag(parsed.flags, "from"),
           toType: requiredFlag(parsed.flags, "to-type"),

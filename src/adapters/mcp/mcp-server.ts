@@ -54,8 +54,10 @@ export interface QuestBoardMcpHandler {
   handle(message: unknown): JsonRpcResponse | null;
 }
 
-export function createQuestBoardMcpHandler(service: QuestBoardService): QuestBoardMcpHandler {
-  const sessionId = randomUUID();
+export function createQuestBoardMcpHandler(
+  service: QuestBoardService,
+  sessionId: string = randomUUID(),
+): QuestBoardMcpHandler {
   return {
     handle(message: unknown): JsonRpcResponse | null {
       let request: JsonRpcRequest;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -7,70 +7,106 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 const STARTUP_TIMEOUT_MS = 5_000;
+const actor = { id: "agent:mcp-runtime-test", provider: "test" };
 
-test("MCP entrypoint also serves the QuestBoard Web UI/API without contaminating stdout", async () => {
-  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-mcp-runtime-"));
+test("one daemon serves Web/API while multiple MCP stdio proxies share the same state", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-daemon-runtime-"));
   const port = await findFreePort();
-  const child = spawn(process.execPath, ["dist/src/adapters/mcp/main.js"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
-      QUESTBOARD_HOST: "127.0.0.1",
-      QUESTBOARD_PORT: String(port),
-      QUESTBOARD_TAILNET: "0",
-      QUESTBOARD_CONCURRENCY_LOG: "0",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  let stdout = "";
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
+  const daemon = spawnQuestBoardDaemon(tempRoot, port);
+  let proxyA: ChildProcessWithoutNullStreams | undefined;
+  let proxyB: ChildProcessWithoutNullStreams | undefined;
 
   try {
     await withTimeout(
-      waitForText(child.stderr, `QuestBoard Web/API listening on http://127.0.0.1:${port} (localhost)`),
+      waitForText(daemon.stdout, `QuestBoard Web/API listening on http://127.0.0.1:${port} (localhost)`),
       STARTUP_TIMEOUT_MS,
-      "MCP Web/API runtime did not start",
+      "QuestBoard daemon did not start",
     );
-
-    assert.equal(stdout, "", "startup diagnostics must stay off MCP stdout");
 
     const health = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { status: "ok" });
 
-    const home = await fetch(`http://127.0.0.1:${port}/`);
-    assert.equal(home.status, 200);
-    assert.match(await home.text(), /id="kanban-board"/);
+    const untrustedBridgeCall = await fetch(`http://127.0.0.1:${port}/_questboard/agent-tool`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ name: "questboard_list_projects", arguments: {} }),
+    });
+    assert.equal(untrustedBridgeCall.status, 400, "daemon bridge must reject requests without its client header");
 
-    child.stdin.write(`${JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: { protocolVersion: "2025-06-18" },
-    })}\n`);
-    await withTimeout(waitForText(child.stdout, '"id":1'), STARTUP_TIMEOUT_MS, "MCP initialize response missing");
-    assert.doesNotMatch(stdout, /QuestBoard Web\/API listening/);
+    proxyA = spawnQuestBoardMcpProxy(port);
+    proxyB = spawnQuestBoardMcpProxy(port);
+    const a = createRpcClient(proxyA);
+    const b = createRpcClient(proxyB);
 
-    child.stdin.end();
-    const exitCode = await withTimeout(waitForExit(child), STARTUP_TIMEOUT_MS, "MCP runtime did not exit after stdin closed");
-    assert.equal(exitCode, 0);
+    const initializeA = await a.request("initialize", { protocolVersion: "2025-06-18" });
+    const initializeB = await b.request("initialize", { protocolVersion: "2025-06-18" });
+    assert.equal(readServerName(initializeA), "questboard");
+    assert.equal(readServerName(initializeB), "questboard");
 
-    await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+    const created = await a.request("tools/call", {
+      name: "questboard_create_project",
+      arguments: { name: "Shared daemon project", actor },
+    });
+    const projectId = readStructuredContent(created).project.id as string;
+
+    const projects = await b.request("tools/call", {
+      name: "questboard_list_projects",
+      arguments: {},
+    });
+    const sharedProjects = readStructuredContent(projects).projects as Array<{ id: string; name: string }>;
+    assert.deepEqual(sharedProjects.map((project) => project.id), [projectId]);
+
+    const createdTask = await b.request("tools/call", {
+      name: "questboard_create_task",
+      arguments: { projectId, title: "Created from proxy B", status: "ready", actor },
+    });
+    const taskId = readStructuredContent(createdTask).task.id as string;
+
+    const tasks = await a.request("tools/call", {
+      name: "questboard_list_tasks",
+      arguments: { projectId, status: "ready" },
+    });
+    const sharedTasks = readStructuredContent(tasks).tasks as Array<{ id: string }>;
+    assert.deepEqual(sharedTasks.map((task) => task.id), [taskId]);
+
+    const cli = spawnQuestBoardCli(port, ["projects"]);
+    let cliStdout = "";
+    cli.stdout.setEncoding("utf8");
+    cli.stdout.on("data", (chunk: string) => { cliStdout += chunk; });
+    const cliExit = await withTimeout(waitForExit(cli), STARTUP_TIMEOUT_MS, "QuestBoard CLI did not exit");
+    assert.equal(cliExit, 0);
+    const cliProjects = JSON.parse(cliStdout) as { projects: Array<{ id: string }> };
+    assert.deepEqual(cliProjects.projects.map((project) => project.id), [projectId]);
+
+    proxyA.stdin.end();
+    proxyB.stdin.end();
+    assert.equal(await withTimeout(waitForExit(proxyA), STARTUP_TIMEOUT_MS, "MCP proxy A did not exit"), 0);
+    assert.equal(await withTimeout(waitForExit(proxyB), STARTUP_TIMEOUT_MS, "MCP proxy B did not exit"), 0);
+
+    const healthAfterSessions = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(healthAfterSessions.status, 200, "daemon must outlive MCP stdio sessions");
+
+    const persistedProjects = await fetch(`http://127.0.0.1:${port}/projects`);
+    const persistedBody = await persistedProjects.json() as { projects: Array<{ id: string }> };
+    assert.deepEqual(persistedBody.projects.map((project) => project.id), [projectId]);
   } finally {
-    if (child.exitCode === null) child.kill("SIGTERM");
+    if (proxyA?.exitCode === null) proxyA.kill("SIGTERM");
+    if (proxyB?.exitCode === null) proxyB.kill("SIGTERM");
+    if (daemon.exitCode === null) daemon.kill("SIGTERM");
+    await Promise.allSettled([
+      proxyA ? waitForExit(proxyA) : Promise.resolve(null),
+      proxyB ? waitForExit(proxyB) : Promise.resolve(null),
+      waitForExit(daemon),
+    ]);
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
 
-test("MCP entrypoint can explicitly expose the bundled Web/API runtime to the local network", async () => {
-  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-mcp-lan-runtime-"));
+test("daemon can explicitly expose Web/API to the local network while MCP remains a client", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-daemon-lan-runtime-"));
   const port = await findFreePort();
-  const child = spawn(process.execPath, ["dist/src/adapters/mcp/main.js"], {
+  const daemon = spawn(process.execPath, ["dist/src/server/main.js"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -85,23 +121,132 @@ test("MCP entrypoint can explicitly expose the bundled Web/API runtime to the lo
 
   try {
     await withTimeout(
-      waitForText(child.stderr, `QuestBoard Web/API listening on http://0.0.0.0:${port} (network)`),
+      waitForText(daemon.stdout, `QuestBoard Web/API listening on http://0.0.0.0:${port} (network)`),
       STARTUP_TIMEOUT_MS,
-      "MCP network Web/API runtime did not start",
+      "QuestBoard network daemon did not start",
     );
-
     const health = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { status: "ok" });
-
-    child.stdin.end();
-    const exitCode = await withTimeout(waitForExit(child), STARTUP_TIMEOUT_MS, "MCP network runtime did not exit");
-    assert.equal(exitCode, 0);
   } finally {
-    if (child.exitCode === null) child.kill("SIGTERM");
+    if (daemon.exitCode === null) daemon.kill("SIGTERM");
+    await Promise.allSettled([waitForExit(daemon)]);
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("MCP stdio proxy fails clearly when the shared daemon is unavailable", async () => {
+  const port = await findFreePort();
+  const proxy = spawnQuestBoardMcpProxy(port);
+  let stderr = "";
+  proxy.stderr.setEncoding("utf8");
+  proxy.stderr.on("data", (chunk: string) => { stderr += chunk; });
+
+  const exitCode = await withTimeout(waitForExit(proxy), STARTUP_TIMEOUT_MS, "MCP proxy did not fail fast");
+  assert.notEqual(exitCode, 0);
+  assert.match(stderr, /QuestBoard daemon is unavailable/);
+  assert.match(stderr, /npm run daemon/);
+});
+
+function spawnQuestBoardDaemon(tempRoot: string, port: number): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, ["dist/src/server/main.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
+      QUESTBOARD_HOST: "127.0.0.1",
+      QUESTBOARD_PORT: String(port),
+      QUESTBOARD_TAILNET: "0",
+      QUESTBOARD_CONCURRENCY_LOG: "0",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+function spawnQuestBoardMcpProxy(port: number): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, ["dist/src/adapters/mcp/main.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      QUESTBOARD_DAEMON_URL: `http://127.0.0.1:${port}`,
+      QUESTBOARD_CONCURRENCY_LOG: "0",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+function spawnQuestBoardCli(port: number, args: string[]): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, ["dist/src/adapters/cli/main.js", ...args], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      QUESTBOARD_DAEMON_URL: `http://127.0.0.1:${port}`,
+      QUESTBOARD_CONCURRENCY_LOG: "0",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+interface RpcClient {
+  request(method: string, params?: unknown): Promise<Record<string, unknown>>;
+}
+
+function createRpcClient(child: ChildProcessWithoutNullStreams): RpcClient {
+  let nextId = 1;
+  let buffer = "";
+  const pending = new Map<number, { resolve(value: Record<string, unknown>): void; reject(error: Error): void }>();
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    buffer += chunk;
+    while (true) {
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const message = JSON.parse(line) as { id?: unknown } & Record<string, unknown>;
+      if (typeof message.id !== "number") continue;
+      const waiter = pending.get(message.id);
+      if (!waiter) continue;
+      pending.delete(message.id);
+      waiter.resolve(message);
+    }
+  });
+  child.once("error", (error) => {
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  });
+  child.once("exit", (code) => {
+    if (pending.size === 0) return;
+    const error = new Error(`MCP proxy exited with code ${String(code)} while requests were pending`);
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  });
+
+  return {
+    request(method, params) {
+      const id = nextId++;
+      const response = new Promise<Record<string, unknown>>((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+      });
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) })}\n`);
+      return withTimeout(response, STARTUP_TIMEOUT_MS, `MCP request ${method} timed out`);
+    },
+  };
+}
+
+function readServerName(message: Record<string, unknown>): string | undefined {
+  const result = message.result as { serverInfo?: { name?: string } } | undefined;
+  return result?.serverInfo?.name;
+}
+
+function readStructuredContent(message: Record<string, unknown>): Record<string, any> {
+  const result = message.result as { structuredContent?: Record<string, any>; isError?: boolean } | undefined;
+  assert.equal(result?.isError, undefined);
+  assert.ok(result?.structuredContent);
+  return result.structuredContent;
+}
 
 async function findFreePort(): Promise<number> {
   const server = createServer();

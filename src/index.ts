@@ -6,5 +6,7 @@ export * from "./application/quest-board-service.js";
 export * from "./storage/sqlite/sqlite-quest-board-repository.js";
 export * from "./server/http-api.js";
 export * from "./adapters/agent-tools.js";
+export * from "./adapters/daemon-client.js";
 export * from "./adapters/cli/cli.js";
 export * from "./adapters/mcp/mcp-server.js";
+export * from "./adapters/mcp/mcp-proxy.js";

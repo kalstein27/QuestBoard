@@ -231,7 +231,7 @@ test("MCP automatic mutation request ids replay exact retries without colliding 
   }
 });
 
-test("CLI uses the same agent tool boundary and supports neutral actor overrides", () => {
+test("CLI uses the same agent tool boundary and supports neutral actor overrides", async () => {
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
   const project = service.createProject({ name: "CLI" }, owner);
@@ -240,13 +240,13 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
   const stderr: string[] = [];
 
   try {
-    const listExit = runQuestBoardCli(service, ["tasks", "--project", project.id, "--status", "ready"], {
+    const listExit = await runQuestBoardCli(service, ["tasks", "--project", project.id, "--status", "ready"], {
       io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) },
     });
     assert.equal(listExit, 0);
     assert.equal((JSON.parse(stdout.at(-1) ?? "{}") as { tasks: Array<{ id: string }> }).tasks[0]?.id, task.id);
 
-    const claimExit = runQuestBoardCli(
+    const claimExit = await runQuestBoardCli(
       service,
       ["claim", task.id, "--actor-id", "agent:cli-test", "--actor-provider", "test-cli"],
       { io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) } },
@@ -254,7 +254,7 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
     assert.equal(claimExit, 0);
     assert.equal(service.getTaskClaim(task.id)?.agentId, "agent:cli-test");
 
-    const updateExit = runQuestBoardCli(
+    const updateExit = await runQuestBoardCli(
       service,
       ["update-task", task.id, "--status", "in_progress"],
       { io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) } },
@@ -262,7 +262,7 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
     assert.equal(updateExit, 0);
     assert.equal(service.getTask(task.id).revision, 2);
 
-    const artifactExit = runQuestBoardCli(
+    const artifactExit = await runQuestBoardCli(
       service,
       [
         "add-artifact", task.id,
@@ -277,7 +277,7 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
     assert.equal(artifactExit, 0);
     const artifactId = (JSON.parse(stdout.at(-1) ?? "{}") as { artifact: { id: string } }).artifact.id;
 
-    const relationExit = runQuestBoardCli(
+    const relationExit = await runQuestBoardCli(
       service,
       [
         "add-relation",

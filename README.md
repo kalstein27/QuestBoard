@@ -46,13 +46,13 @@ npm run verify
 
 `npm run verify` runs type checking, Web JavaScript syntax validation, the full test suite, and the dedicated multi-worker race test.
 
-## Quick start: Web + HTTP API
+## Quick start: shared daemon + Web/API
 
-Build and start the local server:
+Build and start the long-lived local daemon:
 
 ```bash
 npm run build
-npm start
+npm run daemon
 ```
 
 Open:
@@ -77,6 +77,7 @@ The server binds to `127.0.0.1` by default. The Web UI lets you create Projects 
 | `QUESTBOARD_HOST` | HTTP/Web bind host | `127.0.0.1` |
 | `QUESTBOARD_PORT` | HTTP/Web port | `4317` |
 | `QUESTBOARD_TAILNET` | Set to `1` to use Tailnet binding | unset |
+| `QUESTBOARD_DAEMON_URL` | MCP/CLI daemon endpoint | `http://127.0.0.1:<QUESTBOARD_PORT-or-4317>` |
 | `QUESTBOARD_ACTOR_ID` | Default CLI actor ID | `cli:local` |
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
@@ -84,7 +85,7 @@ The server binds to `127.0.0.1` by default. The Web UI lets you create Projects 
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
 ```bash
-QUESTBOARD_HOST=192.168.0.20 npm start
+QUESTBOARD_HOST=192.168.0.20 npm run daemon
 ```
 
 Then open `http://192.168.0.20:4317` from the other device. `QUESTBOARD_HOST=0.0.0.0` also works, but it listens on every IPv4 interface and is broader than necessary. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) for LAN, firewall, C2CT-managed MCP, Tailnet, and public-Internet guidance.
@@ -156,26 +157,26 @@ Run `npm run cli -- help` for the command summary.
 
 ## MCP
 
-QuestBoard includes a dependency-free MCP stdio adapter. The MCP executable is also the default QuestBoard runtime: when an MCP client launches it, the same process starts the Web UI/API on `127.0.0.1:4317` unless configured otherwise. Build it first:
+QuestBoard uses one long-lived local daemon and lightweight per-session clients. The daemon is the only normal runtime process that opens SQLite and owns `QuestBoardService`; it also serves the Web UI/API. MCP clients may still launch one stdio process per chat/session, but those processes are proxies and do not open the database or bind the Web port. Build and start the daemon first:
 
 ```bash
 npm run build
+npm run daemon
 ```
 
-An MCP client can launch the compiled entry point directly:
+The default daemon/Web endpoint is `http://127.0.0.1:4317`. An MCP client can then launch the compiled stdio proxy directly:
 
 ```json
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
   "env": {
-    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite",
-    "QUESTBOARD_PORT": "4317"
+    "QUESTBOARD_DAEMON_URL": "http://127.0.0.1:4317"
   }
 }
 ```
 
-While that MCP process is running, open `http://127.0.0.1:4317` in a browser. MCP JSON-RPC remains exclusively on stdout; Web/API startup and diagnostic messages go to stderr so they cannot corrupt the stdio protocol. Set `QUESTBOARD_HOST` to a specific LAN IP (preferred) or `0.0.0.0` when the bundled Web/API must be reachable from another device on the same LAN. Set `QUESTBOARD_TAILNET=1` (or launch the entry point with `--tailnet`) to bind to the machine's Tailscale IPv4 instead. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the listener beyond localhost.
+Multiple MCP stdio proxies and the CLI can attach to the same daemon concurrently. Closing an MCP session closes only that proxy; the daemon, Web UI, database connection, and other sessions remain alive. `QUESTBOARD_DB_PATH`, `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, and Tailnet binding configure the daemon. `QUESTBOARD_DAEMON_URL` tells MCP/CLI clients where to find it. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the daemon beyond localhost.
 
 The adapter exposes:
 

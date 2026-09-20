@@ -53,9 +53,11 @@ The initial Task states are `inbox`, `planned`, `ready`, `in_progress`, `blocked
 
 ## Local HTTP boundary
 
-The local API uses Node's built-in `node:http` module and calls `QuestBoardService`; the HTTP adapter does not import SQLite. The runnable composition root binds to `127.0.0.1` only by default. Mutation callers provide vendor-neutral actor id/provider headers so Activity and Claim records remain portable across human and agent clients.
+The local API uses Node's built-in `node:http` module and calls `QuestBoardService`; the HTTP adapter does not import SQLite. The long-lived daemon composition root is the single normal runtime owner of SQLite and `QuestBoardService`, and binds to `127.0.0.1` only by default. Mutation callers provide vendor-neutral actor id/provider headers so Activity and Claim records remain portable across human and agent clients.
 
-Project and Task list/get/update queries are application/repository operations rather than HTTP-specific SQL. This lets CLI and MCP use the same application semantics without going through HTTP.
+Project and Task list/get/update queries are application/repository operations rather than HTTP-specific SQL. Web uses the public HTTP routes, while local CLI/MCP clients use daemon bridge routes that dispatch the same shared agent-tool/MCP handlers inside the daemon. Neither client opens SQLite directly.
+
+The daemon bridge is transport plumbing, not an authentication boundary. Bridge POSTs require the non-simple `x-questboard-daemon-client: 1` header so an unrelated browser origin cannot reach them with a simple cross-origin request; this is a CSRF-style transport guard, not caller authentication. When the daemon HTTP listener is intentionally bound to LAN or Tailnet, those bridge routes still inherit the same trusted-private-network assumption as the rest of the unauthenticated HTTP API.
 
 Task concurrency is intentionally hidden from normal callers. The repository still performs revision-based compare-and-set writes, while `QuestBoardService` rereads and retries a normal Task patch when another writer wins first. Callers may optionally provide `expectedRevision` when they explicitly want strict compare-and-set semantics and a stale read to fail instead of retrying.
 
@@ -79,17 +81,17 @@ Mutation inputs carry an explicit neutral actor with `id` and `provider`. These 
 
 ## CLI adapter
 
-The CLI is a thin JSON-oriented adapter over the shared agent-tool boundary. Its executable composition root opens the configured SQLite repository, creates `QuestBoardService`, invokes one command, prints JSON, and closes the repository. Business validation and Claim semantics remain in the service/tool boundary.
+The CLI is a thin JSON-oriented daemon client over the shared agent-tool boundary. Its executable sends one neutral tool invocation to the daemon, prints JSON, and exits. It does not open SQLite or construct `QuestBoardService`; business validation and Claim semantics execute inside the daemon service/tool boundary.
 
 ## MCP adapter
 
-The MCP adapter is a dependency-free stdio JSON-RPC adapter implemented with Node built-ins. It exposes the shared `questboard_*` tools through `initialize`, `tools/list`, and `tools/call`, with protocol data written only to stdout. The MCP executable composition root is also the normal full QuestBoard runtime: it starts the local Web/API server in the same process and against the same `QuestBoardService`/SQLite repository, defaulting to `127.0.0.1:4317`. Web/API startup diagnostics are written to stderr so the stdio protocol remains clean. LAN binding is an explicit opt-in through `QUESTBOARD_HOST`; Tailnet binding remains explicit through `QUESTBOARD_TAILNET=1` or `--tailnet` and takes precedence over the custom host.
+The MCP adapter remains a dependency-free stdio JSON-RPC surface implemented with Node built-ins, but its executable is now a lightweight daemon proxy. Each MCP process owns only stdin/stdout translation plus one random session id; it forwards JSON-RPC envelopes to the daemon and never opens SQLite or binds the Web port. The daemon runs the existing MCP handler against its single `QuestBoardService` instance. Multiple MCP sessions therefore share one database/service process without port collisions, and a proxy exiting does not stop the daemon.
 
-MCP tool errors are returned as tool-level `isError` results with stable neutral error codes. Claims remain cooperative coordination signals; using MCP does not grant filesystem, process, or project-write permission. The adapter synthesizes an idempotency request ID for ordinary mutating calls, while callers can provide their own stable request ID when replay must survive an MCP process restart.
+MCP tool errors are returned as tool-level `isError` results with stable neutral error codes. Claims remain cooperative coordination signals; using MCP does not grant filesystem, process, or project-write permission. Automatic mutation request IDs still include the proxy lifetime session id, preserving exact-retry behavior and preventing reused JSON-RPC ids in different MCP sessions from colliding. Callers can provide their own stable request ID when replay must survive an MCP process restart.
 
 ## Concurrency diagnostics
 
-Executable Web/API, CLI, and MCP composition roots install the process concurrency diagnostic sink. It writes structured JSONL to stderr for mutation receipt/replay/conflict, Task CAS retry/conflict/apply, and Claim acquire/release/conflict/stale-release events. Mutation payload bodies are not logged. Set `QUESTBOARD_CONCURRENCY_LOG=0` to disable this stream.
+The daemon installs the process concurrency diagnostic sink because it owns all service/database mutation work. It writes structured JSONL to stderr for mutation receipt/replay/conflict, Task CAS retry/conflict/apply, and Claim acquire/release/conflict/stale-release events. MCP/CLI proxy processes do not duplicate those service diagnostics. Mutation payload bodies are not logged. Set `QUESTBOARD_CONCURRENCY_LOG=0` on the daemon to disable this stream.
 
 ## Boundary deliberately deferred
 

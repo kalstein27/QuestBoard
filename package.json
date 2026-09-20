@@ -12,6 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:web": "node --check web/app.js",
     "test": "npm run build && node --test dist/tests/**/*.test.js",
+    "daemon": "node dist/src/server/main.js",
+    "daemon:tailnet": "node dist/src/server/main.js --tailnet",
     "start": "node dist/src/server/main.js",
     "start:tailnet": "node dist/src/server/main.js --tailnet",
     "cli": "node dist/src/adapters/cli/main.js",

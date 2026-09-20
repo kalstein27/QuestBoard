@@ -40,6 +40,16 @@ export interface QuestBoardAgentToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export class QuestBoardRemoteToolError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "QuestBoardRemoteToolError";
+  }
+}
+
 const actorSchema = {
   type: "object",
   additionalProperties: false,
@@ -605,6 +615,7 @@ export function executeQuestBoardAgentTool(
 }
 
 export function describeQuestBoardError(error: unknown): { code: string; message: string } {
+  if (error instanceof QuestBoardRemoteToolError) return { code: error.code, message: error.message };
   if (error instanceof EntityNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof ClaimConflictError) return { code: "claim_conflict", message: error.message };
   if (error instanceof ClaimNotFoundError) return { code: "claim_not_found", message: error.message };

@@ -37,6 +37,8 @@ import type {
   UpdateProjectInput,
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
+import { describeQuestBoardError, executeQuestBoardAgentTool } from "../adapters/agent-tools.js";
+import { createQuestBoardMcpHandler } from "../adapters/mcp/mcp-server.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const PROJECT_STATUSES = ["active", "archived"] as const satisfies readonly ProjectStatus[];
@@ -74,6 +76,32 @@ async function handleRequest(
 
   if (method === "GET" && pathname === "/health") {
     sendJson(response, 200, { status: "ok" });
+    return;
+  }
+
+  if (method === "POST" && pathname === "/_questboard/agent-tool") {
+    requireDaemonClient(request);
+    const body = await readJsonObject(request);
+    const name = requireString(body, "name");
+    const args = requireObjectValue(body.arguments ?? {}, "arguments");
+    try {
+      sendJson(response, 200, { result: executeQuestBoardAgentTool(service, name, args) });
+    } catch (error) {
+      sendJson(response, 200, { error: describeQuestBoardError(error) });
+    }
+    return;
+  }
+
+  if (method === "POST" && pathname === "/_questboard/mcp-proxy") {
+    requireDaemonClient(request);
+    const body = await readJsonObject(request);
+    const sessionId = requireString(body, "sessionId");
+    const mcpResponse = createQuestBoardMcpHandler(service, sessionId).handle(body.message);
+    if (mcpResponse === null) {
+      sendNoContent(response);
+    } else {
+      sendJson(response, 200, mcpResponse);
+    }
     return;
   }
 
@@ -459,6 +487,12 @@ function requireActor(request: IncomingMessage): ActorRef {
   return { id, provider };
 }
 
+function requireDaemonClient(request: IncomingMessage): void {
+  if (singleHeader(request, "x-questboard-daemon-client")?.trim() !== "1") {
+    throw new TypeError("Daemon bridge requests require x-questboard-daemon-client: 1");
+  }
+}
+
 function singleHeader(request: IncomingMessage, name: string): string | undefined {
   const value = request.headers[name];
   if (Array.isArray(value)) return value[0];
@@ -492,6 +526,13 @@ function requireString(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${key} must be a non-empty string`);
   return value;
+}
+
+function requireObjectValue(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be a JSON object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function requirePositiveInteger(body: Record<string, unknown>, key: string): number {
@@ -593,6 +634,12 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
     "cache-control": "no-store",
   });
   response.end(body);
+}
+
+function sendNoContent(response: ServerResponse): void {
+  if (response.headersSent || response.destroyed) return;
+  response.writeHead(204, { "cache-control": "no-store" });
+  response.end();
 }
 
 function sendError(response: ServerResponse, error: unknown): void {

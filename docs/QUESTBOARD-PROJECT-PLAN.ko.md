@@ -451,7 +451,7 @@ CLI는 자동화/디버깅/비-MCP 에이전트용 얇은 surface다.
 
 ## 17. MCP 방향
 
-현재 MCP adapter는 stdio JSON-RPC surface이며, MCP executable이 같은 프로세스에서 Web UI/API runtime도 함께 소유한다. 기본 브라우저 endpoint는 `127.0.0.1:4317`이고, 같은 LAN 노출은 `QUESTBOARD_HOST`, Tailnet bind는 `QUESTBOARD_TAILNET=1` 또는 `--tailnet`으로 명시적으로 선택한다. 공개 인터넷 직접 노출은 여전히 지원 범위가 아니다.
+현재 런타임은 **daemon 1 + session client N** 구조다. 장기 실행 QuestBoard daemon 하나가 SQLite, `QuestBoardService`, Web UI/API를 독점 소유하고, Claude 등 MCP host가 세션마다 띄우는 MCP executable은 DB를 열지 않는 얇은 stdio proxy로 동작한다. 각 proxy는 수명 동안 고유 session id를 유지해 자동 mutation requestId 격리를 보존하며, proxy 종료는 daemon이나 다른 세션을 종료하지 않는다. 기본 daemon endpoint는 `127.0.0.1:4317`; daemon의 LAN/Tailnet 노출은 기존처럼 명시적 opt-in이고 MCP/CLI client는 `QUESTBOARD_DAEMON_URL`로 접속점을 선택한다. 공개 인터넷 직접 노출은 지원 범위가 아니다.
 
 지원:
 - initialize

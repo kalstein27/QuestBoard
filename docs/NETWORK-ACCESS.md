@@ -44,21 +44,25 @@ Then open this from another device on the same LAN:
 http://192.168.0.20:4317
 ```
 
-The same variables apply when an MCP client launches QuestBoard. The stdio MCP server and Web UI/API remain one process and use the same SQLite database.
+`QUESTBOARD_HOST`, `QUESTBOARD_PORT`, `QUESTBOARD_DB_PATH`, and Tailnet settings belong to the single long-lived daemon. MCP sessions no longer start their own listener or open SQLite; they connect to that daemon through `QUESTBOARD_DAEMON_URL`.
 
-Example MCP configuration:
+Example daemon launch and MCP configuration:
+
+```bash
+QUESTBOARD_HOST=192.168.0.20 QUESTBOARD_PORT=4317 npm run daemon
+```
 
 ```json
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
   "env": {
-    "QUESTBOARD_DB_PATH": "/absolute/path/to/QuestBoard/.questboard/questboard.sqlite",
-    "QUESTBOARD_HOST": "192.168.0.20",
-    "QUESTBOARD_PORT": "4317"
+    "QUESTBOARD_DAEMON_URL": "http://192.168.0.20:4317"
   }
 }
 ```
+
+When the daemon listens on `0.0.0.0`, same-machine MCP/CLI clients should normally keep using `http://127.0.0.1:4317`. When it is bound only to a specific LAN or Tailscale address, point `QUESTBOARD_DAEMON_URL` at that bound address.
 
 ### Binding all local interfaces
 
@@ -80,10 +84,10 @@ For access between devices that share a Tailscale network:
 npm run start:tailnet
 ```
 
-Or set this for an MCP launch:
+The daemon can instead use Tailnet mode:
 
 ```text
-QUESTBOARD_TAILNET=1
+QUESTBOARD_TAILNET=1 npm run daemon
 ```
 
 QuestBoard selects an active Tailscale IPv4 address in `100.64.0.0/10`. Tailnet mode takes precedence over `QUESTBOARD_HOST`.
@@ -94,17 +98,15 @@ Tailscale reachability is still not QuestBoard authentication. Anyone allowed to
 
 ChatGPT2Codex managed MCP processes run with a restricted environment. Environment variables are forwarded only when the managed MCP launch explicitly allows their names.
 
-If you want a C2CT-managed QuestBoard MCP to expose its bundled Web UI/API on the LAN, include these names in the managed launch's inherited environment configuration as needed:
+The managed MCP process is now only a stdio proxy. It normally needs the daemon endpoint forwarded into its environment:
 
 ```text
-QUESTBOARD_HOST
-QUESTBOARD_PORT
-QUESTBOARD_DB_PATH
+QUESTBOARD_DAEMON_URL
 ```
 
-For example, `QUESTBOARD_HOST=192.168.0.20` keeps the listener on one LAN interface, while `QUESTBOARD_HOST=0.0.0.0` listens on all IPv4 interfaces. The values themselves must exist in the environment that launches the managed MCP host.
+Run/configure the QuestBoard daemon separately with `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, `QUESTBOARD_DB_PATH`, or Tailnet mode. The managed MCP host should not receive database ownership settings just to attach a session.
 
-If no host setting is forwarded, QuestBoard safely falls back to `127.0.0.1`.
+If `QUESTBOARD_DAEMON_URL` is not forwarded, the proxy safely falls back to `http://127.0.0.1:<QUESTBOARD_PORT-or-4317>`.
 
 ## Firewall and Wi-Fi checks
 
