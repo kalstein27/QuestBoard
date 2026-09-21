@@ -7,6 +7,25 @@
   "engines": {
     "node": ">=24.0.0"
   },
+  "chatgpt2codex": {
+    "managedService": {
+      "launch": {
+        "command": "node",
+        "args": ["dist/src/server/main.js", "--tailnet", "--managed-service"],
+        "cwdRelative": ".",
+        "inheritEnvKeys": [
+          "QUESTBOARD_DB_PATH",
+          "QUESTBOARD_IDENTITY_PATH",
+          "QUESTBOARD_PORT",
+          "QUESTBOARD_CONCURRENCY_LOG"
+        ]
+      },
+      "health": {
+        "url": "http://127.0.0.1:4318/health",
+        "timeoutMs": 15000
+      }
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

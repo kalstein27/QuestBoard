@@ -35,6 +35,14 @@ npm run daemon
 
 By default the canonical daemon script serves Web/API and the client bridge on the machine's active Tailscale IPv4 at port `4317`. Use `npm run daemon:local` for localhost-only operation.
 
+### Managed host service contract
+
+QuestBoard declares its optional persistent service contract in `package.json` under `chatgpt2codex.managedService`. The declaration is repository metadata rather than a core-domain dependency: a generic managed-MCP host may read it to start the long-lived daemon, wait for its bounded health endpoint, and manage update/restart lifecycle without QuestBoard-specific host code.
+
+The declared service launches `dist/src/server/main.js --tailnet --managed-service`. In managed-service mode, an existing pinned daemon identity is authoritative for `workspacePath` and `databasePath`, so running code from a managed installation checkout does not silently create a second SQLite database. If no identity is pinned yet, the normal `QUESTBOARD_DB_PATH` / current-workspace defaults establish the first profile.
+
+The Tailnet Web/API remains on the normal QuestBoard port (`4317` by default). Managed lifecycle health uses a separate loopback-only endpoint at `http://127.0.0.1:4318/health`, so a host can verify the persistent process without needing to know the machine's current Tailscale IPv4 address. MCP remains a stdio proxy to this daemon and never becomes the authoritative state owner.
+
 ## 2. Choose an adapter
 
 ### MCP stdio proxy
