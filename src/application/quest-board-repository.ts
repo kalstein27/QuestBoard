@@ -43,6 +43,7 @@ export interface QuestBoardRepository {
   getTask(taskId: string): Task | undefined;
   listTasks(filter?: TaskListFilter): Task[];
   updateTask(task: Task, activity: Activity, expectedRevision: number): void;
+  deleteTask(taskId: string): void;
 
   getClaim(taskId: string): Claim | undefined;
   listProjectClaims(projectId: string): Claim[];
@@ -56,21 +57,25 @@ export interface QuestBoardRepository {
   getArtifact(artifactId: string): Artifact | undefined;
   listTaskArtifacts(taskId: string): Artifact[];
   listProjectArtifacts(projectId: string): Artifact[];
+  deleteArtifact(artifactId: string): void;
 
   createRelation(relation: Relation, activity: Activity): void;
   listTaskRelations(taskId: string): Relation[];
   listProjectRelations(projectId: string): Relation[];
+  deleteRelation(relationId: string): void;
 
   createInvestigationNode(node: InvestigationNode): void;
   getInvestigationNode(nodeId: string): InvestigationNode | undefined;
   listInvestigationNodes(projectId: string): InvestigationNode[];
   updateInvestigationNode(node: InvestigationNode, expectedRevision: number): void;
+  deleteInvestigationNode(nodeId: string): void;
 
   createInvestigationItem(item: InvestigationItem): void;
   getInvestigationItem(itemId: string): InvestigationItem | undefined;
   listInvestigationItems(projectId: string): InvestigationItem[];
   listInvestigationNodeItems(nodeId: string): InvestigationItem[];
   updateInvestigationItem(item: InvestigationItem, expectedRevision: number): void;
+  deleteInvestigationItem(itemId: string): void;
 
   createInvestigationItemLink(link: InvestigationItemLink): void;
   listInvestigationItemLinks(projectId: string): InvestigationItemLink[];

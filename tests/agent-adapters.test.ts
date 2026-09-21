@@ -141,6 +141,154 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
   }
 });
 
+test("agent deletion tools support migration cleanup while preserving canonical linked Tasks", () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  try {
+    const project = service.createProject({ name: "Migration cleanup" }, owner);
+    const legacyParent = service.createTask({ projectId: project.id, title: "Legacy parent" }, owner);
+    const canonicalChild = service.createTask({ projectId: project.id, title: "Canonical child" }, owner);
+    const artifact = service.createArtifact({
+      taskId: legacyParent.id,
+      type: "log",
+      title: "Legacy evidence",
+      locator: "logs/legacy.txt",
+    }, owner);
+    const relation = service.createRelation({
+      fromType: "task",
+      fromId: legacyParent.id,
+      toType: "task",
+      toId: canonicalChild.id,
+      kind: "parent_of",
+    }, owner);
+
+    const node = service.createInvestigationNode({ projectId: project.id, title: "New flow" }, owner);
+    const item = service.createInvestigationItem({ nodeId: node.id, title: "Migrated item" }, owner);
+    service.linkTaskToInvestigationItem(item.id, canonicalChild.id, owner);
+
+    executeQuestBoardAgentTool(service, "questboard_delete_relation", {
+      relationId: relation.id,
+      actor: agent,
+      requestId: "delete-relation-0001",
+    });
+    assert.deepEqual(service.listProjectRelations(project.id), []);
+
+    executeQuestBoardAgentTool(service, "questboard_delete_artifact", {
+      artifactId: artifact.id,
+      actor: agent,
+      requestId: "delete-artifact-0001",
+    });
+    assert.throws(() => service.getArtifact(artifact.id), /not found/);
+
+    executeQuestBoardAgentTool(service, "questboard_delete_investigation_item", {
+      itemId: item.id,
+      expectedRevision: 1,
+      actor: agent,
+      requestId: "delete-item-0000001",
+    });
+    let graph = service.getInvestigationGraph(project.id);
+    assert.equal(graph.items.length, 0);
+    assert.equal(graph.itemTaskLinks.length, 0);
+    assert.ok(graph.tasks.some((task) => task.id === canonicalChild.id));
+
+    executeQuestBoardAgentTool(service, "questboard_delete_investigation_node", {
+      nodeId: node.id,
+      expectedRevision: 1,
+      actor: agent,
+      requestId: "delete-node-0000001",
+    });
+    graph = service.getInvestigationGraph(project.id);
+    assert.equal(graph.nodes.length, 0);
+    assert.ok(graph.tasks.some((task) => task.id === canonicalChild.id));
+
+    const deleteTaskArgs = {
+      taskId: legacyParent.id,
+      expectedRevision: 1,
+      actor: agent,
+      requestId: "delete-task-0000001",
+    };
+    assert.deepEqual(executeQuestBoardAgentTool(service, "questboard_delete_task", deleteTaskArgs), { deleted: true });
+    assert.deepEqual(executeQuestBoardAgentTool(service, "questboard_delete_task", deleteTaskArgs), { deleted: true });
+    assert.throws(() => service.getTask(legacyParent.id), /not found/);
+    assert.equal(service.getTask(canonicalChild.id).title, "Canonical child");
+  } finally {
+    repository.close();
+  }
+});
+
+test("migration helpers attach existing Tasks atomically, reorder Items, and roll back failed batches", () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  try {
+    const project = service.createProject({ name: "Migration helpers" }, owner);
+    const node = service.createInvestigationNode({ projectId: project.id, title: "Canonical flow" }, owner);
+    const firstTask = service.createTask({ projectId: project.id, title: "First existing Task", description: "Keep this Task" }, owner);
+    const secondTask = service.createTask({ projectId: project.id, title: "Second existing Task" }, owner);
+
+    const firstAttached = executeQuestBoardAgentTool(service, "questboard_attach_existing_task_to_investigation", {
+      nodeId: node.id,
+      taskId: firstTask.id,
+      actor: agent,
+      requestId: "attach-existing-task-0001",
+    }) as { item: { id: string; title: string }; link: { taskId: string } };
+    const secondAttached = executeQuestBoardAgentTool(service, "questboard_attach_existing_task_to_investigation", {
+      nodeId: node.id,
+      taskId: secondTask.id,
+      title: "Second migrated Item",
+      actor: agent,
+      requestId: "attach-existing-task-0002",
+    }) as { item: { id: string }; link: { taskId: string } };
+    assert.equal(firstAttached.item.title, firstTask.title);
+    assert.equal(firstAttached.link.taskId, firstTask.id);
+    assert.equal(secondAttached.link.taskId, secondTask.id);
+
+    const reordered = executeQuestBoardAgentTool(service, "questboard_reorder_investigation_items", {
+      nodeId: node.id,
+      orderedItemIds: [secondAttached.item.id, firstAttached.item.id],
+      actor: agent,
+      requestId: "reorder-investigation-items-0001",
+    }) as { items: Array<{ id: string; sortOrder: number }> };
+    assert.deepEqual(reordered.items.map((item) => [item.id, item.sortOrder]), [
+      [secondAttached.item.id, 0],
+      [firstAttached.item.id, 1],
+    ]);
+
+    const rollbackTask = service.createTask({ projectId: project.id, title: "Must survive rollback" }, owner);
+    const beforeRollback = service.getInvestigationGraph(project.id);
+    assert.throws(
+      () => executeQuestBoardAgentTool(service, "questboard_apply_migration_batch", {
+        projectId: project.id,
+        operations: [
+          { type: "attach_existing_task", nodeId: node.id, taskId: rollbackTask.id },
+          { type: "delete_relation", relationId: "missing-relation" },
+        ],
+        actor: agent,
+        requestId: "migration-batch-rollback-0001",
+      }),
+      /not found/,
+    );
+    const afterRollback = service.getInvestigationGraph(project.id);
+    assert.equal(afterRollback.items.length, beforeRollback.items.length);
+    assert.equal(afterRollback.itemTaskLinks.length, beforeRollback.itemTaskLinks.length);
+    assert.equal(service.getTask(rollbackTask.id).title, "Must survive rollback");
+
+    const batchArgs = {
+      projectId: project.id,
+      operations: [{ type: "attach_existing_task" as const, nodeId: node.id, taskId: rollbackTask.id }],
+      actor: agent,
+      requestId: "migration-batch-success-0001",
+    };
+    const firstBatch = executeQuestBoardAgentTool(service, "questboard_apply_migration_batch", batchArgs);
+    const replayBatch = executeQuestBoardAgentTool(service, "questboard_apply_migration_batch", batchArgs);
+    assert.deepEqual(replayBatch, firstBatch);
+    const finalGraph = service.getInvestigationGraph(project.id);
+    assert.equal(finalGraph.items.length, beforeRollback.items.length + 1);
+    assert.equal(finalGraph.itemTaskLinks.filter((link) => link.taskId === rollbackTask.id).length, 1);
+  } finally {
+    repository.close();
+  }
+});
+
 test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON-RPC", async () => {
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
@@ -178,9 +326,17 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
     assert.ok(toolNames.includes("questboard_claim_task"));
     assert.ok(toolNames.includes("questboard_add_artifact"));
     assert.ok(toolNames.includes("questboard_add_relation"));
+    assert.ok(toolNames.includes("questboard_delete_task"));
+    assert.ok(toolNames.includes("questboard_delete_artifact"));
+    assert.ok(toolNames.includes("questboard_delete_relation"));
     assert.ok(toolNames.includes("questboard_create_investigation_node"));
+    assert.ok(toolNames.includes("questboard_delete_investigation_node"));
+    assert.ok(toolNames.includes("questboard_delete_investigation_item"));
     assert.ok(toolNames.includes("questboard_get_investigation_graph"));
     assert.ok(toolNames.includes("questboard_link_task_to_investigation_item"));
+    assert.ok(toolNames.includes("questboard_attach_existing_task_to_investigation"));
+    assert.ok(toolNames.includes("questboard_reorder_investigation_items"));
+    assert.ok(toolNames.includes("questboard_apply_migration_batch"));
     const content = messages[2]?.result.content as Array<{ text: string }>;
     const payload = JSON.parse(content[0]?.text ?? "{}") as { tasks: Array<{ title: string }> };
     assert.equal(payload.tasks[0]?.title, "Ready via MCP");

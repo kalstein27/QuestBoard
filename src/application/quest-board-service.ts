@@ -71,6 +71,10 @@ export interface MutationOptions {
   requestId?: string;
 }
 
+export interface DeleteRevisionOptions extends MutationOptions {
+  expectedRevision?: number;
+}
+
 export interface ReleaseTaskOptions extends MutationOptions {
   claimId?: string;
 }
@@ -125,6 +129,36 @@ export interface UpdateInvestigationItemInput {
   description?: string;
   sortOrder?: number;
 }
+export interface AttachExistingTaskToInvestigationInput {
+  nodeId: string;
+  taskId: string;
+  title?: string;
+  description?: string;
+}
+
+export interface ReorderInvestigationItemsInput {
+  nodeId: string;
+  orderedItemIds: string[];
+}
+
+export type MigrationBatchOperation =
+  | ({ type: "attach_existing_task" } & AttachExistingTaskToInvestigationInput)
+  | { type: "delete_relation"; relationId: string }
+  | { type: "delete_task"; taskId: string; expectedRevision?: number }
+  | { type: "delete_investigation_node"; nodeId: string; expectedRevision?: number }
+  | { type: "delete_investigation_item"; itemId: string; expectedRevision?: number }
+  | ({ type: "reorder_investigation_items" } & ReorderInvestigationItemsInput);
+
+export interface ApplyMigrationBatchInput {
+  projectId: string;
+  operations: MigrationBatchOperation[];
+}
+
+export interface MigrationBatchResult {
+  applied: number;
+  results: Array<Record<string, unknown>>;
+}
+
 
 export interface CreateInvestigationItemLinkInput {
   fromItemId: string;
@@ -344,6 +378,18 @@ export class QuestBoardService {
     });
   }
 
+  deleteTask(taskId: string, actor: ActorRef, options: DeleteRevisionOptions = {}): void {
+    const explicitRevision = options.expectedRevision === undefined ? undefined : requireRevision(options.expectedRevision);
+    this.runMutation("task.delete", actor, options, { taskId, expectedRevision: explicitRevision }, taskId, () => {
+      const current = this.getTask(taskId);
+      if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+        throw new RevisionConflictError(taskId, explicitRevision, current.revision);
+      }
+      this.repository.deleteTask(taskId);
+      return null;
+    });
+  }
+
   claimTask(taskId: string, actor: ActorRef, options: MutationOptions = {}): Claim {
     return this.runMutation("task.claim", actor, options, { taskId }, taskId, () => {
       const task = this.getTask(taskId);
@@ -502,6 +548,14 @@ export class QuestBoardService {
     return this.repository.listProjectArtifacts(projectId);
   }
 
+  deleteArtifact(artifactId: string, actor: ActorRef, options: MutationOptions = {}): void {
+    this.runMutation("artifact.delete", actor, options, { artifactId }, undefined, () => {
+      this.getArtifact(artifactId);
+      this.repository.deleteArtifact(artifactId);
+      return null;
+    });
+  }
+
   createRelation(input: CreateRelationInput, actor: ActorRef, options: MutationOptions = {}): Relation {
     return this.runMutation("relation.create", actor, options, input, undefined, () => {
       if (input.fromType === input.toType && input.fromId === input.toId) {
@@ -552,6 +606,13 @@ export class QuestBoardService {
   listProjectRelations(projectId: string): Relation[] {
     this.getProject(projectId);
     return this.repository.listProjectRelations(projectId);
+  }
+
+  deleteRelation(relationId: string, actor: ActorRef, options: MutationOptions = {}): void {
+    this.runMutation("relation.delete", actor, options, { relationId }, undefined, () => {
+      this.repository.deleteRelation(relationId);
+      return null;
+    });
   }
 
   createInvestigationNode(input: CreateInvestigationNodeInput, actor: ActorRef, options: MutationOptions = {}): InvestigationNode {
@@ -614,6 +675,18 @@ export class QuestBoardService {
     });
   }
 
+  deleteInvestigationNode(nodeId: string, actor: ActorRef, options: DeleteRevisionOptions = {}): void {
+    const explicitRevision = options.expectedRevision === undefined ? undefined : requireRevision(options.expectedRevision);
+    this.runMutation("investigation.node.delete", actor, options, { nodeId, expectedRevision: explicitRevision }, undefined, () => {
+      const current = this.getInvestigationNode(nodeId);
+      if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+        throw new EntityRevisionConflictError("InvestigationNode", nodeId, explicitRevision, current.revision);
+      }
+      this.repository.deleteInvestigationNode(nodeId);
+      return null;
+    });
+  }
+
   createInvestigationItem(input: CreateInvestigationItemInput, actor: ActorRef, options: MutationOptions = {}): InvestigationItem {
     return this.runMutation("investigation.item.create", actor, options, input, undefined, () => {
       const parent = this.getInvestigationNode(input.nodeId);
@@ -668,6 +741,150 @@ export class QuestBoardService {
         }
       }
       throw new Error("Investigation item update retry loop exhausted");
+    });
+  }
+
+  deleteInvestigationItem(itemId: string, actor: ActorRef, options: DeleteRevisionOptions = {}): void {
+    const explicitRevision = options.expectedRevision === undefined ? undefined : requireRevision(options.expectedRevision);
+    this.runMutation("investigation.item.delete", actor, options, { itemId, expectedRevision: explicitRevision }, undefined, () => {
+      const current = this.getInvestigationItem(itemId);
+      if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+        throw new EntityRevisionConflictError("InvestigationItem", itemId, explicitRevision, current.revision);
+      }
+      this.repository.deleteInvestigationItem(itemId);
+      return null;
+    });
+  }
+
+  attachExistingTaskToInvestigation(
+    input: AttachExistingTaskToInvestigationInput,
+    actor: ActorRef,
+    options: MutationOptions = {},
+  ): { item: InvestigationItem; link: InvestigationItemTaskLink } {
+    return this.runMutation("investigation.item.task.attach-existing", actor, options, input, input.taskId, () => {
+      const node = this.getInvestigationNode(input.nodeId);
+      const task = this.getTask(input.taskId);
+      if (node.projectId !== task.projectId) {
+        throw new TypeError("Investigation Node and Task must belong to the same project");
+      }
+      const timestamp = this.now();
+      const item: InvestigationItem = {
+        id: this.newId(),
+        nodeId: node.id,
+        title: requiredText(input.title ?? task.title, "Investigation item title"),
+        description: input.description?.trim() ?? task.description,
+        sortOrder: nextSortOrder(this.repository.listInvestigationNodeItems(node.id)),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 1,
+      };
+      this.repository.createInvestigationItem(item);
+      const link: InvestigationItemTaskLink = { itemId: item.id, taskId: task.id, sortOrder: 0, createdAt: timestamp };
+      return { item, link: this.repository.createInvestigationItemTaskLink(link) };
+    });
+  }
+
+  reorderInvestigationItems(
+    nodeId: string,
+    orderedItemIds: string[],
+    actor: ActorRef,
+    options: MutationOptions = {},
+  ): InvestigationItem[] {
+    return this.runMutation("investigation.items.reorder", actor, options, { nodeId, orderedItemIds }, undefined, () => {
+      this.getInvestigationNode(nodeId);
+      const current = this.repository.listInvestigationNodeItems(nodeId);
+      const uniqueIds = new Set(orderedItemIds);
+      if (uniqueIds.size !== orderedItemIds.length) throw new TypeError("orderedItemIds must not contain duplicates");
+      if (orderedItemIds.length !== current.length || current.some((item) => !uniqueIds.has(item.id))) {
+        throw new TypeError("orderedItemIds must contain every Item in the Node exactly once");
+      }
+      const byId = new Map(current.map((item) => [item.id, item]));
+      const updated: InvestigationItem[] = [];
+      for (let sortOrder = 0; sortOrder < orderedItemIds.length; sortOrder += 1) {
+        const itemId = orderedItemIds[sortOrder];
+        if (itemId === undefined) throw new TypeError("orderedItemIds contains an invalid position");
+        const item = byId.get(itemId);
+        if (!item) throw new EntityNotFoundError("InvestigationItem", itemId);
+        if (item.sortOrder === sortOrder) {
+          updated.push(item);
+          continue;
+        }
+        const next: InvestigationItem = {
+          ...item,
+          sortOrder,
+          updatedAt: this.now(),
+          revision: item.revision + 1,
+        };
+        this.repository.updateInvestigationItem(next, item.revision);
+        updated.push(next);
+      }
+      return updated;
+    });
+  }
+
+  applyMigrationBatch(
+    input: ApplyMigrationBatchInput,
+    actor: ActorRef,
+    options: MutationOptions = {},
+  ): MigrationBatchResult {
+    return this.runMutation("migration.batch", actor, options, input, undefined, () => {
+      this.getProject(input.projectId);
+      const results: Array<Record<string, unknown>> = [];
+      for (const operation of input.operations) {
+        switch (operation.type) {
+          case "attach_existing_task": {
+            const node = this.getInvestigationNode(operation.nodeId);
+            const task = this.getTask(operation.taskId);
+            if (node.projectId !== input.projectId || task.projectId !== input.projectId) {
+              throw new TypeError("Migration operation must stay inside the requested project");
+            }
+            results.push(this.attachExistingTaskToInvestigation(operation, actor));
+            break;
+          }
+          case "delete_relation": {
+            const relation = this.repository.listProjectRelations(input.projectId).find((candidate) => candidate.id === operation.relationId);
+            if (!relation) throw new EntityNotFoundError("Relation", operation.relationId);
+            this.deleteRelation(operation.relationId, actor);
+            results.push({ deletedRelationId: operation.relationId });
+            break;
+          }
+          case "delete_task": {
+            const task = this.getTask(operation.taskId);
+            if (task.projectId !== input.projectId) throw new TypeError("Migration operation must stay inside the requested project");
+            this.deleteTask(operation.taskId, actor, operation.expectedRevision === undefined
+              ? {}
+              : { expectedRevision: operation.expectedRevision });
+            results.push({ deletedTaskId: operation.taskId });
+            break;
+          }
+          case "delete_investigation_node": {
+            const node = this.getInvestigationNode(operation.nodeId);
+            if (node.projectId !== input.projectId) throw new TypeError("Migration operation must stay inside the requested project");
+            this.deleteInvestigationNode(operation.nodeId, actor, operation.expectedRevision === undefined
+              ? {}
+              : { expectedRevision: operation.expectedRevision });
+            results.push({ deletedNodeId: operation.nodeId });
+            break;
+          }
+          case "delete_investigation_item": {
+            const item = this.getInvestigationItem(operation.itemId);
+            const node = this.getInvestigationNode(item.nodeId);
+            if (node.projectId !== input.projectId) throw new TypeError("Migration operation must stay inside the requested project");
+            this.deleteInvestigationItem(operation.itemId, actor, operation.expectedRevision === undefined
+              ? {}
+              : { expectedRevision: operation.expectedRevision });
+            results.push({ deletedItemId: operation.itemId });
+            break;
+          }
+          case "reorder_investigation_items": {
+            const node = this.getInvestigationNode(operation.nodeId);
+            if (node.projectId !== input.projectId) throw new TypeError("Migration operation must stay inside the requested project");
+            results.push({ items: this.reorderInvestigationItems(operation.nodeId, operation.orderedItemIds, actor) });
+            break;
+          }
+        }
+      }
+      return { applied: results.length, results };
     });
   }
 

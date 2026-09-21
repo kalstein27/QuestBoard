@@ -341,7 +341,7 @@ function investigationTaskNode(task, position) {
   const foot = node("div", "investigation-node-foot");
   foot.append(node("span", "muted", task.priority), node("span", "muted", `r${task.revision}`));
   card.append(head, title, description, foot);
-  attachInvestigationDrag(card, "task", task.id);
+  attachInvestigationDrag(card, "task", task.id, head);
   card.addEventListener("click", () => {
     if (card._suppressClick) {
       card._suppressClick = false;
@@ -365,7 +365,7 @@ function investigationArtifactNode(artifact, position) {
     node("span", "investigation-node-copy", artifact.description || artifact.locator),
     node("span", "investigation-node-locator", artifact.locator),
   );
-  attachInvestigationDrag(card, "artifact", artifact.id);
+  attachInvestigationDrag(card, "artifact", artifact.id, head);
   return card;
 }
 
@@ -400,7 +400,7 @@ function investigationGraphNode(graphNode, position) {
   addItem.type = "button";
   addItem.addEventListener("click", () => void addInvestigationItemFromPrompt(graphNode.id));
   card.append(addItem);
-  attachInvestigationDrag(card, "investigation_node", graphNode.id);
+  attachInvestigationDrag(card, "investigation_node", graphNode.id, head);
   return card;
 }
 
@@ -631,14 +631,15 @@ function chooseInvestigationCandidate(promptTitle, candidates, labeler) {
   return Number.isInteger(index) && index >= 0 && index < candidates.length ? candidates[index] : null;
 }
 
-function attachInvestigationDrag(card, entityType, entityId) {
-  card.addEventListener("pointerdown", (event) => {
+function attachInvestigationDrag(card, entityType, entityId, dragRegion = card) {
+  dragRegion.classList.add("investigation-node-drag-region");
+  dragRegion.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || state.investigationHistoryBusy) return;
     if (event.target instanceof Element && event.target.closest("button, input, textarea, select, a")) return;
     const key = boardNodeKey(entityType, entityId);
     const start = state.displayPositions.get(key);
     if (!start) return;
-    card.setPointerCapture(event.pointerId);
+    dragRegion.setPointerCapture(event.pointerId);
     card.classList.add("dragging-node");
     const startClientX = event.clientX;
     const startClientY = event.clientY;
@@ -660,18 +661,18 @@ function attachInvestigationDrag(card, entityType, entityId) {
     };
     const onEnd = (endEvent) => {
       if (endEvent.pointerId !== event.pointerId) return;
-      card.removeEventListener("pointermove", onMove);
-      card.removeEventListener("pointerup", onEnd);
-      card.removeEventListener("pointercancel", onEnd);
+      dragRegion.removeEventListener("pointermove", onMove);
+      dragRegion.removeEventListener("pointerup", onEnd);
+      dragRegion.removeEventListener("pointercancel", onEnd);
       card.classList.remove("dragging-node");
       if (moved) {
         card._suppressClick = true;
         void commitInvestigationMove(entityType, entityId, start, latest);
       }
     };
-    card.addEventListener("pointermove", onMove);
-    card.addEventListener("pointerup", onEnd);
-    card.addEventListener("pointercancel", onEnd);
+    dragRegion.addEventListener("pointermove", onMove);
+    dragRegion.addEventListener("pointerup", onEnd);
+    dragRegion.addEventListener("pointercancel", onEnd);
   });
 }
 

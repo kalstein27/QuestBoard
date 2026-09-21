@@ -18,6 +18,9 @@ import {
   RevisionConflictError,
 } from "../core/errors.js";
 import type {
+  ApplyMigrationBatchInput,
+  AttachExistingTaskToInvestigationInput,
+  MigrationBatchOperation,
   CreateArtifactInput,
   CreateInvestigationItemInput,
   CreateInvestigationItemLinkInput,
@@ -59,6 +62,63 @@ const actorSchema = {
     displayName: { type: "string" },
   },
   required: ["id", "provider"],
+} as const;
+
+const migrationOperationSchema = {
+  oneOf: [
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { const: "attach_existing_task" },
+        nodeId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+      },
+      required: ["type", "nodeId", "taskId"],
+    },
+    {
+      type: "object", additionalProperties: false,
+      properties: { type: { const: "delete_relation" }, relationId: { type: "string", minLength: 1 } },
+      required: ["type", "relationId"],
+    },
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { const: "delete_task" },
+        taskId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+      },
+      required: ["type", "taskId"],
+    },
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { const: "delete_investigation_node" },
+        nodeId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+      },
+      required: ["type", "nodeId"],
+    },
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { const: "delete_investigation_item" },
+        itemId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+      },
+      required: ["type", "itemId"],
+    },
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { const: "reorder_investigation_items" },
+        nodeId: { type: "string", minLength: 1 },
+        orderedItemIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+      },
+      required: ["type", "nodeId", "orderedItemIds"],
+    },
+  ],
 } as const;
 
 export const QUESTBOARD_AGENT_TOOLS = [
@@ -138,6 +198,21 @@ export const QUESTBOARD_AGENT_TOOLS = [
         status: { type: "string", enum: TASK_STATUSES },
         priority: { type: "string", enum: TASK_PRIORITIES },
         tags: { type: "array", items: { type: "string" } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_delete_task",
+    description: "Permanently delete a Task and its task-owned attachments/claims/relations while preserving Activity rows as project history.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
         requestId: { type: "string", minLength: 8, maxLength: 128 },
         actor: actorSchema,
       },
@@ -244,6 +319,20 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_delete_artifact",
+    description: "Permanently delete an evidence Artifact and any Relation edges or board position that reference it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        artifactId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["artifactId", "actor"],
+    },
+  },
+  {
     name: "questboard_list_relations",
     description: "List Task/Artifact relations that touch one task or its attached artifacts.",
     inputSchema: {
@@ -270,6 +359,20 @@ export const QUESTBOARD_AGENT_TOOLS = [
         actor: actorSchema,
       },
       required: ["fromType", "fromId", "toType", "toId", "kind", "actor"],
+    },
+  },
+  {
+    name: "questboard_delete_relation",
+    description: "Permanently delete one Task/Artifact relation by relation id.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        relationId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["relationId", "actor"],
     },
   },
   {
@@ -318,6 +421,21 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_delete_investigation_node",
+    description: "Delete an Investigation Node and its contained Items/graph links; linked canonical Tasks are preserved.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        nodeId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["nodeId", "actor"],
+    },
+  },
+  {
     name: "questboard_add_investigation_item",
     description: "Add a titled, described Item inside an Investigation Node.",
     inputSchema: {
@@ -344,6 +462,21 @@ export const QUESTBOARD_AGENT_TOOLS = [
         expectedRevision: { type: "integer", minimum: 1 },
         title: { type: "string", minLength: 1 },
         description: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["itemId", "actor"],
+    },
+  },
+  {
+    name: "questboard_delete_investigation_item",
+    description: "Delete an Investigation Item and its graph/task links; canonical Tasks and Nodes are preserved.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        itemId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
         requestId: { type: "string", minLength: 8, maxLength: 128 },
         actor: actorSchema,
       },
@@ -430,6 +563,53 @@ export const QUESTBOARD_AGENT_TOOLS = [
       required: ["linkId", "actor"],
     },
   },
+  {
+    name: "questboard_attach_existing_task_to_investigation",
+    description: "Atomically create a new Investigation Item for an existing canonical Task and link the Task to it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        nodeId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["nodeId", "taskId", "actor"],
+    },
+  },
+  {
+    name: "questboard_reorder_investigation_items",
+    description: "Atomically replace the complete Item order inside one Investigation Node.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        nodeId: { type: "string", minLength: 1 },
+        orderedItemIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["nodeId", "orderedItemIds", "actor"],
+    },
+  },
+  {
+    name: "questboard_apply_migration_batch",
+    description: "Apply an all-or-nothing project migration batch for existing-Task attachment, legacy cleanup, and Item reorder.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        operations: { type: "array", minItems: 1, maxItems: 200, items: migrationOperationSchema },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "operations", "actor"],
+    },
+  },
 ] as const satisfies readonly QuestBoardAgentToolDefinition[];
 
 export type QuestBoardAgentToolName = (typeof QUESTBOARD_AGENT_TOOLS)[number]["name"];
@@ -488,6 +668,12 @@ export function executeQuestBoardAgentTool(
       };
       return { task: service.updateTask(requireString(args, "taskId"), patch, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_delete_task":
+      service.deleteTask(requireString(args, "taskId"), requireActor(args), {
+        ...mutationOptions(args),
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+      });
+      return { deleted: true };
     case "questboard_get_claim": {
       const taskId = requireString(args, "taskId");
       return { claim: service.getTaskClaim(taskId) ?? null };
@@ -527,6 +713,9 @@ export function executeQuestBoardAgentTool(
       };
       return { artifact: service.createArtifact(inputValue, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_delete_artifact":
+      service.deleteArtifact(requireString(args, "artifactId"), requireActor(args), mutationOptions(args));
+      return { deleted: true };
     case "questboard_list_relations":
       return { relations: service.listTaskRelations(requireString(args, "taskId")) };
     case "questboard_add_relation": {
@@ -540,6 +729,9 @@ export function executeQuestBoardAgentTool(
       };
       return { relation: service.createRelation(inputValue, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_delete_relation":
+      service.deleteRelation(requireString(args, "relationId"), requireActor(args), mutationOptions(args));
+      return { deleted: true };
     case "questboard_get_investigation_graph":
       return service.getInvestigationGraph(requireString(args, "projectId"));
     case "questboard_create_investigation_node": {
@@ -560,6 +752,12 @@ export function executeQuestBoardAgentTool(
       };
       return { node: service.updateInvestigationNode(requireString(args, "nodeId"), patch, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_delete_investigation_node":
+      service.deleteInvestigationNode(requireString(args, "nodeId"), requireActor(args), {
+        ...mutationOptions(args),
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+      });
+      return { deleted: true };
     case "questboard_add_investigation_item": {
       const inputValue: CreateInvestigationItemInput = {
         nodeId: requireString(args, "nodeId"),
@@ -576,6 +774,12 @@ export function executeQuestBoardAgentTool(
       };
       return { item: service.updateInvestigationItem(requireString(args, "itemId"), patch, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_delete_investigation_item":
+      service.deleteInvestigationItem(requireString(args, "itemId"), requireActor(args), {
+        ...mutationOptions(args),
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+      });
+      return { deleted: true };
     case "questboard_link_task_to_investigation_item":
       return {
         link: service.linkTaskToInvestigationItem(
@@ -609,6 +813,28 @@ export function executeQuestBoardAgentTool(
     case "questboard_unlink_investigation_item_from_node":
       service.removeInvestigationItemLink(requireString(args, "linkId"), requireActor(args), mutationOptions(args));
       return { removed: true };
+    case "questboard_attach_existing_task_to_investigation": {
+      const inputValue: AttachExistingTaskToInvestigationInput = {
+        nodeId: requireString(args, "nodeId"),
+        taskId: requireString(args, "taskId"),
+        ...optionalStringProperty(args, "title"),
+        ...optionalStringProperty(args, "description"),
+      };
+      return service.attachExistingTaskToInvestigation(inputValue, requireActor(args), mutationOptions(args));
+    }
+    case "questboard_reorder_investigation_items":
+      return {
+        items: service.reorderInvestigationItems(
+          requireString(args, "nodeId"), requireStringArray(args, "orderedItemIds"), requireActor(args), mutationOptions(args),
+        ),
+      };
+    case "questboard_apply_migration_batch": {
+      const inputValue: ApplyMigrationBatchInput = {
+        projectId: requireString(args, "projectId"),
+        operations: requireArray(args, "operations").map((operation, index) => parseMigrationOperation(operation, index)),
+      };
+      return service.applyMigrationBatch(inputValue, requireActor(args), mutationOptions(args));
+    }
     default:
       throw new TypeError(`Unknown QuestBoard tool: ${name}`);
   }
@@ -643,6 +869,63 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
     throw new TypeError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function requireArray(value: Record<string, unknown>, key: string): unknown[] {
+  const item = value[key];
+  if (!Array.isArray(item)) throw new TypeError(`${key} must be an array`);
+  return item;
+}
+
+function requireStringArray(value: Record<string, unknown>, key: string): string[] {
+  const items = requireArray(value, key);
+  if (!items.every((entry) => typeof entry === "string" && entry.trim())) {
+    throw new TypeError(`${key} must be an array of non-empty strings`);
+  }
+  return items as string[];
+}
+
+function parseMigrationOperation(value: unknown, index: number): MigrationBatchOperation {
+  const operation = requireObject(value, `operations[${index}]`);
+  const type = requireString(operation, "type");
+  switch (type) {
+    case "attach_existing_task":
+      return {
+        type,
+        nodeId: requireString(operation, "nodeId"),
+        taskId: requireString(operation, "taskId"),
+        ...optionalStringProperty(operation, "title"),
+        ...optionalStringProperty(operation, "description"),
+      };
+    case "delete_relation":
+      return { type, relationId: requireString(operation, "relationId") };
+    case "delete_task":
+      return {
+        type,
+        taskId: requireString(operation, "taskId"),
+        ...optionalPositiveIntegerProperty(operation, "expectedRevision"),
+      };
+    case "delete_investigation_node":
+      return {
+        type,
+        nodeId: requireString(operation, "nodeId"),
+        ...optionalPositiveIntegerProperty(operation, "expectedRevision"),
+      };
+    case "delete_investigation_item":
+      return {
+        type,
+        itemId: requireString(operation, "itemId"),
+        ...optionalPositiveIntegerProperty(operation, "expectedRevision"),
+      };
+    case "reorder_investigation_items":
+      return {
+        type,
+        nodeId: requireString(operation, "nodeId"),
+        orderedItemIds: requireStringArray(operation, "orderedItemIds"),
+      };
+    default:
+      throw new TypeError(`operations[${index}].type is not supported: ${type}`);
+  }
 }
 
 function requireString(value: Record<string, unknown>, key: string): string {

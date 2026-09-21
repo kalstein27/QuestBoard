@@ -182,7 +182,9 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
   }
 
   runIdempotentMutation<T>(request: MutationRequest | undefined, operation: () => T): MutationExecution<T> {
-    if (!request) return { value: operation(), replayed: false };
+    if (!request) {
+      return this.transaction(() => ({ value: operation(), replayed: false }));
+    }
 
     return this.transaction(() => {
       const existing = this.db
@@ -341,6 +343,31 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     });
   }
 
+  deleteTask(taskId: string): void {
+    this.transaction(() => {
+      const artifactIds = (this.db
+        .prepare("SELECT id FROM artifacts WHERE task_id = ?")
+        .all(taskId) as Array<{ id: string }>).map((row) => row.id);
+
+      this.db.prepare(`
+        DELETE FROM relations
+        WHERE (from_type = 'task' AND from_id = ?)
+           OR (to_type = 'task' AND to_id = ?)
+           OR (from_type = 'artifact' AND from_id IN (SELECT id FROM artifacts WHERE task_id = ?))
+           OR (to_type = 'artifact' AND to_id IN (SELECT id FROM artifacts WHERE task_id = ?))
+      `).run(taskId, taskId, taskId, taskId);
+      this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'task' AND entity_id = ?").run(taskId);
+      for (const artifactId of artifactIds) {
+        this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'artifact' AND entity_id = ?").run(artifactId);
+      }
+      this.db.prepare("DELETE FROM claims WHERE task_id = ?").run(taskId);
+      this.db.prepare("DELETE FROM artifacts WHERE task_id = ?").run(taskId);
+      this.db.prepare("UPDATE activities SET task_id = NULL WHERE task_id = ?").run(taskId);
+      const result = this.db.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
+      if (Number(result.changes) !== 1) throw new EntityNotFoundError("Task", taskId);
+    });
+  }
+
   getClaim(taskId: string): Claim | undefined {
     const row = this.db.prepare("SELECT * FROM claims WHERE task_id = ?").get(taskId) as ClaimRow | undefined;
     return row ? mapClaim(row) : undefined;
@@ -461,6 +488,19 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     return rows.map(mapArtifact);
   }
 
+  deleteArtifact(artifactId: string): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        DELETE FROM relations
+        WHERE (from_type = 'artifact' AND from_id = ?)
+           OR (to_type = 'artifact' AND to_id = ?)
+      `).run(artifactId, artifactId);
+      this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'artifact' AND entity_id = ?").run(artifactId);
+      const result = this.db.prepare("DELETE FROM artifacts WHERE id = ?").run(artifactId);
+      if (Number(result.changes) !== 1) throw new EntityNotFoundError("Artifact", artifactId);
+    });
+  }
+
   createRelation(relation: Relation, activity: Activity): void {
     this.transaction(() => {
       this.db
@@ -506,6 +546,11 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     return rows.map(mapRelation);
   }
 
+  deleteRelation(relationId: string): void {
+    const result = this.db.prepare("DELETE FROM relations WHERE id = ?").run(relationId);
+    if (Number(result.changes) !== 1) throw new EntityNotFoundError("Relation", relationId);
+  }
+
   createInvestigationNode(node: InvestigationNode): void {
     this.db.prepare(`
       INSERT INTO investigation_nodes (id, project_id, title, description, kind, created_at, updated_at, revision)
@@ -533,6 +578,14 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       if (!current) throw new EntityNotFoundError("InvestigationNode", node.id);
       throw new EntityRevisionConflictError("InvestigationNode", node.id, expectedRevision, current.revision);
     }
+  }
+
+  deleteInvestigationNode(nodeId: string): void {
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'investigation_node' AND entity_id = ?").run(nodeId);
+      const result = this.db.prepare("DELETE FROM investigation_nodes WHERE id = ?").run(nodeId);
+      if (Number(result.changes) !== 1) throw new EntityNotFoundError("InvestigationNode", nodeId);
+    });
   }
 
   createInvestigationItem(item: InvestigationItem): void {
@@ -571,6 +624,11 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       if (!current) throw new EntityNotFoundError("InvestigationItem", item.id);
       throw new EntityRevisionConflictError("InvestigationItem", item.id, expectedRevision, current.revision);
     }
+  }
+
+  deleteInvestigationItem(itemId: string): void {
+    const result = this.db.prepare("DELETE FROM investigation_items WHERE id = ?").run(itemId);
+    if (Number(result.changes) !== 1) throw new EntityNotFoundError("InvestigationItem", itemId);
   }
 
   createInvestigationItemLink(link: InvestigationItemLink): void {

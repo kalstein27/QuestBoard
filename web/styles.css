@@ -135,12 +135,18 @@ main { min-width: 0; }
 .investigation-nodes { position: absolute; inset: 0; z-index: 2; }
 .investigation-node {
   position: absolute; width: 230px; min-height: 116px; padding: 11px 12px;
-  display: grid; align-content: start; gap: 7px; user-select: none; touch-action: none;
+  display: grid; align-content: start; gap: 7px; user-select: none; touch-action: auto;
   border: 1px solid #303743; border-radius: 9px; background: rgba(20,24,30,.96);
-  box-shadow: 0 9px 22px rgba(0,0,0,.28); cursor: grab;
+  box-shadow: 0 9px 22px rgba(0,0,0,.28); cursor: default;
 }
 .investigation-node:hover { border-color: #495363; }
-.investigation-node.dragging-node { cursor: grabbing; z-index: 8; box-shadow: 0 14px 34px rgba(0,0,0,.45); }
+.investigation-node.dragging-node { z-index: 8; box-shadow: 0 14px 34px rgba(0,0,0,.45); }
+.investigation-node-drag-region { min-height: 44px; cursor: grab; touch-action: none; user-select: none; }
+.investigation-node-drag-region:hover { background: rgba(116,134,255,.035); }
+.investigation-node.dragging-node .investigation-node-drag-region { cursor: grabbing; }
+@media (pointer: coarse) {
+  .investigation-node-drag-region { min-height: 48px; }
+}
 .investigation-task { border-left: 3px solid #69717e; }
 .investigation-task.status-border-ready { border-left-color: #5d98ca; }
 .investigation-task.status-border-in_progress { border-left-color: #d49a55; }
@@ -357,6 +363,7 @@ a.evidence-locator:hover { text-decoration: underline; }
   .card-list { min-height: calc(100dvh - 218px); }
   .field-grid { grid-template-columns: 1fr; }
   .investigation-board { margin-inline: 12px; min-height: calc(100dvh - 176px); }
+  .investigation-node-drag-region { min-height: 44px; }
 }
 
 @media (max-width: 480px) {
