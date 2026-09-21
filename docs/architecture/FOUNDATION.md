@@ -53,11 +53,13 @@ The initial Task states are `inbox`, `planned`, `ready`, `in_progress`, `blocked
 
 ## Local HTTP boundary
 
-The local API uses Node's built-in `node:http` module and calls `QuestBoardService`; the HTTP adapter does not import SQLite. The long-lived daemon composition root is the single normal runtime owner of SQLite and `QuestBoardService`, and binds to `127.0.0.1` only by default. Mutation callers provide vendor-neutral actor id/provider headers so Activity and Claim records remain portable across human and agent clients.
+The local API uses Node's built-in `node:http` module and calls `QuestBoardService`; the HTTP adapter does not import SQLite. The long-lived daemon composition root is the single normal runtime owner of SQLite and `QuestBoardService`. The canonical npm daemon/start scripts use Tailnet binding by default, while explicit `:local` scripts retain localhost-only operation. Mutation callers provide vendor-neutral actor id/provider headers so Activity and Claim records remain portable across human and agent clients.
 
 Project and Task list/get/update queries are application/repository operations rather than HTTP-specific SQL. Web uses the public HTTP routes, while local CLI/MCP clients use daemon bridge routes that dispatch the same shared agent-tool/MCP handlers inside the daemon. Neither client opens SQLite directly.
 
 The daemon bridge is transport plumbing, not an authentication boundary. Bridge POSTs require the non-simple `x-questboard-daemon-client: 1` header so an unrelated browser origin cannot reach them with a simple cross-origin request; this is a CSRF-style transport guard, not caller authentication. When the daemon HTTP listener is intentionally bound to LAN or Tailnet, those bridge routes still inherit the same trusted-private-network assumption as the rest of the unauthenticated HTTP API.
+
+Daemon discovery is fail-closed against workspace/database mix-ups. SQLite stores a persistent `database_id`; daemon startup pins that ID together with the canonical daemon workspace path and canonical SQLite path to a local identity profile. MCP/CLI health checks require the current daemon protocol plus all three pinned identity values to match before any bridge call is sent. A legacy v1 profile may be upgraded only by a current daemon opening the same database ID, while a healthy-looking endpoint backed by another workspace or SQLite path is refused before bridge calls are sent.
 
 Task concurrency is intentionally hidden from normal callers. The repository still performs revision-based compare-and-set writes, while `QuestBoardService` rereads and retries a normal Task patch when another writer wins first. Callers may optionally provide `expectedRevision` when they explicitly want strict compare-and-set semantics and a stale read to fail instead of retrying.
 
@@ -71,7 +73,7 @@ The UI provides two views. Quest Board renders the seven planned Task states as 
 
 Only the fixed assets `/`, `/app.js`, and `/styles.css` are served. The server applies a same-origin Content Security Policy and `nosniff`; Web mutation calls still use the neutral actor id/provider headers. Actor identity in browser local storage is attribution metadata, not authentication.
 
-For another device on the same Tailnet, the optional `start:tailnet` composition mode binds the HTTP process specifically to the machine's Tailscale IPv4 address rather than to all LAN interfaces. This is private-network reachability, not an authentication boundary.
+The canonical composition mode binds the HTTP process specifically to the machine's Tailscale IPv4 address rather than to all LAN interfaces. Explicit `:local` scripts restore localhost-only binding. This is private-network reachability, not an authentication boundary.
 
 ## Shared agent-tool boundary
 

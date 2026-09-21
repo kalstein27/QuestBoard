@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { QUESTBOARD_DAEMON_PROTOCOL } from "../src/server/daemon-identity.js";
 
 const STARTUP_TIMEOUT_MS = 5_000;
 const actor = { id: "agent:mcp-runtime-test", provider: "test" };
@@ -27,6 +29,19 @@ test("one daemon serves Web/API while multiple MCP stdio proxies share the same 
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { status: "ok" });
 
+    const daemonHealth = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { "x-questboard-daemon-client": "1" },
+    });
+    const healthBody = await daemonHealth.json() as {
+      status: string;
+      daemon: { protocol: string; databaseId: string; workspacePath: string; databasePath: string };
+    };
+    assert.equal(healthBody.status, "ok");
+    assert.equal(healthBody.daemon.protocol, QUESTBOARD_DAEMON_PROTOCOL);
+    assert.ok(healthBody.daemon.databaseId);
+    assert.equal(healthBody.daemon.workspacePath, realpathSync.native(process.cwd()));
+    assert.equal(healthBody.daemon.databasePath, realpathSync.native(join(tempRoot, "questboard.sqlite")));
+
     const untrustedBridgeCall = await fetch(`http://127.0.0.1:${port}/_questboard/agent-tool`, {
       method: "POST",
       headers: { "content-type": "text/plain" },
@@ -34,8 +49,8 @@ test("one daemon serves Web/API while multiple MCP stdio proxies share the same 
     });
     assert.equal(untrustedBridgeCall.status, 400, "daemon bridge must reject requests without its client header");
 
-    proxyA = spawnQuestBoardMcpProxy(port);
-    proxyB = spawnQuestBoardMcpProxy(port);
+    proxyA = spawnQuestBoardMcpProxy(tempRoot, port);
+    proxyB = spawnQuestBoardMcpProxy(tempRoot, port);
     const a = createRpcClient(proxyA);
     const b = createRpcClient(proxyB);
 
@@ -70,7 +85,7 @@ test("one daemon serves Web/API while multiple MCP stdio proxies share the same 
     const sharedTasks = readStructuredContent(tasks).tasks as Array<{ id: string }>;
     assert.deepEqual(sharedTasks.map((task) => task.id), [taskId]);
 
-    const cli = spawnQuestBoardCli(port, ["projects"]);
+    const cli = spawnQuestBoardCli(tempRoot, port, ["projects"]);
     let cliStdout = "";
     cli.stdout.setEncoding("utf8");
     cli.stdout.on("data", (chunk: string) => { cliStdout += chunk; });
@@ -111,6 +126,7 @@ test("daemon can explicitly expose Web/API to the local network while MCP remain
     env: {
       ...process.env,
       QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
+      QUESTBOARD_IDENTITY_PATH: join(tempRoot, "daemon-identity.json"),
       QUESTBOARD_HOST: "0.0.0.0",
       QUESTBOARD_PORT: String(port),
       QUESTBOARD_TAILNET: "0",
@@ -135,25 +151,79 @@ test("daemon can explicitly expose Web/API to the local network while MCP remain
   }
 });
 
+test("daemon refuses a different database under an already-pinned identity profile", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-daemon-profile-"));
+  const firstPort = await findFreePort();
+  let secondPort = await findFreePort();
+  while (secondPort === firstPort) secondPort = await findFreePort();
+  const first = spawnQuestBoardDaemon(tempRoot, firstPort, "first.sqlite");
+  let second: ChildProcessWithoutNullStreams | undefined;
+
+  try {
+    await withTimeout(
+      waitForText(first.stdout, `QuestBoard Web/API listening on http://127.0.0.1:${firstPort} (localhost)`),
+      STARTUP_TIMEOUT_MS,
+      "first QuestBoard daemon did not start",
+    );
+
+    second = spawnQuestBoardDaemon(tempRoot, secondPort, "second.sqlite");
+    let stderr = "";
+    second.stderr.setEncoding("utf8");
+    second.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await withTimeout(waitForExit(second), STARTUP_TIMEOUT_MS, "second QuestBoard daemon did not fail fast");
+    assert.notEqual(exitCode, 0);
+    assert.match(stderr, /daemon identity mismatch/);
+  } finally {
+    if (second?.exitCode === null) second.kill("SIGTERM");
+    if (first.exitCode === null) first.kill("SIGTERM");
+    await Promise.allSettled([
+      second ? waitForExit(second) : Promise.resolve(null),
+      waitForExit(first),
+    ]);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("MCP stdio proxy fails clearly when the shared daemon is unavailable", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "questboard-daemon-unavailable-"));
   const port = await findFreePort();
-  const proxy = spawnQuestBoardMcpProxy(port);
+  await writeFile(
+    join(tempRoot, "daemon-identity.json"),
+    JSON.stringify({
+      protocol: QUESTBOARD_DAEMON_PROTOCOL,
+      databaseId: "missing-daemon",
+      workspacePath: realpathSync.native(process.cwd()),
+      databasePath: join(tempRoot, "missing.sqlite"),
+    }),
+    "utf8",
+  );
+  const proxy = spawnQuestBoardMcpProxy(tempRoot, port);
   let stderr = "";
   proxy.stderr.setEncoding("utf8");
   proxy.stderr.on("data", (chunk: string) => { stderr += chunk; });
 
-  const exitCode = await withTimeout(waitForExit(proxy), STARTUP_TIMEOUT_MS, "MCP proxy did not fail fast");
-  assert.notEqual(exitCode, 0);
-  assert.match(stderr, /QuestBoard daemon is unavailable/);
-  assert.match(stderr, /npm run daemon/);
+  try {
+    const exitCode = await withTimeout(waitForExit(proxy), STARTUP_TIMEOUT_MS, "MCP proxy did not fail fast");
+    assert.notEqual(exitCode, 0);
+    assert.match(stderr, /QuestBoard daemon is unavailable/);
+    assert.match(stderr, /npm run daemon/);
+  } finally {
+    if (proxy.exitCode === null) proxy.kill("SIGTERM");
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
-function spawnQuestBoardDaemon(tempRoot: string, port: number): ChildProcessWithoutNullStreams {
+function spawnQuestBoardDaemon(
+  tempRoot: string,
+  port: number,
+  databaseFile = "questboard.sqlite",
+): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, ["dist/src/server/main.js"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      QUESTBOARD_DB_PATH: join(tempRoot, "questboard.sqlite"),
+      QUESTBOARD_DB_PATH: join(tempRoot, databaseFile),
+      QUESTBOARD_IDENTITY_PATH: join(tempRoot, "daemon-identity.json"),
       QUESTBOARD_HOST: "127.0.0.1",
       QUESTBOARD_PORT: String(port),
       QUESTBOARD_TAILNET: "0",
@@ -163,24 +233,26 @@ function spawnQuestBoardDaemon(tempRoot: string, port: number): ChildProcessWith
   });
 }
 
-function spawnQuestBoardMcpProxy(port: number): ChildProcessWithoutNullStreams {
+function spawnQuestBoardMcpProxy(tempRoot: string, port: number): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, ["dist/src/adapters/mcp/main.js"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       QUESTBOARD_DAEMON_URL: `http://127.0.0.1:${port}`,
+      QUESTBOARD_IDENTITY_PATH: join(tempRoot, "daemon-identity.json"),
       QUESTBOARD_CONCURRENCY_LOG: "0",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
-function spawnQuestBoardCli(port: number, args: string[]): ChildProcessWithoutNullStreams {
+function spawnQuestBoardCli(tempRoot: string, port: number, args: string[]): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, ["dist/src/adapters/cli/main.js", ...args], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       QUESTBOARD_DAEMON_URL: `http://127.0.0.1:${port}`,
+      QUESTBOARD_IDENTITY_PATH: join(tempRoot, "daemon-identity.json"),
       QUESTBOARD_CONCURRENCY_LOG: "0",
     },
     stdio: ["pipe", "pipe", "pipe"],

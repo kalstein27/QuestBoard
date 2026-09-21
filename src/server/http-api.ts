@@ -39,6 +39,7 @@ import type {
 } from "../application/quest-board-service.js";
 import { describeQuestBoardError, executeQuestBoardAgentTool } from "../adapters/agent-tools.js";
 import { createQuestBoardMcpHandler } from "../adapters/mcp/mcp-server.js";
+import type { QuestBoardDaemonIdentity } from "./daemon-identity.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const PROJECT_STATUSES = ["active", "archived"] as const satisfies readonly ProjectStatus[];
@@ -46,6 +47,7 @@ const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies
 
 export interface QuestBoardHttpServerOptions {
   webRoot?: string;
+  daemonIdentity?: QuestBoardDaemonIdentity;
 }
 
 export function createQuestBoardHttpServer(
@@ -75,7 +77,11 @@ async function handleRequest(
   }
 
   if (method === "GET" && pathname === "/health") {
-    sendJson(response, 200, { status: "ok" });
+    const includeDaemonIdentity = singleHeader(request, "x-questboard-daemon-client")?.trim() === "1";
+    sendJson(response, 200, {
+      status: "ok",
+      ...(includeDaemonIdentity && options.daemonIdentity ? { daemon: options.daemonIdentity } : {}),
+    });
     return;
   }
 

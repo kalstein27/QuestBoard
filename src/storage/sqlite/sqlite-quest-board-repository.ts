@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type {
   Activity,
@@ -169,6 +170,7 @@ type InvestigationItemTaskLinkRow = {
 
 export class SqliteQuestBoardRepository implements QuestBoardRepository {
   private readonly db: DatabaseSync;
+  readonly databaseId: string;
   private transactionDepth = 0;
 
   constructor(path = ":memory:") {
@@ -176,6 +178,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec("PRAGMA busy_timeout = 5000");
     this.migrate();
+    this.databaseId = this.ensureDatabaseId();
   }
 
   runIdempotentMutation<T>(request: MutationRequest | undefined, operation: () => T): MutationExecution<T> {
@@ -710,6 +713,11 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
 
       CREATE INDEX IF NOT EXISTS mutation_receipts_created_idx ON mutation_receipts(created_at);
 
+      CREATE TABLE IF NOT EXISTS questboard_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS artifacts (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
@@ -832,6 +840,23 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         `);
       });
     }
+  }
+
+  private ensureDatabaseId(): string {
+    const existing = this.db
+      .prepare("SELECT value FROM questboard_metadata WHERE key = 'database_id'")
+      .get() as { value: string } | undefined;
+    if (existing?.value) return existing.value;
+
+    const generated = randomUUID();
+    this.db
+      .prepare("INSERT OR IGNORE INTO questboard_metadata (key, value) VALUES ('database_id', ?)")
+      .run(generated);
+    const stored = this.db
+      .prepare("SELECT value FROM questboard_metadata WHERE key = 'database_id'")
+      .get() as { value: string } | undefined;
+    if (!stored?.value) throw new Error("QuestBoard database identity could not be initialized");
+    return stored.value;
   }
 
   private insertActivity(activity: Activity): void {

@@ -29,13 +29,15 @@ npm run build
 npm run verify
 ```
 
-Start the local Web/API server with:
+Start the Web/API server in the default Tailnet mode with:
 
 ```bash
 npm start
 ```
 
-Default URL: `http://127.0.0.1:4317`
+Default URL: `http://<TAILSCALE-IP>:4317`
+
+Use `npm run start:local` for localhost-only access at `http://127.0.0.1:4317`.
 
 Default SQLite DB: `.questboard/questboard.sqlite`
 

@@ -1,4 +1,10 @@
 import { DEFAULT_QUESTBOARD_PORT, parseQuestBoardPort } from "../server/runtime.js";
+import { findTailscaleIpv4 } from "../server/network.js";
+import {
+  QUESTBOARD_DAEMON_PROTOCOL,
+  readPinnedQuestBoardDaemonIdentity,
+  type QuestBoardDaemonIdentity,
+} from "../server/daemon-identity.js";
 import { QuestBoardRemoteToolError } from "./agent-tools.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
@@ -14,10 +20,13 @@ export class QuestBoardDaemonClient {
     this.baseUrl = normalizeDaemonUrl(baseUrl);
   }
 
-  async assertHealthy(): Promise<void> {
+  async assertHealthy(
+    expectedIdentity: QuestBoardDaemonIdentity = readPinnedQuestBoardDaemonIdentity(),
+  ): Promise<void> {
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/health`, {
+        headers: { [DAEMON_CLIENT_HEADER]: "1" },
         signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
@@ -26,9 +35,32 @@ export class QuestBoardDaemonClient {
     if (!response.ok) {
       throw new Error(`QuestBoard daemon health check failed with HTTP ${response.status} at ${this.baseUrl}`);
     }
-    const payload = await response.json() as { status?: unknown };
+    const payload = await response.json() as {
+      status?: unknown;
+      daemon?: {
+        protocol?: unknown;
+        databaseId?: unknown;
+        workspacePath?: unknown;
+        databasePath?: unknown;
+      };
+    };
     if (payload.status !== "ok") {
       throw new Error(`QuestBoard daemon returned an invalid health response at ${this.baseUrl}`);
+    }
+    if (!isDaemonIdentity(payload.daemon)) {
+      throw new Error(
+        `QuestBoard daemon at ${this.baseUrl} does not expose the required ${QUESTBOARD_DAEMON_PROTOCOL} identity. `
+        + "Restart the intended shared daemon with the current QuestBoard build.",
+      );
+    }
+
+    const received = payload.daemon;
+    const mismatch = identityMismatchFields(expectedIdentity, received);
+    if (mismatch.length > 0) {
+      throw new Error(
+        `QuestBoard daemon identity mismatch at ${this.baseUrl}: ${mismatch.join(", ")}. `
+        + "Refusing to attach to a different QuestBoard workspace/database.",
+      );
     }
   }
 
@@ -74,13 +106,41 @@ export class QuestBoardDaemonClient {
   }
 }
 
-export function resolveQuestBoardDaemonUrl(env: NodeJS.ProcessEnv = process.env): string {
+export function resolveQuestBoardDaemonUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  tailscaleIpv4: string | null | undefined = findTailscaleIpv4(),
+): string {
   const configured = env.QUESTBOARD_DAEMON_URL?.trim();
   if (configured) return normalizeDaemonUrl(configured);
   const port = env.QUESTBOARD_PORT === undefined
     ? DEFAULT_QUESTBOARD_PORT
     : parseQuestBoardPort(env.QUESTBOARD_PORT);
-  return `http://127.0.0.1:${port}`;
+  const host = tailscaleIpv4 ?? "127.0.0.1";
+  return `http://${host}:${port}`;
+}
+
+function isDaemonIdentity(value: unknown): value is QuestBoardDaemonIdentity {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.protocol === QUESTBOARD_DAEMON_PROTOCOL
+    && typeof candidate.databaseId === "string"
+    && candidate.databaseId.trim().length > 0
+    && typeof candidate.workspacePath === "string"
+    && candidate.workspacePath.trim().length > 0
+    && typeof candidate.databasePath === "string"
+    && candidate.databasePath.trim().length > 0;
+}
+
+function identityMismatchFields(
+  expected: QuestBoardDaemonIdentity,
+  received: QuestBoardDaemonIdentity,
+): string[] {
+  const mismatch: string[] = [];
+  if (received.protocol !== expected.protocol) mismatch.push(`protocol expected ${expected.protocol}, received ${received.protocol}`);
+  if (received.databaseId !== expected.databaseId) mismatch.push(`databaseId expected ${expected.databaseId}, received ${received.databaseId}`);
+  if (received.workspacePath !== expected.workspacePath) mismatch.push(`workspacePath expected ${expected.workspacePath}, received ${received.workspacePath}`);
+  if (received.databasePath !== expected.databasePath) mismatch.push(`databasePath expected ${expected.databasePath}, received ${received.databasePath}`);
+  return mismatch;
 }
 
 function normalizeDaemonUrl(value: string): string {

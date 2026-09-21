@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { QuestBoardService } from "../application/quest-board-service.js";
+import type { QuestBoardDaemonIdentity } from "./daemon-identity.js";
 import { createQuestBoardHttpServer } from "./http-api.js";
 import { findTailscaleIpv4 } from "./network.js";
 
@@ -14,6 +15,7 @@ export interface QuestBoardHttpRuntimeOptions {
   host?: string;
   tailnetMode?: boolean;
   webRoot?: string;
+  daemonIdentity?: QuestBoardDaemonIdentity;
   log?: (message: string) => void;
 }
 
@@ -37,7 +39,10 @@ export async function startQuestBoardHttpRuntime(
   validateListenPort(requestedPort);
 
   const webRoot = options.webRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../../web");
-  const server = createQuestBoardHttpServer(service, { webRoot });
+  const server = createQuestBoardHttpServer(service, {
+    webRoot,
+    ...(options.daemonIdentity ? { daemonIdentity: options.daemonIdentity } : {}),
+  });
   await listen(server, requestedPort, host);
 
   const address = server.address() as AddressInfo;

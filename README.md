@@ -48,17 +48,17 @@ npm run verify
 
 ## Quick start: shared daemon + Web/API
 
-Build and start the long-lived local daemon:
+Build and start the long-lived daemon. The canonical scripts use Tailnet mode by default:
 
 ```bash
 npm run build
 npm run daemon
 ```
 
-Open:
+Open the Tailscale IPv4 address printed by the daemon, for example:
 
 ```text
-http://127.0.0.1:4317
+http://100.x.y.z:4317
 ```
 
 The default database is:
@@ -67,17 +67,20 @@ The default database is:
 .questboard/questboard.sqlite
 ```
 
-The server binds to `127.0.0.1` by default. The Web UI lets you create Projects and Tasks, move Tasks through the seven workflow states, Claim/Release work, add Activity notes, attach evidence Artifacts, create Relations, and switch between Quest and Investigation views.
+On first start, that database receives a stable UUID and the daemon pins it to the local QuestBoard identity profile. MCP/CLI clients validate the daemon protocol and pinned database UUID before attaching, so a different QuestBoard database listening on the same endpoint is rejected instead of being used silently.
+
+`npm run daemon` and `npm start` bind specifically to the active Tailscale IPv4 address by default. Use `npm run daemon:local` or `npm run start:local` for localhost-only operation. The Web UI lets you create Projects and Tasks, move Tasks through the seven workflow states, Claim/Release work, add Activity notes, attach evidence Artifacts, create Relations, and switch between Quest and Investigation views.
 
 ### Configuration
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `QUESTBOARD_DB_PATH` | SQLite database path | `.questboard/questboard.sqlite` |
-| `QUESTBOARD_HOST` | HTTP/Web bind host | `127.0.0.1` |
+| `QUESTBOARD_HOST` | HTTP/Web bind host for non-Tailnet/local launches | `127.0.0.1` |
 | `QUESTBOARD_PORT` | HTTP/Web port | `4317` |
-| `QUESTBOARD_TAILNET` | Set to `1` to use Tailnet binding | unset |
-| `QUESTBOARD_DAEMON_URL` | MCP/CLI daemon endpoint | `http://127.0.0.1:<QUESTBOARD_PORT-or-4317>` |
+| `QUESTBOARD_TAILNET` | Set to `1` to force Tailnet binding when launching the entry point directly | unset |
+| `QUESTBOARD_DAEMON_URL` | MCP/CLI daemon endpoint | active Tailscale IPv4 when available, otherwise `127.0.0.1` |
+| `QUESTBOARD_IDENTITY_PATH` | Daemon/DB identity profile shared by daemon and local MCP/CLI clients | `~/.local/state/questboard/daemon-identity.json` |
 | `QUESTBOARD_ACTOR_ID` | Default CLI actor ID | `cli:local` |
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
@@ -85,12 +88,12 @@ The server binds to `127.0.0.1` by default. The Web UI lets you create Projects 
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
 ```bash
-QUESTBOARD_HOST=192.168.0.20 npm run daemon
+QUESTBOARD_HOST=192.168.0.20 npm run daemon:local
 ```
 
 Then open `http://192.168.0.20:4317` from the other device. `QUESTBOARD_HOST=0.0.0.0` also works, but it listens on every IPv4 interface and is broader than necessary. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) for LAN, firewall, C2CT-managed MCP, Tailnet, and public-Internet guidance.
 
-For Tailnet-only access from another device signed into the same Tailscale network:
+Tailnet-only access is already the default. The explicit alias remains available:
 
 ```bash
 npm run start:tailnet
@@ -164,19 +167,17 @@ npm run build
 npm run daemon
 ```
 
-The default daemon/Web endpoint is `http://127.0.0.1:4317`. An MCP client can then launch the compiled stdio proxy directly:
+By default the daemon/Web endpoint is the machine's active Tailscale IPv4 on port `4317`. MCP/CLI clients auto-discover the same active Tailscale IPv4 when `QUESTBOARD_DAEMON_URL` is unset, with localhost as the fallback when no Tailscale IPv4 exists. An MCP client can then launch the compiled stdio proxy directly:
 
 ```json
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
-  "env": {
-    "QUESTBOARD_DAEMON_URL": "http://127.0.0.1:4317"
-  }
+  "env": {}
 }
 ```
 
-Multiple MCP stdio proxies and the CLI can attach to the same daemon concurrently. Closing an MCP session closes only that proxy; the daemon, Web UI, database connection, and other sessions remain alive. `QUESTBOARD_DB_PATH`, `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, and Tailnet binding configure the daemon. `QUESTBOARD_DAEMON_URL` tells MCP/CLI clients where to find it. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the daemon beyond localhost.
+Multiple MCP stdio proxies and the CLI can attach to the same daemon concurrently. Closing an MCP session closes only that proxy; the daemon, Web UI, database connection, and other sessions remain alive. `QUESTBOARD_DB_PATH`, `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, and Tailnet binding configure the daemon. `QUESTBOARD_DAEMON_URL` overrides MCP/CLI endpoint auto-discovery when needed. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the daemon beyond the Tailnet.
 
 The adapter exposes:
 

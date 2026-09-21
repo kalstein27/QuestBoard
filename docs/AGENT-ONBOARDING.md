@@ -25,13 +25,15 @@ export QUESTBOARD_DB_PATH=/absolute/path/to/questboard.sqlite
 
 Do not commit the live database to Git.
 
+The database carries a stable UUID. The first daemon started for a local QuestBoard profile pins that UUID together with the daemon's canonical workspace path and canonical SQLite path in `~/.local/state/questboard/daemon-identity.json`. MCP/CLI clients require the health handshake to report the same protocol, database UUID, workspace path, and database path before attaching. A legacy v1 identity profile is upgraded only when the current daemon opens the same database UUID. If you intentionally operate a separate QuestBoard workspace/database, give that profile a separate `QUESTBOARD_IDENTITY_PATH` rather than silently reusing the existing profile.
+
 Start one daemon before launching agent clients:
 
 ```bash
 npm run daemon
 ```
 
-By default it serves Web/API and the local client bridge at `http://127.0.0.1:4317`.
+By default the canonical daemon script serves Web/API and the client bridge on the machine's active Tailscale IPv4 at port `4317`. Use `npm run daemon:local` for localhost-only operation.
 
 ## 2. Choose an adapter
 
@@ -43,9 +45,7 @@ Each agent session may launch the compiled MCP entry point. It is a lightweight 
 {
   "command": "node",
   "args": ["/absolute/path/to/QuestBoard/dist/src/adapters/mcp/main.js"],
-  "env": {
-    "QUESTBOARD_DAEMON_URL": "http://127.0.0.1:4317"
-  }
+  "env": {}
 }
 ```
 
@@ -57,7 +57,9 @@ Every proxy generates a stable session id for its lifetime, so automatic MCP mut
 npm run cli -- tasks --status ready
 ```
 
-The CLI is also a daemon client. Set `QUESTBOARD_DAEMON_URL` when it should use a non-default daemon endpoint.
+The CLI is also a daemon client. Without `QUESTBOARD_DAEMON_URL`, MCP/CLI clients auto-discover the active Tailscale IPv4 and fall back to localhost only when Tailscale is unavailable. Set `QUESTBOARD_DAEMON_URL` to override that endpoint.
+
+Endpoint discovery does not imply trust: clients compare the daemon's protocol, persistent database UUID, canonical workspace path, and canonical SQLite path with the local pinned profile and fail closed on any mismatch or on an older daemon that does not expose the current identity handshake.
 
 Set a stable neutral actor identity if desired:
 

@@ -1,6 +1,6 @@
 # QuestBoard Network Access Guide
 
-QuestBoard keeps the Web UI/API local-only by default. The default bind address is `127.0.0.1`, so `http://127.0.0.1:4317` is reachable only from the machine that is running QuestBoard.
+QuestBoard uses Tailnet-only Web UI/API access by default. `npm run daemon` and `npm start` bind specifically to the machine's active Tailscale IPv4 address. Use the explicit `:local` scripts when localhost-only access is desired.
 
 This is intentionally conservative because QuestBoard does not currently provide built-in authentication or TLS.
 
@@ -8,10 +8,10 @@ This is intentionally conservative because QuestBoard does not currently provide
 
 | Goal | Recommended bind | Browser address |
 | --- | --- | --- |
-| Same machine only | default `127.0.0.1` | `http://127.0.0.1:4317` |
+| Same machine only | `npm run daemon:local` | `http://127.0.0.1:4317` |
 | Other devices on the same LAN | the host machine's LAN IP | `http://<LAN-IP>:4317` |
 | Any local interface | `0.0.0.0` | `http://<LAN-IP>:4317` |
-| Devices on the same Tailscale network | `QUESTBOARD_TAILNET=1` | `http://<TAILSCALE-IP>:4317` |
+| Devices on the same Tailscale network | default Tailnet mode | `http://<TAILSCALE-IP>:4317` |
 | Public Internet | **Do not expose port 4317 directly** | use an authenticated/TLS gateway instead |
 
 ## Same-LAN access
@@ -27,7 +27,7 @@ Example host address:
 macOS/Linux:
 
 ```bash
-QUESTBOARD_HOST=192.168.0.20 QUESTBOARD_PORT=4317 npm start
+QUESTBOARD_HOST=192.168.0.20 QUESTBOARD_PORT=4317 npm run start:local
 ```
 
 PowerShell:
@@ -35,7 +35,7 @@ PowerShell:
 ```powershell
 $env:QUESTBOARD_HOST = "192.168.0.20"
 $env:QUESTBOARD_PORT = "4317"
-npm start
+npm run start:local
 ```
 
 Then open this from another device on the same LAN:
@@ -49,7 +49,7 @@ http://192.168.0.20:4317
 Example daemon launch and MCP configuration:
 
 ```bash
-QUESTBOARD_HOST=192.168.0.20 QUESTBOARD_PORT=4317 npm run daemon
+QUESTBOARD_HOST=192.168.0.20 QUESTBOARD_PORT=4317 npm run daemon:local
 ```
 
 ```json
@@ -69,7 +69,7 @@ When the daemon listens on `0.0.0.0`, same-machine MCP/CLI clients should normal
 If the machine's LAN IP changes frequently, this also works:
 
 ```bash
-QUESTBOARD_HOST=0.0.0.0 npm start
+QUESTBOARD_HOST=0.0.0.0 npm run start:local
 ```
 
 `0.0.0.0` is a **bind address**, not the address to type into a browser. Connect using the machine's real LAN address, for example `http://192.168.0.20:4317`.
@@ -78,16 +78,16 @@ Binding to `0.0.0.0` exposes QuestBoard on every IPv4 interface available to the
 
 ## Tailscale / Tailnet access
 
-For access between devices that share a Tailscale network:
+For access between devices that share a Tailscale network, use the canonical default:
 
 ```bash
-npm run start:tailnet
+npm run daemon
 ```
 
-The daemon can instead use Tailnet mode:
+The explicit Tailnet aliases/environment form remain supported:
 
 ```text
-QUESTBOARD_TAILNET=1 npm run daemon
+QUESTBOARD_TAILNET=1 node dist/src/server/main.js
 ```
 
 QuestBoard selects an active Tailscale IPv4 address in `100.64.0.0/10`. Tailnet mode takes precedence over `QUESTBOARD_HOST`.
@@ -106,7 +106,9 @@ QUESTBOARD_DAEMON_URL
 
 Run/configure the QuestBoard daemon separately with `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, `QUESTBOARD_DB_PATH`, or Tailnet mode. The managed MCP host should not receive database ownership settings just to attach a session.
 
-If `QUESTBOARD_DAEMON_URL` is not forwarded, the proxy safely falls back to `http://127.0.0.1:<QUESTBOARD_PORT-or-4317>`.
+If `QUESTBOARD_DAEMON_URL` is not forwarded, the proxy auto-discovers the active Tailscale IPv4 and uses that address on the configured/default port. If no Tailscale IPv4 exists, it falls back to `http://127.0.0.1:<QUESTBOARD_PORT-or-4317>`.
+
+After locating an endpoint, the proxy still performs a daemon identity handshake. The daemon database has a persistent UUID, and the local profile pins the expected UUID at `~/.local/state/questboard/daemon-identity.json` by default. A different database at the discovered address, or a legacy daemon without the identity handshake, is rejected. Use `QUESTBOARD_IDENTITY_PATH` only when intentionally maintaining a separate QuestBoard database/profile.
 
 ## Firewall and Wi-Fi checks
 
