@@ -30,6 +30,9 @@ const state = {
   boardPositions: new Map(),
   displayPositions: new Map(),
   investigationZoom: loadInvestigationZoom(),
+  investigationPan: loadInvestigationPan(),
+  investigationPointers: new Map(),
+  investigationGesture: null,
   investigationUndo: [],
   investigationRedo: [],
   investigationHistoryBusy: false,
@@ -55,7 +58,7 @@ function collectElements() {
     "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
     "investigation-zoom-reset", "investigation-zoom-in", "investigation-add-node",
-    "workspace-title", "workspace-subtitle", "view-switch",
+    "workspace-title", "view-switch",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
     "drawer-scrim", "task-dialog", "task-form", "task-dialog-title", "task-id", "task-title",
     "task-description", "task-status", "task-priority", "task-tags", "project-dialog",
@@ -85,10 +88,11 @@ function bindEvents() {
   });
   el["investigation-undo"].addEventListener("click", () => void undoInvestigationMove());
   el["investigation-redo"].addEventListener("click", () => void redoInvestigationMove());
-  el["investigation-zoom-out"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom - 0.1));
-  el["investigation-zoom-reset"].addEventListener("click", () => setInvestigationZoom(1));
-  el["investigation-zoom-in"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom + 0.1));
+  el["investigation-zoom-out"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom - 0.15));
+  el["investigation-zoom-reset"].addEventListener("click", resetInvestigationViewport);
+  el["investigation-zoom-in"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom + 0.15));
   el["investigation-add-node"].addEventListener("click", () => void createInvestigationNodeFromPrompt());
+  bindInvestigationViewportGestures();
   el["save-actor-button"].addEventListener("click", saveActor);
   el["task-form"].addEventListener("submit", (event) => void saveTask(event));
   el["project-form"].addEventListener("submit", (event) => void saveProject(event));
@@ -240,7 +244,6 @@ function renderBoard() {
       if (taskId) void moveTask(taskId, status);
     });
     tasks.forEach((task) => list.append(renderTaskCard(task)));
-    if (tasks.length === 0) list.append(node("div", "empty-column", "Drop a task here"));
     column.append(heading, list);
     return column;
   });
@@ -261,7 +264,16 @@ function loadViewMode() {
 
 function loadInvestigationZoom() {
   const stored = Number(localStorage.getItem("questboard.investigationZoom"));
-  return Number.isFinite(stored) ? clamp(stored, 0.5, 1.5) : 1;
+  return Number.isFinite(stored) ? clamp(stored, 0.35, 2.5) : 1;
+}
+
+function loadInvestigationPan() {
+  try {
+    const stored = JSON.parse(localStorage.getItem("questboard.investigationPan") || "null");
+    return Number.isFinite(stored?.x) && Number.isFinite(stored?.y) ? stored : { x: 0, y: 0 };
+  } catch {
+    return { x: 0, y: 0 };
+  }
 }
 
 function renderViewSwitch() {
@@ -272,10 +284,7 @@ function renderViewSwitch() {
   });
   const investigation = state.viewMode === "investigation";
   el["investigation-controls"].classList.toggle("hidden", !investigation);
-  el["workspace-title"].textContent = investigation ? "Investigation Board" : "Quest Board";
-  el["workspace-subtitle"].textContent = investigation
-    ? "Project flow with work attached where it belongs"
-    : "Tasks across agents and humans";
+  el["workspace-title"].textContent = investigation ? "Investigation" : "Quest";
   renderInvestigationControls();
 }
 
@@ -288,7 +297,7 @@ function renderInvestigationBoard() {
   const canvasHeight = Math.max(1000, 420 + Math.ceil(entityCount / 4) * 230);
   canvas.style.width = `${canvasWidth}px`;
   canvas.style.height = `${canvasHeight}px`;
-  applyInvestigationZoom();
+  applyInvestigationViewport();
   state.displayPositions = new Map();
 
   if (graphMode) {
@@ -334,14 +343,9 @@ function investigationTaskNode(task, position) {
   card.dataset.entityType = "task";
   card.dataset.entityId = task.id;
   setInvestigationNodePosition(card, position);
-  const head = node("div", "investigation-node-head");
-  head.append(node("span", "investigation-node-type", "Task"), node("span", `status-chip status-${task.status}`, labelForStatus(task.status)));
   const title = node("strong", "investigation-node-title", task.title);
-  const description = node("span", "investigation-node-copy", task.description || "No description");
-  const foot = node("div", "investigation-node-foot");
-  foot.append(node("span", "muted", task.priority), node("span", "muted", `r${task.revision}`));
-  card.append(head, title, description, foot);
-  attachInvestigationDrag(card, "task", task.id, head);
+  card.append(title);
+  attachInvestigationDrag(card, "task", task.id, card);
   card.addEventListener("click", () => {
     if (card._suppressClick) {
       card._suppressClick = false;
@@ -357,15 +361,8 @@ function investigationArtifactNode(artifact, position) {
   card.dataset.entityType = "artifact";
   card.dataset.entityId = artifact.id;
   setInvestigationNodePosition(card, position);
-  const head = node("div", "investigation-node-head");
-  head.append(node("span", "investigation-node-type evidence-node-type", artifact.type), node("span", "muted", `#${shortId(artifact.id)}`));
-  card.append(
-    head,
-    node("strong", "investigation-node-title", artifact.title),
-    node("span", "investigation-node-copy", artifact.description || artifact.locator),
-    node("span", "investigation-node-locator", artifact.locator),
-  );
-  attachInvestigationDrag(card, "artifact", artifact.id, head);
+  card.append(node("strong", "investigation-node-title", artifact.title));
+  attachInvestigationDrag(card, "artifact", artifact.id, card);
   return card;
 }
 
@@ -377,27 +374,24 @@ function investigationGraphNode(graphNode, position) {
 
   const head = node("div", "investigation-node-head");
   const identity = node("div", "investigation-graph-identity");
-  identity.append(
-    node("span", "investigation-node-type graph-node-type", graphNode.kind || "Flow node"),
-    node("strong", "investigation-node-title", graphNode.title),
-  );
+  identity.append(node("strong", "investigation-node-title", graphNode.title));
   const edit = node("button", "graph-icon-button", "✎");
   edit.type = "button";
   edit.title = "Edit node";
   edit.addEventListener("click", () => void editInvestigationNodeFromPrompt(graphNode));
   head.append(identity, edit);
-  card.append(head, node("p", "investigation-graph-description", graphNode.description || "No node description yet."));
+  card.append(head);
 
   const items = state.investigationGraphItems
     .filter((item) => item.nodeId === graphNode.id)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
   const itemList = node("div", "investigation-item-list");
   items.forEach((item) => itemList.append(investigationGraphItem(item)));
-  if (items.length === 0) itemList.append(node("div", "investigation-item-empty", "No items yet. Add the first step or responsibility."));
   card.append(itemList);
 
-  const addItem = node("button", "graph-add-button", "+ Add item");
+  const addItem = node("button", "graph-add-button", "+");
   addItem.type = "button";
+  addItem.title = "Add item";
   addItem.addEventListener("click", () => void addInvestigationItemFromPrompt(graphNode.id));
   card.append(addItem);
   attachInvestigationDrag(card, "investigation_node", graphNode.id, head);
@@ -411,12 +405,11 @@ function investigationGraphItem(item) {
   const title = node("strong", "investigation-item-title", item.title);
   const actions = node("div", "investigation-item-actions");
   const edit = graphActionButton("✎", "Edit item", () => void editInvestigationItemFromPrompt(item));
-  const task = graphActionButton("+ Task", "Link or create a Task", () => void addTaskToInvestigationItem(item));
-  const connect = graphActionButton("Connect", "Connect this item to another Node", () => void connectInvestigationItemToNode(item));
+  const task = graphActionButton("+", "Link or create a Task", () => void addTaskToInvestigationItem(item));
+  const connect = graphActionButton("↗", "Connect this item to another Node", () => void connectInvestigationItemToNode(item));
   actions.append(edit, task, connect);
   head.append(title, actions);
   wrapper.append(head);
-  if (item.description) wrapper.append(node("p", "investigation-item-description", item.description));
 
   const taskLinks = state.investigationItemTaskLinks
     .filter((link) => link.itemId === item.id)
@@ -426,7 +419,6 @@ function investigationGraphItem(item) {
     taskLinks.forEach((link) => {
       const linkedTask = state.tasks.find((candidate) => candidate.id === link.taskId);
       if (!linkedTask) return;
-      const claim = state.claims.get(linkedTask.id);
       const chip = node("div", `investigation-task-chip status-${linkedTask.status}`);
       const open = node("button", "investigation-task-chip-main");
       open.type = "button";
@@ -434,9 +426,7 @@ function investigationGraphItem(item) {
       open.append(
         node("span", `status-dot status-${linkedTask.status}`),
         node("span", "investigation-task-chip-title", linkedTask.title),
-        node("span", "investigation-task-chip-priority", linkedTask.priority),
       );
-      if (claim) open.append(node("span", "investigation-task-chip-claim", shortActor(claim.agentId)));
       open.addEventListener("click", () => void openTask(linkedTask.id));
       const unlink = node("button", "investigation-link-remove", "×");
       unlink.type = "button";
@@ -496,8 +486,8 @@ async function createInvestigationNodeFromPrompt() {
     });
     const board = el["investigation-board"];
     const position = {
-      x: clamp((board.scrollLeft + board.clientWidth / 2) / state.investigationZoom - 160, 16, 1450),
-      y: clamp((board.scrollTop + board.clientHeight / 2) / state.investigationZoom - 80, 16, 820),
+      x: clamp((board.clientWidth / 2 - state.investigationPan.x) / state.investigationZoom - 160, 16, 1450),
+      y: clamp((board.clientHeight / 2 - state.investigationPan.y) / state.investigationZoom - 80, 16, 820),
     };
     await persistInvestigationPosition("investigation_node", created.id, position);
     await loadBoard();
@@ -676,6 +666,115 @@ function attachInvestigationDrag(card, entityType, entityId, dragRegion = card) 
   });
 }
 
+function bindInvestigationViewportGestures() {
+  const board = el["investigation-board"];
+  board.addEventListener("wheel", (event) => {
+    if (state.viewMode !== "investigation") return;
+    event.preventDefault();
+    if (event.ctrlKey) {
+      const rect = board.getBoundingClientRect();
+      setInvestigationZoom(
+        state.investigationZoom * Math.exp(-event.deltaY * 0.01),
+        { x: event.clientX - rect.left, y: event.clientY - rect.top },
+      );
+      return;
+    }
+    state.investigationPan.x -= event.deltaX;
+    state.investigationPan.y -= event.deltaY;
+    persistInvestigationViewport();
+    applyInvestigationViewport();
+  }, { passive: false });
+
+  board.addEventListener("pointerdown", (event) => {
+    if (state.viewMode !== "investigation") return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".investigation-node, .investigation-controls, button, input, textarea, select, a")) return;
+    board.setPointerCapture(event.pointerId);
+    state.investigationPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    beginInvestigationGesture();
+    board.classList.add("panning");
+  });
+
+  board.addEventListener("pointermove", (event) => {
+    if (!state.investigationPointers.has(event.pointerId)) return;
+    state.investigationPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    updateInvestigationGesture();
+  });
+
+  const endPointer = (event) => {
+    if (!state.investigationPointers.has(event.pointerId)) return;
+    state.investigationPointers.delete(event.pointerId);
+    beginInvestigationGesture();
+    if (state.investigationPointers.size === 0) {
+      state.investigationGesture = null;
+      board.classList.remove("panning");
+      persistInvestigationViewport();
+    }
+  };
+  board.addEventListener("pointerup", endPointer);
+  board.addEventListener("pointercancel", endPointer);
+}
+
+function beginInvestigationGesture() {
+  const points = [...state.investigationPointers.values()];
+  if (points.length === 0) {
+    state.investigationGesture = null;
+    return;
+  }
+  if (points.length === 1) {
+    state.investigationGesture = { type: "pan", last: { ...points[0] } };
+    return;
+  }
+  const board = el["investigation-board"];
+  const rect = board.getBoundingClientRect();
+  const midpoint = pointerMidpoint(points[0], points[1]);
+  const localMidpoint = { x: midpoint.x - rect.left, y: midpoint.y - rect.top };
+  state.investigationGesture = {
+    type: "pinch",
+    startDistance: pointerDistance(points[0], points[1]),
+    startZoom: state.investigationZoom,
+    world: {
+      x: (localMidpoint.x - state.investigationPan.x) / state.investigationZoom,
+      y: (localMidpoint.y - state.investigationPan.y) / state.investigationZoom,
+    },
+  };
+}
+
+function updateInvestigationGesture() {
+  const points = [...state.investigationPointers.values()];
+  const gesture = state.investigationGesture;
+  if (!gesture) return;
+  if (points.length === 1 && gesture.type === "pan") {
+    const point = points[0];
+    state.investigationPan.x += point.x - gesture.last.x;
+    state.investigationPan.y += point.y - gesture.last.y;
+    gesture.last = { ...point };
+    applyInvestigationViewport();
+    return;
+  }
+  if (points.length < 2 || gesture.type !== "pinch") return;
+  const board = el["investigation-board"];
+  const rect = board.getBoundingClientRect();
+  const midpoint = pointerMidpoint(points[0], points[1]);
+  const localMidpoint = { x: midpoint.x - rect.left, y: midpoint.y - rect.top };
+  const distance = Math.max(1, pointerDistance(points[0], points[1]));
+  const nextZoom = clamp(gesture.startZoom * distance / Math.max(1, gesture.startDistance), 0.35, 2.5);
+  state.investigationZoom = nextZoom;
+  state.investigationPan.x = localMidpoint.x - gesture.world.x * nextZoom;
+  state.investigationPan.y = localMidpoint.y - gesture.world.y * nextZoom;
+  persistInvestigationViewport();
+  applyInvestigationViewport();
+  renderInvestigationControls();
+}
+
+function pointerDistance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function pointerMidpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
 async function commitInvestigationMove(entityType, entityId, from, to) {
   state.investigationHistoryBusy = true;
   renderInvestigationControls();
@@ -735,33 +834,46 @@ function renderInvestigationControls() {
   if (!el["investigation-undo"]) return;
   el["investigation-undo"].disabled = state.investigationHistoryBusy || state.investigationUndo.length === 0;
   el["investigation-redo"].disabled = state.investigationHistoryBusy || state.investigationRedo.length === 0;
-  el["investigation-zoom-out"].disabled = state.investigationZoom <= 0.5;
-  el["investigation-zoom-in"].disabled = state.investigationZoom >= 1.5;
+  el["investigation-zoom-out"].disabled = state.investigationZoom <= 0.35;
+  el["investigation-zoom-in"].disabled = state.investigationZoom >= 2.5;
   el["investigation-zoom-reset"].textContent = `${Math.round(state.investigationZoom * 100)}%`;
 }
 
-function setInvestigationZoom(value) {
-  const next = Math.round(clamp(value, 0.5, 1.5) * 10) / 10;
+function setInvestigationZoom(value, focalPoint = null) {
+  const next = clamp(value, 0.35, 2.5);
   if (next === state.investigationZoom) return;
   const board = el["investigation-board"];
   const oldZoom = state.investigationZoom;
-  const centerX = (board.scrollLeft + board.clientWidth / 2) / oldZoom;
-  const centerY = (board.scrollTop + board.clientHeight / 2) / oldZoom;
+  const point = focalPoint || { x: board.clientWidth / 2, y: board.clientHeight / 2 };
+  const worldX = (point.x - state.investigationPan.x) / oldZoom;
+  const worldY = (point.y - state.investigationPan.y) / oldZoom;
   state.investigationZoom = next;
-  localStorage.setItem("questboard.investigationZoom", String(next));
-  applyInvestigationZoom();
+  state.investigationPan.x = point.x - worldX * next;
+  state.investigationPan.y = point.y - worldY * next;
+  persistInvestigationViewport();
+  applyInvestigationViewport();
   renderInvestigationControls();
-  requestAnimationFrame(() => {
-    board.scrollLeft = Math.max(0, centerX * next - board.clientWidth / 2);
-    board.scrollTop = Math.max(0, centerY * next - board.clientHeight / 2);
-  });
 }
 
-function applyInvestigationZoom() {
+function resetInvestigationViewport() {
+  state.investigationZoom = 1;
+  state.investigationPan = { x: 0, y: 0 };
+  persistInvestigationViewport();
+  applyInvestigationViewport();
+  renderInvestigationControls();
+}
+
+function persistInvestigationViewport() {
+  localStorage.setItem("questboard.investigationZoom", String(state.investigationZoom));
+  localStorage.setItem("questboard.investigationPan", JSON.stringify(state.investigationPan));
+}
+
+function applyInvestigationViewport() {
   if (!el["investigation-canvas"]) return;
-  el["investigation-canvas"].style.transform = `scale(${state.investigationZoom})`;
+  el["investigation-canvas"].style.transform = `translate3d(${state.investigationPan.x}px, ${state.investigationPan.y}px, 0) scale(${state.investigationZoom})`;
   el["investigation-canvas"].style.transformOrigin = "top left";
   el["investigation-board"].style.backgroundSize = `${24 * state.investigationZoom}px ${24 * state.investigationZoom}px`;
+  el["investigation-board"].style.backgroundPosition = `${state.investigationPan.x}px ${state.investigationPan.y}px`;
 }
 
 function setInvestigationNodePosition(card, position) {
@@ -796,14 +908,6 @@ function drawInvestigationEdges() {
       line.setAttribute("y2", String(y2));
       line.setAttribute("class", "investigation-edge-line investigation-flow-line");
       children.push(line);
-      if (link.label) {
-        const label = svgNode("text");
-        label.setAttribute("x", String((x1 + x2) / 2));
-        label.setAttribute("y", String((y1 + y2) / 2 - 7));
-        label.setAttribute("class", "investigation-edge-label investigation-flow-label");
-        label.textContent = link.label;
-        children.push(label);
-      }
     });
     svg.replaceChildren(...children);
     return;
@@ -822,12 +926,7 @@ function drawInvestigationEdges() {
     line.setAttribute("x2", String(x2));
     line.setAttribute("y2", String(y2));
     line.setAttribute("class", "investigation-edge-line");
-    const label = svgNode("text");
-    label.setAttribute("x", String((x1 + x2) / 2));
-    label.setAttribute("y", String((y1 + y2) / 2 - 7));
-    label.setAttribute("class", "investigation-edge-label");
-    label.textContent = relation.label || relation.kind;
-    children.push(line, label);
+    children.push(line);
   });
   svg.replaceChildren(...children);
 }
@@ -871,17 +970,8 @@ function renderTaskCard(task) {
   card.tabIndex = 0;
   card.draggable = true;
   card.dataset.taskId = task.id;
-  const claim = state.claims.get(task.id);
-  const head = node("div", "card-head");
-  head.append(node("span", `priority-pill priority-pill-${task.priority}`, task.priority));
-  if (claim) head.append(node("span", "claim-pill", shortActor(claim.agentId)));
   const title = node("h3", "task-title", task.title);
-  const description = node("p", "task-description", task.description || "No description");
-  const tags = node("div", "tag-row");
-  task.tags.forEach((tag) => tags.append(node("span", "tag", `#${tag}`)));
-  const foot = node("div", "card-foot");
-  foot.append(node("span", "revision", `r${task.revision}`), node("span", "open-hint", "Details"));
-  card.append(head, title, description, tags, foot);
+  card.append(title);
   card.addEventListener("click", () => void openTask(task.id));
   card.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {

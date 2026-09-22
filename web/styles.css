@@ -378,3 +378,147 @@ a.evidence-locator:hover { text-decoration: underline; }
   .evidence-form-grid, .relation-form { grid-template-columns: 1fr; }
   .evidence-form-grid > *, .relation-form > * { grid-column: 1 !important; }
 }
+
+
+/* Simplified visual hierarchy */
+.app-shell { grid-template-columns: 176px minmax(0, 1fr); }
+.sidebar { gap: 14px; padding: 14px 12px; }
+.brand-block { gap: 8px; padding: 0 2px 6px; }
+.brand-mark { width: 24px; height: 24px; border-radius: 6px; font-size: 12px; }
+.brand-copy span, .sidebar-status, .sidebar-note { display: none; }
+.sidebar-section { gap: 6px; padding-inline: 2px; }
+.sidebar .section-label { display: none; }
+.project-section .button { padding: 6px 8px; background: transparent; border-color: transparent; color: #78818d; text-align: left; }
+.project-section .button:hover { background: var(--surface-2); border-color: transparent; color: #c7cdd6; }
+.identity-settings { margin-top: auto; padding-top: 10px; }
+
+ .topbar { height: 52px; padding: 0 14px; }
+.workspace-heading span { display: none; }
+.workspace-heading h1 { font-size: 14px; }
+.toolbar { gap: 5px; }
+.toolbar .icon-button { width: 28px; height: 28px; border-color: transparent; background: transparent; }
+.view-switch { border-color: var(--line); background: transparent; }
+.view-switch-button { padding: 5px 8px; }
+.board-shell { min-height: calc(100dvh - 52px); padding: 10px 0 14px; }
+
+.kanban-board { grid-auto-columns: 280px; gap: 6px; padding: 0 10px 8px; }
+.kanban-column { border-color: #1e232a; border-radius: 7px; background: #0d1014; }
+.column-header { height: 36px; padding: 0 9px; background: transparent; }
+.column-count { background: transparent; padding-inline: 2px; min-width: 14px; }
+.card-list { padding: 6px; }
+.empty-column { display: none; }
+.task-card { padding: 9px; margin-bottom: 6px; border-color: #222831; border-radius: 7px; background: #12151a; }
+.task-card:hover, .task-card:focus { background: #15191f; border-color: #343c47; }
+.task-card::before { top: 8px; bottom: 8px; }
+.task-title { margin: 0; padding: 0; font-size: 12px; }
+.task-description { margin: 5px 0 0; padding: 0; color: #7f8792; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 7px; min-height: 12px; }
+.tag-row { min-height: 0; }
+.tag { padding: 0; background: transparent; color: #69727e; font-size: 8px; font-weight: 600; }
+.claim-pill { margin-left: auto; padding: 0; border: 0; background: transparent; color: #8e99e7; }
+.card-foot, .priority-pill { display: none; }
+
+ .investigation-board { margin: 0 10px 8px; border-color: #1f252d; border-radius: 7px; }
+.investigation-controls { border: 0; box-shadow: none; background: rgba(12, 15, 19, .88); }
+.investigation-control-divider { display: none; }
+.investigation-control-button, .investigation-zoom-label, .investigation-add-node { background: transparent; }
+.investigation-graph-node { border-color: #2a313b; box-shadow: none; }
+.investigation-graph-node > .investigation-node-head { padding: 10px 10px 7px; }
+.investigation-graph-description { padding: 0 10px 8px; color: #7d8793; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.investigation-item { gap: 4px; padding: 8px 10px; }
+.investigation-item-actions, .graph-icon-button { opacity: 0; transition: opacity .12s ease; }
+.investigation-item:hover .investigation-item-actions, .investigation-item:focus-within .investigation-item-actions, .investigation-graph-node:hover > .investigation-node-head .graph-icon-button, .investigation-graph-node:focus-within > .investigation-node-head .graph-icon-button { opacity: 1; }
+.graph-item-action { border-color: transparent; background: transparent; color: #747e8b; }
+.graph-add-button { margin: 5px 7px 7px; padding: 5px 7px; border: 0; background: transparent; color: #687381; text-align: left; }
+.graph-add-button:hover { background: var(--surface-2); border-color: transparent; }
+.investigation-task-chip { padding: 2px 0; border: 0; background: transparent; }
+.investigation-task-chip-main { padding: 0; }
+.investigation-link-remove { opacity: 0; }
+.investigation-task-chip:hover .investigation-link-remove, .investigation-item-link-row:hover .investigation-link-remove, .investigation-link-remove:focus-visible { opacity: 1; }
+.evidence-id { display: none; }
+
+/* Fixed app viewport + map-like Investigation navigation */
+html, body { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+.app-shell { height: 100dvh; min-height: 0; overflow: hidden; }
+.workspace {
+  height: 100dvh; min-height: 0; overflow: hidden;
+  display: grid; grid-template-rows: 52px minmax(0, 1fr);
+}
+.topbar { position: relative; top: auto; }
+main { min-height: 0; overflow: hidden; }
+.board-shell { height: 100%; min-height: 0; padding: 10px 0; overflow: hidden; }
+.kanban-board { height: 100%; min-height: 0; overflow-x: auto; overflow-y: auto; align-items: start; }
+.kanban-column { min-height: 100%; }
+.card-list { min-height: 0; }
+
+.investigation-board {
+  position: relative; height: 100%; min-height: 0; margin-bottom: 0;
+  overflow: hidden; overscroll-behavior: none; touch-action: none; cursor: grab;
+}
+.investigation-board.panning { cursor: grabbing; }
+.investigation-canvas {
+  position: absolute; left: 0; top: 0; min-width: 0; min-height: 0;
+  will-change: transform; transform-origin: top left;
+}
+.investigation-controls {
+  position: absolute; top: 8px; left: 8px; margin: 0; z-index: 12;
+}
+
+/* Cards show structure first: title, then linked tasks. */
+.investigation-graph-node { min-height: 0; }
+.investigation-graph-node > .investigation-node-head { padding: 10px; }
+.investigation-graph-description, .investigation-item-description, .investigation-item-links { display: none; }
+.investigation-item { padding: 6px 10px; }
+.investigation-item-head {
+  position: absolute; top: 3px; right: 4px; z-index: 3;
+  width: auto; justify-content: flex-end; pointer-events: none;
+}
+.investigation-item-title { display: none; }
+.investigation-item-actions { pointer-events: auto; }
+.graph-add-button { width: 26px; height: 24px; margin: 4px 7px 7px; padding: 0; text-align: center; }
+.graph-add-button { opacity: 0; transition: opacity .12s ease, background .12s ease; }
+.investigation-graph-node:hover > .graph-add-button,
+.investigation-graph-node:focus-within > .graph-add-button { opacity: 1; }
+.graph-item-action { min-width: 22px; padding: 2px 5px; font-size: 10px; }
+
+/* Linked Task bars: status is an accent, never the text background. */
+.investigation-task-chips { display: grid; gap: 5px; margin-top: 2px; }
+.investigation-task-chip,
+.investigation-task-chip.status-inbox,
+.investigation-task-chip.status-planned,
+.investigation-task-chip.status-ready,
+.investigation-task-chip.status-in_progress,
+.investigation-task-chip.status-blocked,
+.investigation-task-chip.status-review,
+.investigation-task-chip.status-done {
+  width: 100%; min-height: 28px; padding: 0;
+  border: 1px solid #2a323d; border-left: 3px solid #69717e; border-radius: 6px;
+  background: #10151b; color: #dce1e8;
+}
+.investigation-task-chip.status-planned { border-left-color: #887ac1; }
+.investigation-task-chip.status-ready { border-left-color: #5d98ca; }
+.investigation-task-chip.status-in_progress { border-left-color: #d49a55; }
+.investigation-task-chip.status-blocked { border-left-color: #d46b67; }
+.investigation-task-chip.status-review { border-left-color: #b978bd; }
+.investigation-task-chip.status-done { border-left-color: #63ad79; }
+.investigation-task-chip-main {
+  width: 100%; max-width: none; min-height: 27px; padding: 5px 7px;
+  gap: 6px; color: #dce1e8; text-align: left;
+}
+.investigation-task-chip-title { color: #dce1e8; font-size: 10px; font-weight: 650; }
+.investigation-task-chip .status-dot { flex: 0 0 auto; }
+.investigation-link-remove { align-self: center; margin-right: 4px; }
+
+.investigation-task {
+  min-height: 0; padding: 10px 12px; display: block;
+  background: rgba(17, 21, 27, .98);
+}
+.investigation-task .investigation-node-title { display: block; white-space: normal; line-height: 1.35; }
+
+@media (max-width: 720px) {
+  .app-shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; }
+  .sidebar { position: relative; }
+  .workspace { height: 100%; min-height: 0; }
+  .board-shell { min-height: 0; }
+  .investigation-board { min-height: 0; }
+}
