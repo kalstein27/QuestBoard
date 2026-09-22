@@ -224,11 +224,7 @@ main { min-width: 0; }
 .task-card:hover, .task-card:focus { background: #181c22; border-color: #3c4450; outline: none; }
 .task-card:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
 .task-card.dragging { opacity: .45; transform: scale(.985); }
-.task-card::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; border-radius: 2px; background: #5d6673; }
-.task-card.priority-low::before { background: #657584; }
-.task-card.priority-normal::before { background: #77808d; }
-.task-card.priority-high::before { background: #d6954e; }
-.task-card.priority-urgent::before { background: #df6a65; }
+.task-card::before { display: none; }
 .card-head, .card-foot { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
 .priority-pill, .claim-pill, .tag { border-radius: 5px; padding: 2px 5px; font-size: 8px; font-weight: 700; }
 .priority-pill { text-transform: uppercase; color: #89919c; background: #0e1014; }
@@ -465,6 +461,28 @@ main { min-height: 0; overflow: hidden; }
 }
 
 /* Cards show structure first: title, then linked tasks. */
+.task-card { display: flex; align-items: center; gap: 8px; }
+.task-title {
+  flex: 1; min-width: 0; margin: 0; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-status-icon {
+  flex: 0 0 18px; width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 850; line-height: 1;
+}
+.task-status-icon-inbox { color: #8a93a0; }
+.task-status-icon-planned { color: #9c8fd0; }
+.task-status-icon-ready { color: #6ea9d8; }
+.task-status-icon-in_progress { color: #e0a35d; animation: task-status-spin 1.15s linear infinite; }
+.task-status-icon-blocked { color: #df7470; }
+.task-status-icon-review { color: #c284c5; }
+.task-status-icon-done { color: #6eb883; }
+@keyframes task-status-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .task-status-icon-in_progress { animation: none; }
+}
+
 .investigation-graph-node { min-height: 0; }
 .investigation-graph-node > .investigation-node-head { padding: 10px; }
 .investigation-graph-description, .investigation-item-description, .investigation-item-links { display: none; }
@@ -481,7 +499,7 @@ main { min-height: 0; overflow: hidden; }
 .investigation-graph-node:focus-within > .graph-add-button { opacity: 1; }
 .graph-item-action { min-width: 22px; padding: 2px 5px; font-size: 10px; }
 
-/* Linked Task bars: status is an accent, never the text background. */
+/* Linked Task bars: status is shown by the icon, not a leading color bar. */
 .investigation-task-chips { display: grid; gap: 5px; margin-top: 2px; }
 .investigation-task-chip,
 .investigation-task-chip.status-inbox,
@@ -492,28 +510,27 @@ main { min-height: 0; overflow: hidden; }
 .investigation-task-chip.status-review,
 .investigation-task-chip.status-done {
   width: 100%; min-height: 28px; padding: 0;
-  border: 1px solid #2a323d; border-left: 3px solid #69717e; border-radius: 6px;
+  border: 1px solid #2a323d; border-radius: 6px;
   background: #10151b; color: #dce1e8;
 }
-.investigation-task-chip.status-planned { border-left-color: #887ac1; }
-.investigation-task-chip.status-ready { border-left-color: #5d98ca; }
-.investigation-task-chip.status-in_progress { border-left-color: #d49a55; }
-.investigation-task-chip.status-blocked { border-left-color: #d46b67; }
-.investigation-task-chip.status-review { border-left-color: #b978bd; }
-.investigation-task-chip.status-done { border-left-color: #63ad79; }
 .investigation-task-chip-main {
   width: 100%; max-width: none; min-height: 27px; padding: 5px 7px;
   gap: 6px; color: #dce1e8; text-align: left;
 }
-.investigation-task-chip-title { color: #dce1e8; font-size: 10px; font-weight: 650; }
-.investigation-task-chip .status-dot { flex: 0 0 auto; }
+.investigation-task-chip-title {
+  flex: 1; min-width: 0; color: #dce1e8; font-size: 10px; font-weight: 650;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .investigation-link-remove { align-self: center; margin-right: 4px; }
 
 .investigation-task {
-  min-height: 0; padding: 10px 12px; display: block;
+  min-height: 0; padding: 10px 12px; display: flex; align-items: center; gap: 8px;
   background: rgba(17, 21, 27, .98);
 }
-.investigation-task .investigation-node-title { display: block; white-space: normal; line-height: 1.35; }
+.investigation-task .investigation-node-title {
+  flex: 1; min-width: 0; display: block; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; line-height: 1.35;
+}
 
 @media (max-width: 720px) {
   .app-shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; }

@@ -339,12 +339,12 @@ function investigationPosition(entityType, entityId, index, artifact) {
 }
 
 function investigationTaskNode(task, position) {
-  const card = node("article", `investigation-node investigation-task status-border-${task.status}`);
+  const card = node("article", "investigation-node investigation-task");
   card.dataset.entityType = "task";
   card.dataset.entityId = task.id;
   setInvestigationNodePosition(card, position);
   const title = node("strong", "investigation-node-title", task.title);
-  card.append(title);
+  card.append(title, taskStatusIcon(task.status));
   attachInvestigationDrag(card, "task", task.id, card);
   card.addEventListener("click", () => {
     if (card._suppressClick) {
@@ -424,8 +424,8 @@ function investigationGraphItem(item) {
       open.type = "button";
       open.title = `${labelForStatus(linkedTask.status)} · ${linkedTask.priority}`;
       open.append(
-        node("span", `status-dot status-${linkedTask.status}`),
         node("span", "investigation-task-chip-title", linkedTask.title),
+        taskStatusIcon(linkedTask.status),
       );
       open.addEventListener("click", () => void openTask(linkedTask.id));
       const unlink = node("button", "investigation-link-remove", "×");
@@ -965,13 +965,31 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function taskStatusIcon(status) {
+  const glyph = {
+    inbox: "↓",
+    planned: "◇",
+    ready: "▶",
+    in_progress: "↻",
+    blocked: "!",
+    review: "⌕",
+    done: "✓",
+  }[status] || "?";
+  const icon = node("span", `task-status-icon task-status-icon-${status}`, glyph);
+  const label = labelForStatus(status);
+  icon.title = label;
+  icon.setAttribute("role", "img");
+  icon.setAttribute("aria-label", label);
+  return icon;
+}
+
 function renderTaskCard(task) {
-  const card = node("article", `task-card priority-${task.priority}`);
+  const card = node("article", "task-card");
   card.tabIndex = 0;
   card.draggable = true;
   card.dataset.taskId = task.id;
   const title = node("h3", "task-title", task.title);
-  card.append(title);
+  card.append(title, taskStatusIcon(task.status));
   card.addEventListener("click", () => void openTask(task.id));
   card.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
