@@ -24,6 +24,24 @@
           <button id="new-project-button" class="button secondary full-width" type="button">New project</button>
         </section>
 
+        <section class="sidebar-section workspace-nav-section">
+          <div class="section-label">Workspace</div>
+          <nav id="workspace-nav" class="workspace-nav" aria-label="Workspace views">
+            <button class="workspace-nav-button active" type="button" data-board-view="quest" aria-current="page">
+              <span class="workspace-nav-icon" aria-hidden="true">☷</span>
+              <span class="workspace-nav-copy"><strong>Quest</strong><small class="workspace-nav-description">Work queue</small></span>
+            </button>
+            <button class="workspace-nav-button" type="button" data-board-view="investigation">
+              <span class="workspace-nav-icon" aria-hidden="true">⌘</span>
+              <span class="workspace-nav-copy"><strong>Investigation</strong><small class="workspace-nav-description">Execution map</small></span>
+            </button>
+            <button class="workspace-nav-button" type="button" data-board-view="code-map">
+              <span class="workspace-nav-icon" aria-hidden="true">⌬</span>
+              <span class="workspace-nav-copy"><strong>Code Map</strong><small class="workspace-nav-description">Architecture</small></span>
+            </button>
+          </nav>
+        </section>
+
         <section class="sidebar-section sidebar-status" aria-label="Connection status">
           <div class="section-label">Connection</div>
           <div class="connection-row">
@@ -50,20 +68,30 @@
         <header class="topbar">
           <div class="workspace-heading">
             <h1 id="workspace-title">Quest</h1>
+            <span id="workspace-context">Work queue</span>
           </div>
           <div class="toolbar">
-            <div id="view-switch" class="view-switch" role="group" aria-label="Board view">
-              <button class="view-switch-button active" type="button" data-board-view="quest" aria-pressed="true">Quest</button>
-              <button class="view-switch-button" type="button" data-board-view="investigation" aria-pressed="false">Investigation</button>
-            </div>
-            <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
             <button id="new-task-button" class="button primary" type="button">New task</button>
+            <button id="investigation-add-node" class="button primary hidden" type="button" title="Create a standalone Investigation node">+ Node</button>
+            <button id="code-map-sync" class="button secondary compact hidden" type="button">Extract / Sync</button>
+            <button id="code-map-refresh" class="button primary compact hidden" type="button">Index code</button>
+            <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
           </div>
         </header>
 
         <main>
           <section id="board-shell" class="board-shell" aria-live="polite">
-            <div id="board-loading" class="state-card">Loading board…</div>
+            <div id="board-loading" class="state-card state-card-loading">
+              <div class="state-spinner" aria-hidden="true"></div>
+              <strong>Loading board</strong>
+              <span>Refreshing the current project state…</span>
+            </div>
+            <div id="board-error" class="state-card state-card-error hidden" role="alert">
+              <div class="state-icon state-icon-error">!</div>
+              <strong>Board unavailable</strong>
+              <span id="board-error-message">QuestBoard could not load this project.</span>
+              <button id="board-error-retry" class="button primary" type="button">Retry</button>
+            </div>
             <div id="board-empty" class="state-card hidden">
               <div class="state-icon">＋</div>
               <strong>No tasks yet</strong>
@@ -79,19 +107,48 @@
             <div id="kanban-board" class="kanban-board hidden"></div>
             <div id="investigation-board" class="investigation-board hidden" aria-label="Investigation board">
               <div id="investigation-controls" class="investigation-controls hidden" role="group" aria-label="Investigation board controls">
-                <button id="investigation-add-node" class="investigation-add-node" type="button" title="Create a standalone Investigation node">+ Node</button>
-                <span class="investigation-control-divider" aria-hidden="true"></span>
                 <button id="investigation-undo" class="investigation-control-button" type="button" aria-label="Undo node move" title="Undo node move (⌘/Ctrl+Z)">↶</button>
                 <button id="investigation-redo" class="investigation-control-button" type="button" aria-label="Redo node move" title="Redo node move (⌘/Ctrl+Shift+Z)">↷</button>
                 <span class="investigation-control-divider" aria-hidden="true"></span>
                 <button id="investigation-zoom-out" class="investigation-control-button" type="button" aria-label="Zoom out" title="Zoom out">−</button>
                 <button id="investigation-zoom-reset" class="investigation-zoom-label" type="button" aria-label="Reset zoom" title="Reset zoom">100%</button>
                 <button id="investigation-zoom-in" class="investigation-control-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+                <span class="investigation-control-divider" aria-hidden="true"></span>
+                <button id="investigation-fit" class="investigation-fit-button" type="button" title="Fit nodes to view">Fit</button>
               </div>
               <div id="investigation-canvas" class="investigation-canvas">
                 <svg id="investigation-edges" class="investigation-edges" aria-hidden="true"></svg>
                 <div id="investigation-nodes" class="investigation-nodes"></div>
               </div>
+              <aside id="investigation-inspector" class="investigation-inspector hidden" aria-label="Investigation node inspector">
+                <div class="investigation-inspector-head">
+                  <div>
+                    <span class="investigation-inspector-kicker">Selected node</span>
+                    <strong id="investigation-inspector-title"></strong>
+                  </div>
+                  <button id="investigation-inspector-close" class="graph-icon-button" type="button" aria-label="Close inspector">×</button>
+                </div>
+                <div id="investigation-inspector-body" class="investigation-inspector-body"></div>
+              </aside>
+            </div>
+            <div id="code-map-board" class="code-map-board hidden" aria-label="Code Map">
+              <div class="code-map-toolbar">
+                <div class="code-map-heading">
+                  <strong>Architecture</strong>
+                  <span id="code-map-status" class="code-map-status"></span>
+                </div>
+              </div>
+              <div id="code-map-content" class="code-map-content"></div>
+              <aside id="code-map-inspector" class="code-map-inspector hidden" aria-label="Code Map detail inspector">
+                <div class="code-map-inspector-head">
+                  <div>
+                    <span id="code-map-inspector-kicker" class="code-map-inspector-kicker">Code detail</span>
+                    <strong id="code-map-inspector-title"></strong>
+                  </div>
+                  <button id="code-map-inspector-close" class="graph-icon-button" type="button" aria-label="Close Code Map inspector">×</button>
+                </div>
+                <div id="code-map-inspector-body" class="code-map-inspector-body"></div>
+              </aside>
             </div>
           </section>
         </main>
@@ -132,6 +189,27 @@
           <button class="button primary" type="submit">Save task</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="code-map-sync-dialog" class="quest-dialog code-map-sync-dialog">
+      <div class="code-map-sync-shell">
+        <div class="dialog-header code-map-sync-header">
+          <div>
+            <div class="dialog-label">Code Map</div>
+            <h2>Extract / Sync to Investigation</h2>
+          </div>
+          <button id="code-map-sync-close" class="icon-button" type="button" aria-label="Close Code Map sync preview">×</button>
+        </div>
+        <div id="code-map-sync-body" class="code-map-sync-body"></div>
+        <label id="code-map-sync-recreate-row" class="code-map-sync-confirm hidden">
+          <input id="code-map-sync-recreate-detached" type="checkbox" />
+          <span>Recreate detached targets that were previously deleted</span>
+        </label>
+        <div class="dialog-actions code-map-sync-actions">
+          <button id="code-map-sync-open-investigation" class="button secondary hidden" type="button">Open Investigation</button>
+          <button id="code-map-sync-apply" class="button primary" type="button">Apply sync</button>
+        </div>
+      </div>
     </dialog>
 
     <dialog id="project-dialog" class="quest-dialog small">

@@ -36,8 +36,20 @@ const state = {
   investigationUndo: [],
   investigationRedo: [],
   investigationHistoryBusy: false,
+  selectedInvestigationNodeId: null,
+  codeMap: { enabled: false, available: false, indexed: false, projection: null, mode: null },
+  codeMapLoading: false,
+  codeMapIndexError: null,
+  selectedCodeMapDetail: null,
+  codeMapSyncPreview: null,
+  codeMapSyncResult: null,
+  codeMapSyncLoading: false,
+  codeMapSyncFocusNodeIds: [],
+  codeMapSyncFocusDeadline: 0,
+  codeMapSyncFocusCentered: false,
   actor: loadActor(),
   busy: false,
+  boardError: null,
 };
 
 const el = {};
@@ -53,12 +65,17 @@ window.addEventListener("DOMContentLoaded", () => {
 function collectElements() {
   [
     "project-select", "new-project-button", "new-task-button", "refresh-button",
-    "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty",
+    "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty", "board-error", "board-error-message", "board-error-retry",
     "project-empty", "kanban-board", "empty-new-task-button", "empty-new-project-button",
     "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
-    "investigation-zoom-reset", "investigation-zoom-in", "investigation-add-node",
-    "workspace-title", "view-switch",
+    "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node",
+    "investigation-inspector", "investigation-inspector-title", "investigation-inspector-body", "investigation-inspector-close",
+    "code-map-board", "code-map-status", "code-map-refresh", "code-map-sync", "code-map-content",
+    "code-map-inspector", "code-map-inspector-kicker", "code-map-inspector-title", "code-map-inspector-body", "code-map-inspector-close",
+    "code-map-sync-dialog", "code-map-sync-close", "code-map-sync-body", "code-map-sync-recreate-row",
+    "code-map-sync-recreate-detached", "code-map-sync-open-investigation", "code-map-sync-apply",
+    "workspace-title", "workspace-context", "workspace-nav",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
     "drawer-scrim", "task-dialog", "task-form", "task-dialog-title", "task-id", "task-title",
     "task-description", "task-status", "task-priority", "task-tags", "project-dialog",
@@ -83,7 +100,15 @@ function bindEvents() {
   el["new-task-button"].addEventListener("click", () => openTaskDialog());
   el["empty-new-task-button"].addEventListener("click", () => openTaskDialog());
   el["refresh-button"].addEventListener("click", () => void refreshAll());
-  el["view-switch"].querySelectorAll("[data-board-view]").forEach((button) => {
+  el["board-error-retry"].addEventListener("click", () => void refreshAll());
+  el["code-map-refresh"].addEventListener("click", () => void refreshCodeMap());
+  el["code-map-sync"].addEventListener("click", () => void openCodeMapSyncPreview());
+  el["code-map-inspector-close"].addEventListener("click", clearCodeMapSelection);
+  el["code-map-sync-close"].addEventListener("click", () => el["code-map-sync-dialog"].close());
+  el["code-map-sync-recreate-detached"].addEventListener("change", renderCodeMapSyncDialog);
+  el["code-map-sync-apply"].addEventListener("click", () => void applyCodeMapSync());
+  el["code-map-sync-open-investigation"].addEventListener("click", () => void openInvestigationFromCodeMapSync());
+  el["workspace-nav"].querySelectorAll("[data-board-view]").forEach((button) => {
     button.addEventListener("click", () => setViewMode(button.dataset.boardView));
   });
   el["investigation-undo"].addEventListener("click", () => void undoInvestigationMove());
@@ -91,6 +116,8 @@ function bindEvents() {
   el["investigation-zoom-out"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom - 0.15));
   el["investigation-zoom-reset"].addEventListener("click", resetInvestigationViewport);
   el["investigation-zoom-in"].addEventListener("click", () => setInvestigationZoom(state.investigationZoom + 0.15));
+  el["investigation-fit"].addEventListener("click", fitInvestigationContent);
+  el["investigation-inspector-close"].addEventListener("click", clearInvestigationSelection);
   el["investigation-add-node"].addEventListener("click", () => void createInvestigationNodeFromPrompt());
   bindInvestigationViewportGestures();
   el["save-actor-button"].addEventListener("click", saveActor);
@@ -141,6 +168,7 @@ async function refreshAll() {
     toast("Board refreshed");
   } catch (error) {
     fail(error);
+    await loadCodeMap().catch(() => {});
   } finally {
     setBusy(false);
   }
@@ -169,6 +197,7 @@ function renderProjectSelect() {
 
 async function loadBoard() {
   if (!state.projectId) {
+    state.boardError = null;
     state.tasks = [];
     state.claims.clear();
     state.projectArtifacts = [];
@@ -179,45 +208,72 @@ async function loadBoard() {
     state.investigationItemTaskLinks = [];
     state.boardPositions.clear();
     state.displayPositions.clear();
+    state.codeMap = { available: false, indexed: false, projection: null, mode: null };
+    state.codeMapIndexError = null;
+    state.selectedCodeMapDetail = null;
+    state.codeMapSyncPreview = null;
+    state.codeMapSyncResult = null;
+    state.codeMapSyncFocusNodeIds = [];
     resetInvestigationHistory();
     renderBoard();
     return;
   }
   showBoardLoading(true);
-  const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = await api(
-    `/projects/${encodeURIComponent(state.projectId)}/investigation/graph`,
-  );
-  state.tasks = tasks;
-  state.projectArtifacts = artifacts;
-  state.projectRelations = relations;
-  state.investigationGraphNodes = nodes;
-  state.investigationGraphItems = items;
-  state.investigationItemLinks = itemLinks;
-  state.investigationItemTaskLinks = itemTaskLinks;
-  state.boardPositions = new Map(positions.map((position) => [boardNodeKey(position.entityType, position.entityId), position]));
-  resetInvestigationHistory();
-  state.claims = new Map(claims.map((claim) => [claim.taskId, claim]));
-  renderBoard();
+  try {
+    const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/investigation/graph`,
+    );
+    state.tasks = tasks;
+    state.projectArtifacts = artifacts;
+    state.projectRelations = relations;
+    state.investigationGraphNodes = nodes;
+    state.investigationGraphItems = items;
+    state.investigationItemLinks = itemLinks;
+    state.investigationItemTaskLinks = itemTaskLinks;
+    state.boardPositions = new Map(positions.map((position) => [boardNodeKey(position.entityType, position.entityId), position]));
+    resetInvestigationHistory();
+    state.claims = new Map(claims.map((claim) => [claim.taskId, claim]));
+    state.boardError = null;
+    if (state.viewMode === "code-map" || state.viewMode === "investigation") {
+      await loadCodeMapContext();
+    }
+    renderBoard();
+  } catch (error) {
+    state.boardError = error instanceof Error ? error.message : String(error);
+    renderBoard();
+    throw error;
+  }
 }
 
 function renderBoard() {
   showBoardLoading(false);
   const noProject = !state.projectId;
   const hasQuestContent = state.tasks.length > 0;
-  const hasCurrentContent = state.viewMode === "investigation" ? Boolean(state.projectId) : hasQuestContent;
-  el["project-empty"].classList.toggle("hidden", !noProject);
-  el["board-empty"].classList.toggle("hidden", noProject || hasCurrentContent);
-  el["kanban-board"].classList.toggle("hidden", noProject || !hasQuestContent || state.viewMode !== "quest");
-  el["investigation-board"].classList.toggle("hidden", noProject || state.viewMode !== "investigation");
+  const hasCurrentContent = state.viewMode === "quest" ? hasQuestContent : Boolean(state.projectId);
+  const hasError = Boolean(state.boardError);
+  el["board-error"].classList.toggle("hidden", !hasError);
+  el["board-error-message"].textContent = state.boardError || "QuestBoard could not load this project.";
+  el["project-empty"].classList.toggle("hidden", hasError || !noProject);
+  el["board-empty"].classList.toggle("hidden", hasError || noProject || hasCurrentContent);
+  el["kanban-board"].classList.toggle("hidden", hasError || noProject || !hasQuestContent || state.viewMode !== "quest");
+  el["investigation-board"].classList.toggle("hidden", hasError || noProject || state.viewMode !== "investigation");
+  el["code-map-board"].classList.toggle("hidden", hasError || noProject || state.viewMode !== "code-map");
   renderViewSwitch();
+  if (hasError) return;
   if (noProject || !hasCurrentContent) {
     if (state.viewMode === "quest") el["kanban-board"].replaceChildren();
-    else clearInvestigationBoard();
+    else if (state.viewMode === "investigation") clearInvestigationBoard();
+    else el["code-map-content"].replaceChildren();
     return;
   }
 
   if (state.viewMode === "investigation") {
     renderInvestigationBoard();
+    return;
+  }
+
+  if (state.viewMode === "code-map") {
+    renderCodeMapBoard();
     return;
   }
 
@@ -251,15 +307,21 @@ function renderBoard() {
 }
 
 function setViewMode(mode) {
-  if (mode !== "quest" && mode !== "investigation") return;
+  if (!["quest", "investigation", "code-map"].includes(mode)) return;
   state.viewMode = mode;
   localStorage.setItem("questboard.viewMode", mode);
   closeDrawer();
+  if ((mode === "code-map" || mode === "investigation") && state.projectId) {
+    void loadCodeMapContext().catch(fail);
+  }
   renderBoard();
 }
 
 function loadViewMode() {
-  return localStorage.getItem("questboard.viewMode") === "investigation" ? "investigation" : "quest";
+  const requested = new URLSearchParams(globalThis.location?.search ?? "").get("view");
+  if (["quest", "investigation", "code-map"].includes(requested)) return requested;
+  const stored = localStorage.getItem("questboard.viewMode");
+  return ["quest", "investigation", "code-map"].includes(stored) ? stored : "quest";
 }
 
 function loadInvestigationZoom() {
@@ -277,15 +339,471 @@ function loadInvestigationPan() {
 }
 
 function renderViewSwitch() {
-  el["view-switch"].querySelectorAll("[data-board-view]").forEach((button) => {
+  el["workspace-nav"].querySelectorAll("[data-board-view]").forEach((button) => {
     const active = button.dataset.boardView === state.viewMode;
     button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   });
+  const quest = state.viewMode === "quest";
   const investigation = state.viewMode === "investigation";
+  const codeMap = state.viewMode === "code-map";
   el["investigation-controls"].classList.toggle("hidden", !investigation);
-  el["workspace-title"].textContent = investigation ? "Investigation" : "Quest";
+  el["new-task-button"].classList.toggle("hidden", !quest);
+  el["investigation-add-node"].classList.toggle("hidden", !investigation);
+  el["code-map-refresh"].classList.toggle("hidden", !codeMap);
+  if (!codeMap) el["code-map-sync"].classList.add("hidden");
+  const title = codeMap ? "Code Map" : investigation ? "Investigation" : "Quest";
+  const role = codeMap ? "Architecture" : investigation ? "Execution map" : "Work queue";
+  const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
+  el["workspace-title"].textContent = title;
+  el["workspace-context"].textContent = projectName ? `${projectName} · ${role}` : role;
   renderInvestigationControls();
+}
+
+async function loadCodeMap() {
+  if (!state.projectId) return;
+  state.codeMapLoading = true;
+  renderCodeMapBoard();
+  try {
+    state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    state.codeMapIndexError = null;
+  } finally {
+    state.codeMapLoading = false;
+    renderCodeMapBoard();
+  }
+}
+
+async function loadCodeMapContext() {
+  await loadCodeMap();
+  if (!state.codeMap.indexed || !state.codeMap.projection) {
+    state.codeMapSyncPreview = null;
+    renderBoard();
+    return;
+  }
+  try {
+    await loadCodeMapSyncPreview();
+  } catch {
+    state.codeMapSyncPreview = null;
+  }
+  renderBoard();
+}
+
+async function loadCodeMapSyncPreview(selection = {}) {
+  if (!state.projectId || !state.codeMap.indexed) return null;
+  const { preview } = await api(
+    `/projects/${encodeURIComponent(state.projectId)}/code-map/investigation-sync/preview`,
+    { method: "POST", body: selection },
+  );
+  state.codeMapSyncPreview = preview;
+  return preview;
+}
+
+async function refreshCodeMap() {
+  if (!state.projectId || state.codeMapLoading) return;
+  try {
+    state.codeMapLoading = true;
+    setBusy(true);
+    renderCodeMapBoard();
+    state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`, { method: "POST" });
+    state.codeMapIndexError = null;
+    toast(state.codeMap.mode === "cache-hit" ? "Code Map is current" : "Code Map indexed");
+  } catch (error) {
+    state.codeMapIndexError = error.message || "Code Map indexing failed";
+    try {
+      state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    } catch {}
+    fail(error);
+  } finally {
+    state.codeMapLoading = false;
+    setBusy(false);
+    renderCodeMapBoard();
+  }
+}
+
+function renderCodeMapBoard() {
+  if (!el["code-map-content"] || state.viewMode !== "code-map") return;
+  const map = state.codeMap;
+  const action = el["code-map-refresh"];
+  const syncAction = el["code-map-sync"];
+  action.classList.toggle("hidden", state.viewMode !== "code-map");
+  action.disabled = state.codeMapLoading || !map.available;
+  action.textContent = state.codeMapLoading ? "Indexing…" : map.indexed ? "Re-index" : "Index code";
+  action.classList.toggle("primary", !map.indexed);
+  action.classList.toggle("secondary", Boolean(map.indexed));
+  syncAction.classList.toggle("hidden", state.viewMode !== "code-map" || !map.indexed || !map.projection);
+  syncAction.disabled = state.codeMapLoading || state.codeMapSyncLoading;
+  syncAction.classList.toggle("primary", Boolean(map.indexed && map.projection));
+  syncAction.classList.toggle("secondary", !map.indexed || !map.projection);
+
+  if (state.codeMapLoading && !map.projection) {
+    el["code-map-status"].textContent = "Indexing architecture…";
+    el["code-map-content"].replaceChildren(node("div", "code-map-state", "Building the architecture projection…"));
+    return;
+  }
+  if (!map.available) {
+    state.selectedCodeMapDetail = null;
+    renderCodeMapInspector();
+    if (map.enabled) {
+      const provider = map.provider && map.provider !== "unknown" ? map.provider : "Code Map";
+      el["code-map-status"].textContent = `${provider} unavailable`;
+      el["code-map-content"].replaceChildren(node("div", "code-map-state", map.message || "The configured Code Map provider is unavailable."));
+    } else {
+      el["code-map-status"].textContent = "Disabled";
+      el["code-map-content"].replaceChildren(node("div", "code-map-state", "Code Map is not enabled for this QuestBoard runtime."));
+    }
+    return;
+  }
+  if (!map.indexed || !map.projection) {
+    state.selectedCodeMapDetail = null;
+    renderCodeMapInspector();
+    el["code-map-status"].textContent = "Not indexed";
+    el["code-map-content"].replaceChildren(node("div", "code-map-state", "Index this project to build its architecture map."));
+    return;
+  }
+
+  const projection = map.projection;
+  const timestamp = projection.sourceIndexedAt ? new Date(projection.sourceIndexedAt).toLocaleString() : "Indexed";
+  const provider = map.provider && map.provider !== "unknown" ? `${map.provider} · ` : "";
+  const stale = Boolean(state.codeMapIndexError);
+  el["code-map-status"].textContent = stale
+    ? `${provider}last-good snapshot · ${timestamp} · indexing failed`
+    : `${provider}${map.mode || "cached"} · ${timestamp}`;
+  const nodeById = new Map(projection.nodes.map((item) => [item.id, item]));
+  const cards = projection.nodes.map((item) => {
+    const card = node("article", `code-map-node code-map-node-${item.kind}`);
+    card.dataset.codeMapNodeId = item.id;
+    card.classList.toggle("selected", state.selectedCodeMapDetail?.type === "node" && state.selectedCodeMapDetail.id === item.id);
+    card.tabIndex = 0;
+    const syncEntry = state.codeMapSyncPreview?.nodes?.find((entry) => entry.codeNodeId === item.id);
+    card.append(
+      node("span", "code-map-node-kind", item.kind.replaceAll("_", " ")),
+      node("strong", "code-map-node-title", item.title),
+      node("span", "code-map-node-count", `${item.memberNodeIds.length} symbols`),
+    );
+    if (syncEntry && syncEntry.state !== "create") {
+      card.append(codeMapBindingBadges(syncEntry.state));
+    }
+    card.append(node("span", "code-map-node-open", "Inspect →"));
+    card.addEventListener("click", () => selectCodeMapDetail("node", item.id));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectCodeMapDetail("node", item.id);
+      }
+    });
+    return card;
+  });
+  const stage = node("div", "code-map-stage");
+  stage.append(...cards);
+
+  const relations = node("div", "code-map-relations");
+  projection.relations.forEach((relation) => {
+    const from = nodeById.get(relation.from)?.title ?? relation.from;
+    const to = nodeById.get(relation.to)?.title ?? relation.to;
+    const row = node("div", "code-map-relation");
+    row.dataset.codeMapRelationId = relation.id;
+    row.classList.toggle("selected", state.selectedCodeMapDetail?.type === "relation" && state.selectedCodeMapDetail.id === relation.id);
+    row.tabIndex = 0;
+    const main = node("div", "code-map-relation-main");
+    main.append(
+      node("span", "code-map-relation-node", from),
+      node("span", "code-map-relation-kind", relation.kind.replaceAll("_", " ")),
+      node("span", "code-map-relation-arrow", "→"),
+      node("span", "code-map-relation-node", to),
+    );
+    main.append(node("span", "code-map-relation-open", `${relation.sourceRelationIds.length} evidence · Inspect`));
+    row.append(main);
+    row.addEventListener("click", () => selectCodeMapDetail("relation", relation.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectCodeMapDetail("relation", relation.id);
+      }
+    });
+    relations.append(row);
+  });
+  const shell = node("div", "code-map-explorer-shell");
+  if (stale) {
+    shell.append(node("div", "code-map-banner warning", `Showing the last good snapshot. ${state.codeMapIndexError}`));
+  }
+  shell.append(stage, relations);
+  el["code-map-content"].replaceChildren(shell);
+  renderCodeMapInspector();
+}
+
+function selectCodeMapDetail(type, id) {
+  state.selectedCodeMapDetail = { type, id };
+  renderCodeMapBoard();
+}
+
+function clearCodeMapSelection() {
+  state.selectedCodeMapDetail = null;
+  renderCodeMapBoard();
+}
+
+function renderCodeMapInspector() {
+  const inspector = el["code-map-inspector"];
+  if (!inspector) return;
+  const selection = state.selectedCodeMapDetail;
+  const projection = state.codeMap.projection;
+  const graph = state.codeMap.graph;
+  if (!selection || !projection) {
+    inspector.classList.add("hidden");
+    el["code-map-inspector-body"].replaceChildren();
+    return;
+  }
+
+  if (selection.type === "node") {
+    const architectureNode = projection.nodes.find((candidate) => candidate.id === selection.id);
+    if (!architectureNode) return clearCodeMapSelection();
+    el["code-map-inspector-kicker"].textContent = architectureNode.kind.replaceAll("_", " ");
+    el["code-map-inspector-title"].textContent = architectureNode.title;
+    const members = architectureNode.memberNodeIds
+      .map((id) => graph?.nodes?.find((candidate) => candidate.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (a.location?.path || "").localeCompare(b.location?.path || "") || a.name.localeCompare(b.name));
+    const summary = codeMapInspectorSummary([
+      [String(members.length), "Symbols"],
+      [String(new Set(members.map((member) => member.location?.path).filter(Boolean)).size), "Files"],
+      [String(projection.relations.filter((relation) => relation.from === architectureNode.id || relation.to === architectureNode.id).length), "Relations"],
+    ]);
+    const list = node("div", "code-map-inspector-list");
+    if (members.length === 0) list.append(node("span", "code-map-inspector-empty", "No normalized symbol detail is available for this snapshot."));
+    members.forEach((member) => list.append(renderCodeMapMember(member)));
+    const section = node("section", "code-map-inspector-section");
+    section.append(node("span", "code-map-inspector-section-title", "Members"), list);
+    el["code-map-inspector-body"].replaceChildren(summary, section);
+  } else {
+    const relation = projection.relations.find((candidate) => candidate.id === selection.id);
+    if (!relation) return clearCodeMapSelection();
+    const nodeById = new Map(projection.nodes.map((candidate) => [candidate.id, candidate]));
+    el["code-map-inspector-kicker"].textContent = relation.kind.replaceAll("_", " ");
+    el["code-map-inspector-title"].textContent = `${nodeById.get(relation.from)?.title || "Source"} → ${nodeById.get(relation.to)?.title || "Target"}`;
+    const evidenceRelations = relation.sourceRelationIds
+      .map((id) => graph?.relations?.find((candidate) => candidate.id === id))
+      .filter(Boolean);
+    const graphNodes = new Map((graph?.nodes || []).map((candidate) => [candidate.id, candidate]));
+    const summary = codeMapInspectorSummary([
+      [String(evidenceRelations.length), "Evidence"],
+      [String(new Set(evidenceRelations.flatMap((entry) => (entry.evidence || []).map((evidence) => evidence.location.path))).size), "Files"],
+      [relation.kind.replaceAll("_", " "), "Flow"],
+    ]);
+    const list = node("div", "code-map-inspector-list");
+    if (evidenceRelations.length === 0) list.append(node("span", "code-map-inspector-empty", "No normalized source evidence is available for this relation."));
+    evidenceRelations.forEach((entry) => {
+      const fromNode = graphNodes.get(entry.from);
+      const toNode = graphNodes.get(entry.to);
+      const item = node("div", "code-map-inspector-evidence");
+      item.append(node("strong", "code-map-inspector-evidence-title", `${fromNode?.name || "Source"} → ${toNode?.name || "Target"}`));
+      const locations = entry.evidence?.length ? entry.evidence : [fromNode?.location, toNode?.location].filter(Boolean).map((location) => ({ location }));
+      locations.forEach((evidence) => item.append(codeMapLocationRow(evidence.location, evidence.label)));
+      list.append(item);
+    });
+    const section = node("section", "code-map-inspector-section");
+    section.append(node("span", "code-map-inspector-section-title", "Source evidence"), list);
+    el["code-map-inspector-body"].replaceChildren(summary, section);
+  }
+  inspector.classList.remove("hidden");
+}
+
+function codeMapInspectorSummary(metrics) {
+  const summary = node("div", "code-map-inspector-summary");
+  metrics.forEach(([value, label]) => {
+    const metric = node("span", "code-map-inspector-metric");
+    metric.append(node("strong", "", value), node("span", "", label));
+    summary.append(metric);
+  });
+  return summary;
+}
+
+function renderCodeMapMember(member) {
+  const item = node("div", "code-map-inspector-member");
+  const heading = node("div", "code-map-inspector-member-head");
+  heading.append(node("strong", "code-map-inspector-member-title", member.name), node("span", "code-map-inspector-member-kind", member.kind));
+  item.append(heading);
+  if (member.signature) item.append(node("code", "code-map-inspector-signature", member.signature));
+  if (member.location) item.append(codeMapLocationRow(member.location));
+  return item;
+}
+
+function codeMapLocationRow(location, label = "") {
+  const row = node("div", "code-map-location");
+  const line = location.startLine ? `:${location.startLine}${location.startColumn ? `:${location.startColumn}` : ""}` : "";
+  row.append(node("code", "code-map-location-path", `${location.path}${line}`));
+  if (label) row.append(node("span", "code-map-location-label", label));
+  return row;
+}
+
+async function openCodeMapSyncPreview() {
+  if (!state.projectId || !state.codeMap.indexed || state.codeMapSyncLoading) return;
+  state.codeMapSyncResult = null;
+  el["code-map-sync-recreate-detached"].checked = false;
+  if (!el["code-map-sync-dialog"].open) el["code-map-sync-dialog"].showModal();
+  try {
+    state.codeMapSyncLoading = true;
+    renderCodeMapSyncDialog();
+    await loadCodeMapSyncPreview({ includeRelations: true, recreateDetached: false });
+  } catch (error) {
+    fail(error);
+  } finally {
+    state.codeMapSyncLoading = false;
+    renderCodeMapSyncDialog();
+    renderCodeMapBoard();
+  }
+}
+
+function renderCodeMapSyncDialog() {
+  if (!el["code-map-sync-body"]) return;
+  const preview = state.codeMapSyncPreview;
+  const result = state.codeMapSyncResult;
+  const apply = el["code-map-sync-apply"];
+  const openInvestigation = el["code-map-sync-open-investigation"];
+  const recreateRow = el["code-map-sync-recreate-row"];
+
+  if (state.codeMapSyncLoading) {
+    el["code-map-sync-body"].replaceChildren(node("div", "code-map-sync-loading", result ? "Applying sync…" : "Building sync preview…"));
+    apply.disabled = true;
+    recreateRow.classList.add("hidden");
+    openInvestigation.classList.add("hidden");
+    return;
+  }
+
+  if (result) {
+    const counts = result.counts;
+    const summary = codeMapSyncSummary([
+      ["Created nodes", counts.createdNodes],
+      ["Created relations", counts.createdRelationLinks],
+      ["Updated bindings", counts.updatedBindings],
+      ["Unchanged", counts.unchangedNodes + counts.unchangedRelations],
+      ["Stale", counts.staleBindings],
+      ["Detached", counts.detachedBindings],
+      ["Blocked", counts.blockedRelations],
+    ]);
+    const copy = node("p", "code-map-sync-result-copy", "Sync completed. Generated Investigation content remains editable and future syncs preserve user fields.");
+    el["code-map-sync-body"].replaceChildren(summary, copy);
+    recreateRow.classList.add("hidden");
+    openInvestigation.classList.remove("hidden");
+    apply.textContent = "Preview again";
+    apply.disabled = false;
+    return;
+  }
+
+  apply.textContent = "Apply sync";
+  openInvestigation.classList.add("hidden");
+  if (!preview) {
+    el["code-map-sync-body"].replaceChildren(node("div", "code-map-sync-loading", "No sync preview available."));
+    apply.disabled = true;
+    recreateRow.classList.add("hidden");
+    return;
+  }
+
+  const changed = preview.counts.nodes.evidence_changed + preview.counts.relations.evidence_changed;
+  const stale = preview.counts.nodes.stale + preview.counts.relations.stale;
+  const detached = preview.counts.nodes.detached + preview.counts.relations.detached;
+  const conflicts = detached + preview.counts.relations.blocked;
+  const summary = codeMapSyncSummary([
+    ["New nodes", preview.counts.nodes.create],
+    ["New relations", preview.counts.relations.create],
+    ["Evidence changed", changed],
+    ["Stale", stale],
+    ["Detached / blocked", conflicts],
+  ]);
+
+  const notices = node("div", "code-map-sync-notices");
+  if (stale > 0) notices.append(node("div", "code-map-sync-notice", `${stale} stale binding${stale === 1 ? "" : "s"} will be preserved, not deleted.`));
+  if (detached > 0) notices.append(node("div", "code-map-sync-notice warning", `${detached} detached target${detached === 1 ? "" : "s"} require explicit recreation confirmation.`));
+
+  const rows = node("div", "code-map-sync-list");
+  preview.nodes.forEach((entry) => rows.append(codeMapSyncRow("Node", entry.sourceTitle, entry.state)));
+  const projectionNodes = new Map((state.codeMap.projection?.nodes || []).map((entry) => [entry.id, entry.title]));
+  preview.relations.forEach((entry) => {
+    const from = projectionNodes.get(entry.fromCodeNodeId) || "Previous source";
+    const to = projectionNodes.get(entry.toCodeNodeId) || "Previous target";
+    rows.append(codeMapSyncRow("Relation", `${from} → ${to}`, entry.state, entry.relationKind));
+  });
+
+  el["code-map-sync-body"].replaceChildren(summary, notices, rows);
+  recreateRow.classList.toggle("hidden", detached === 0);
+  apply.disabled = detached > 0 && !el["code-map-sync-recreate-detached"].checked;
+}
+
+function codeMapSyncSummary(entries) {
+  const summary = node("div", "code-map-sync-summary");
+  entries.forEach(([label, value]) => {
+    const item = node("div", "code-map-sync-stat");
+    item.append(node("strong", "code-map-sync-stat-value", String(value)), node("span", "code-map-sync-stat-label", label));
+    summary.append(item);
+  });
+  return summary;
+}
+
+function codeMapSyncRow(type, title, status, detail = "") {
+  const row = node("div", "code-map-sync-row");
+  const copy = node("div", "code-map-sync-row-copy");
+  copy.append(node("span", "code-map-sync-row-type", type), node("strong", "code-map-sync-row-title", title));
+  if (detail) copy.append(node("span", "code-map-sync-row-detail", detail.replaceAll("_", " ")));
+  row.append(copy, node("span", `code-map-sync-state code-map-sync-state-${status}`, status.replaceAll("_", " ")));
+  return row;
+}
+
+async function applyCodeMapSync() {
+  if (state.codeMapSyncResult) {
+    state.codeMapSyncResult = null;
+    await openCodeMapSyncPreview();
+    return;
+  }
+  const preview = state.codeMapSyncPreview;
+  if (!state.projectId || !preview || state.codeMapSyncLoading) return;
+  const recreateDetached = el["code-map-sync-recreate-detached"].checked;
+  try {
+    state.codeMapSyncLoading = true;
+    renderCodeMapSyncDialog();
+    const { result } = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/code-map/investigation-sync/apply`,
+      {
+        method: "POST",
+        actor: true,
+        body: {
+          includeRelations: true,
+          recreateDetached,
+          expectedProjectionFingerprint: preview.projectionFingerprint,
+        },
+      },
+    );
+    state.codeMapSyncResult = result;
+    state.codeMapSyncFocusNodeIds = result.investigationNodeIds || [];
+    state.codeMapSyncFocusDeadline = 0;
+    state.codeMapSyncFocusCentered = false;
+    await loadBoard();
+    toast("Code Map synced to Investigation");
+  } catch (error) {
+    fail(error);
+  } finally {
+    state.codeMapSyncLoading = false;
+    renderCodeMapSyncDialog();
+  }
+}
+
+async function openInvestigationFromCodeMapSync() {
+  el["code-map-sync-dialog"].close();
+  setViewMode("investigation");
+  await loadBoard();
+}
+
+function codeMapBindingBadges(status) {
+  const badges = node("span", "code-map-binding-badges");
+  badges.append(node("span", "code-map-binding-badge", "Code Map"));
+  if (status === "stale") badges.append(node("span", "code-map-binding-badge stale", "Stale"));
+  return badges;
+}
+
+function codeMapNodeBindingForInvestigationNode(nodeId) {
+  return state.codeMapSyncPreview?.nodes?.find((entry) => entry.investigationNodeId === nodeId) || null;
+}
+
+function codeMapRelationBindingForInvestigationItem(itemId) {
+  return state.codeMapSyncPreview?.relations?.find((entry) => entry.investigationItemId === itemId) || null;
 }
 
 function renderInvestigationBoard() {
@@ -308,7 +826,11 @@ function renderInvestigationBoard() {
       return card;
     });
     nodesLayer.replaceChildren(...graphNodes);
-    requestAnimationFrame(drawInvestigationEdges);
+    renderInvestigationInspector();
+    requestAnimationFrame(() => {
+      drawInvestigationEdges();
+      focusCodeMapSyncNodes();
+    });
     return;
   }
 
@@ -325,6 +847,8 @@ function renderInvestigationBoard() {
     return card;
   });
   nodesLayer.replaceChildren(...taskNodes, ...artifactNodes);
+  state.selectedInvestigationNodeId = null;
+  renderInvestigationInspector();
   drawInvestigationEdges();
 }
 
@@ -370,15 +894,21 @@ function investigationGraphNode(graphNode, position) {
   const card = node("article", "investigation-node investigation-graph-node");
   card.dataset.entityType = "investigation_node";
   card.dataset.entityId = graphNode.id;
+  card.classList.toggle("selected", state.selectedInvestigationNodeId === graphNode.id);
   setInvestigationNodePosition(card, position);
 
   const head = node("div", "investigation-node-head");
   const identity = node("div", "investigation-graph-identity");
   identity.append(node("strong", "investigation-node-title", graphNode.title));
+  const codeMapBinding = codeMapNodeBindingForInvestigationNode(graphNode.id);
+  if (codeMapBinding) identity.append(codeMapBindingBadges(codeMapBinding.state));
   const edit = node("button", "graph-icon-button", "✎");
   edit.type = "button";
   edit.title = "Edit node";
-  edit.addEventListener("click", () => void editInvestigationNodeFromPrompt(graphNode));
+  edit.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void editInvestigationNodeFromPrompt(graphNode);
+  });
   head.append(identity, edit);
   card.append(head);
 
@@ -395,12 +925,154 @@ function investigationGraphNode(graphNode, position) {
   addItem.addEventListener("click", () => void addInvestigationItemFromPrompt(graphNode.id));
   card.append(addItem);
   attachInvestigationDrag(card, "investigation_node", graphNode.id, head);
+  card.addEventListener("click", (event) => {
+    if (card._suppressClick || event.target.closest("button")) {
+      card._suppressClick = false;
+      return;
+    }
+    selectInvestigationNode(graphNode.id);
+  });
   return card;
+}
+
+function selectInvestigationNode(nodeId) {
+  state.selectedInvestigationNodeId = nodeId;
+  [...el["investigation-nodes"].children].forEach((card) => {
+    card.classList.toggle("selected", card.dataset.entityId === nodeId);
+  });
+  renderInvestigationInspector();
+}
+
+function clearInvestigationSelection() {
+  state.selectedInvestigationNodeId = null;
+  [...el["investigation-nodes"].children].forEach((card) => card.classList.remove("selected"));
+  renderInvestigationInspector();
+}
+
+function renderInvestigationInspector() {
+  const inspector = el["investigation-inspector"];
+  if (!inspector) return;
+  const graphNode = state.investigationGraphNodes.find((candidate) => candidate.id === state.selectedInvestigationNodeId);
+  if (!graphNode) {
+    if (state.selectedInvestigationNodeId) state.selectedInvestigationNodeId = null;
+    inspector.classList.add("hidden");
+    el["investigation-inspector-body"].replaceChildren();
+    return;
+  }
+
+  inspector.classList.remove("hidden");
+  el["investigation-inspector-title"].textContent = graphNode.title;
+  const body = el["investigation-inspector-body"];
+  const items = state.investigationGraphItems
+    .filter((item) => item.nodeId === graphNode.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
+  const itemIds = new Set(items.map((item) => item.id));
+  const outgoing = state.investigationItemLinks.filter((link) => itemIds.has(link.fromItemId));
+  const incoming = state.investigationItemLinks.filter((link) => link.toNodeId === graphNode.id);
+  const taskLinks = state.investigationItemTaskLinks.filter((link) => itemIds.has(link.itemId));
+  const binding = state.codeMapSyncPreview?.nodes?.find((entry) => entry.investigationNodeId === graphNode.id) || null;
+
+  const summary = node("div", "investigation-inspector-summary");
+  summary.append(
+    inspectorMetric(String(items.length), "Items"),
+    inspectorMetric(String(outgoing.length + incoming.length), "Flows"),
+    inspectorMetric(String(taskLinks.length), "Tasks"),
+  );
+
+  const description = node("p", "investigation-inspector-description", graphNode.description || "No description yet.");
+  const actions = node("div", "investigation-inspector-actions");
+  const focus = node("button", "button compact secondary", "Focus");
+  focus.type = "button";
+  focus.addEventListener("click", () => focusInvestigationNode(graphNode.id));
+  const edit = node("button", "button compact secondary", "Edit");
+  edit.type = "button";
+  edit.addEventListener("click", () => void editInvestigationNodeFromPrompt(graphNode));
+  actions.append(focus, edit);
+
+  const itemSection = node("div", "investigation-inspector-section");
+  itemSection.append(node("span", "investigation-inspector-section-title", "Items"));
+  if (items.length === 0) {
+    itemSection.append(node("span", "investigation-inspector-empty", "No items in this node."));
+  } else {
+    items.forEach((item) => {
+      const row = node("button", "investigation-inspector-item");
+      row.type = "button";
+      row.append(node("strong", "investigation-inspector-item-title", item.title));
+      if (item.description) row.append(node("span", "investigation-inspector-item-description", item.description));
+      const linkedTasks = state.investigationItemTaskLinks.filter((link) => link.itemId === item.id).length;
+      const flows = state.investigationItemLinks.filter((link) => link.fromItemId === item.id).length;
+      if (linkedTasks || flows) row.append(node("span", "investigation-inspector-item-meta", `${linkedTasks} tasks · ${flows} flows`));
+      row.addEventListener("click", () => {
+        const itemElement = el["investigation-nodes"].querySelector(`[data-investigation-item-id="${CSS.escape(item.id)}"]`);
+        itemElement?.scrollIntoView({ block: "nearest", inline: "nearest" });
+        itemElement?.classList.add("inspector-focus");
+        window.setTimeout(() => itemElement?.classList.remove("inspector-focus"), 1200);
+      });
+      itemSection.append(row);
+    });
+  }
+
+  body.replaceChildren(summary, description, actions);
+  if (binding) body.append(codeMapBindingBadges(binding.state));
+  body.append(itemSection);
+}
+
+function inspectorMetric(value, label) {
+  const metric = node("span", "investigation-inspector-metric");
+  metric.append(node("strong", "", value), node("span", "", label));
+  return metric;
+}
+
+function focusInvestigationNode(nodeId) {
+  const position = state.displayPositions.get(boardNodeKey("investigation_node", nodeId));
+  const card = [...el["investigation-nodes"].children].find((candidate) => candidate.dataset.entityId === nodeId);
+  if (!position || !card) return;
+  const board = el["investigation-board"];
+  const inspectorReserve = board.clientWidth > 720 && !el["investigation-inspector"].classList.contains("hidden") ? 300 : 0;
+  const viewportWidth = Math.max(240, board.clientWidth - inspectorReserve);
+  const centerX = position.x + card.offsetWidth / 2;
+  const centerY = position.y + card.offsetHeight / 2;
+  state.investigationPan.x = viewportWidth / 2 - centerX * state.investigationZoom;
+  state.investigationPan.y = board.clientHeight / 2 - centerY * state.investigationZoom;
+  persistInvestigationViewport();
+  applyInvestigationViewport();
+  card.classList.add("inspector-node-focus");
+  window.setTimeout(() => card.classList.remove("inspector-node-focus"), 1200);
+}
+
+function fitInvestigationContent() {
+  const cards = [...el["investigation-nodes"].children].filter((card) => card.dataset.entityId);
+  if (cards.length === 0) return;
+  const bounds = cards.reduce((acc, card) => {
+    const key = boardNodeKey(card.dataset.entityType, card.dataset.entityId);
+    const position = state.displayPositions.get(key);
+    if (!position) return acc;
+    acc.minX = Math.min(acc.minX, position.x);
+    acc.minY = Math.min(acc.minY, position.y);
+    acc.maxX = Math.max(acc.maxX, position.x + card.offsetWidth);
+    acc.maxY = Math.max(acc.maxY, position.y + card.offsetHeight);
+    return acc;
+  }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  if (!Number.isFinite(bounds.minX)) return;
+  const board = el["investigation-board"];
+  const inspectorReserve = board.clientWidth > 720 && !el["investigation-inspector"].classList.contains("hidden") ? 300 : 0;
+  const viewportWidth = Math.max(240, board.clientWidth - inspectorReserve);
+  const contentWidth = Math.max(1, bounds.maxX - bounds.minX);
+  const contentHeight = Math.max(1, bounds.maxY - bounds.minY);
+  const nextZoom = clamp(Math.min((viewportWidth - 64) / contentWidth, (board.clientHeight - 64) / contentHeight, 1.25), 0.35, 1.4);
+  state.investigationZoom = nextZoom;
+  state.investigationPan.x = (viewportWidth - contentWidth * nextZoom) / 2 - bounds.minX * nextZoom;
+  state.investigationPan.y = (board.clientHeight - contentHeight * nextZoom) / 2 - bounds.minY * nextZoom;
+  persistInvestigationViewport();
+  applyInvestigationViewport();
+  renderInvestigationControls();
 }
 
 function investigationGraphItem(item) {
   const wrapper = node("section", "investigation-item");
   wrapper.dataset.investigationItemId = item.id;
+  const codeMapBinding = codeMapRelationBindingForInvestigationItem(item.id);
+  if (codeMapBinding) wrapper.append(codeMapBindingBadges(codeMapBinding.state));
   const head = node("div", "investigation-item-head");
   const title = node("strong", "investigation-item-title", item.title);
   const actions = node("div", "investigation-item-actions");
@@ -465,6 +1137,47 @@ function investigationGraphItem(item) {
     wrapper.append(links);
   }
   return wrapper;
+}
+
+function focusCodeMapSyncNodes() {
+  const ids = state.codeMapSyncFocusNodeIds;
+  if (!ids?.length || state.viewMode !== "investigation") return;
+  if (!state.codeMapSyncFocusDeadline) state.codeMapSyncFocusDeadline = Date.now() + 6000;
+  const deadline = state.codeMapSyncFocusDeadline;
+  if (Date.now() >= deadline) {
+    state.codeMapSyncFocusNodeIds = [];
+    state.codeMapSyncFocusDeadline = 0;
+    state.codeMapSyncFocusCentered = false;
+    return;
+  }
+  const positions = ids.map((id) => state.displayPositions.get(boardNodeKey("investigation_node", id))).filter(Boolean);
+  if (positions.length === 0) return;
+  if (!state.codeMapSyncFocusCentered) {
+    const board = el["investigation-board"];
+    const center = positions.reduce((sum, position) => ({ x: sum.x + position.x, y: sum.y + position.y }), { x: 0, y: 0 });
+    center.x = center.x / positions.length + 165;
+    center.y = center.y / positions.length + 70;
+    state.investigationPan.x = board.clientWidth / 2 - center.x * state.investigationZoom;
+    state.investigationPan.y = board.clientHeight / 2 - center.y * state.investigationZoom;
+    persistInvestigationViewport();
+    applyInvestigationViewport();
+    state.codeMapSyncFocusCentered = true;
+  }
+  ids.forEach((id) => {
+    const card = [...el["investigation-nodes"].children].find((candidate) => candidate.dataset.entityId === id);
+    if (card) card.classList.add("code-map-sync-focus");
+  });
+  const focusIds = [...ids];
+  window.setTimeout(() => {
+    if (state.codeMapSyncFocusDeadline !== deadline) return;
+    state.codeMapSyncFocusNodeIds = [];
+    state.codeMapSyncFocusDeadline = 0;
+    state.codeMapSyncFocusCentered = false;
+    focusIds.forEach((id) => {
+      const card = [...el["investigation-nodes"].children].find((candidate) => candidate.dataset.entityId === id);
+      card?.classList.remove("code-map-sync-focus");
+    });
+  }, Math.max(0, deadline - Date.now()));
 }
 
 function graphActionButton(label, title, onClick) {
@@ -837,6 +1550,7 @@ function renderInvestigationControls() {
   el["investigation-zoom-out"].disabled = state.investigationZoom <= 0.35;
   el["investigation-zoom-in"].disabled = state.investigationZoom >= 2.5;
   el["investigation-zoom-reset"].textContent = `${Math.round(state.investigationZoom * 100)}%`;
+  el["investigation-fit"].disabled = state.displayPositions.size === 0;
 }
 
 function setInvestigationZoom(value, focalPoint = null) {
@@ -948,9 +1662,11 @@ async function persistInvestigationPosition(entityType, entityId, position) {
 }
 
 function clearInvestigationBoard() {
+  state.selectedInvestigationNodeId = null;
   state.displayPositions.clear();
   el["investigation-nodes"].replaceChildren();
   el["investigation-edges"].replaceChildren();
+  renderInvestigationInspector();
 }
 
 function boardNodeKey(entityType, entityId) {
@@ -1436,7 +2152,10 @@ async function api(path, options = {}) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
+    const error = new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
+    error.payload = payload;
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -1462,10 +2181,12 @@ function createWebRequestId() {
 function showBoardLoading(show) {
   el["board-loading"].classList.toggle("hidden", !show);
   if (show) {
+    el["board-error"].classList.add("hidden");
     el["project-empty"].classList.add("hidden");
     el["board-empty"].classList.add("hidden");
     el["kanban-board"].classList.add("hidden");
     el["investigation-board"].classList.add("hidden");
+    el["code-map-board"].classList.add("hidden");
   }
 }
 
