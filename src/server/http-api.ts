@@ -37,9 +37,16 @@ import type {
   UpdateProjectInput,
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
+import type { CodeMapService } from "../application/code-map-service.js";
+import {
+  CodeMapInvestigationSyncError,
+  type CodeMapInvestigationSyncSelection,
+  type CodeMapInvestigationSyncService,
+} from "../application/code-map-investigation-sync.js";
 import { describeQuestBoardError, executeQuestBoardAgentTool } from "../adapters/agent-tools.js";
 import { createQuestBoardMcpHandler } from "../adapters/mcp/mcp-server.js";
 import type { QuestBoardDaemonIdentity } from "./daemon-identity.js";
+import type { QuestBoardCodeMapAvailability } from "./code-map-config.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const PROJECT_STATUSES = ["active", "archived"] as const satisfies readonly ProjectStatus[];
@@ -48,6 +55,9 @@ const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies
 export interface QuestBoardHttpServerOptions {
   webRoot?: string;
   daemonIdentity?: QuestBoardDaemonIdentity;
+  codeMapService?: CodeMapService;
+  codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  codeMapAvailability?: QuestBoardCodeMapAvailability;
 }
 
 export function createQuestBoardHttpServer(
@@ -91,7 +101,15 @@ async function handleRequest(
     const name = requireString(body, "name");
     const args = requireObjectValue(body.arguments ?? {}, "arguments");
     try {
-      sendJson(response, 200, { result: executeQuestBoardAgentTool(service, name, args) });
+      sendJson(response, 200, {
+        result: executeQuestBoardAgentTool(
+          options.codeMapInvestigationSyncService
+            ? { service, codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+            : service,
+          name,
+          args,
+        ),
+      });
     } catch (error) {
       sendJson(response, 200, { error: describeQuestBoardError(error) });
     }
@@ -102,7 +120,12 @@ async function handleRequest(
     requireDaemonClient(request);
     const body = await readJsonObject(request);
     const sessionId = requireString(body, "sessionId");
-    const mcpResponse = createQuestBoardMcpHandler(service, sessionId).handle(body.message);
+    const mcpResponse = createQuestBoardMcpHandler(
+      options.codeMapInvestigationSyncService
+        ? { service, codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+        : service,
+      sessionId,
+    ).handle(body.message);
     if (mcpResponse === null) {
       sendNoContent(response);
     } else {
@@ -146,6 +169,135 @@ async function handleRequest(
         ...optionalEnumProperty(body, "status", PROJECT_STATUSES),
       };
       sendJson(response, 200, { project: service.updateProject(projectId, input, actor, mutationOptions(request)) });
+      return;
+    }
+  }
+
+  const codeMapSyncMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/investigation-sync\/(preview|apply)$/);
+  if (codeMapSyncMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapSyncMatch[1]);
+    service.getProject(projectId);
+    const sync = options.codeMapInvestigationSyncService;
+    if (!sync) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_sync_unavailable",
+          message: "Code Map to Investigation sync is not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+
+    const body = await readJsonObject(request);
+    const selection: CodeMapInvestigationSyncSelection = {
+      ...optionalStringArrayProperty(body, "codeNodeIds"),
+      ...optionalBooleanProperty(body, "includeRelations"),
+      ...optionalBooleanProperty(body, "recreateDetached"),
+    };
+    if (codeMapSyncMatch[2] === "preview") {
+      sendJson(response, 200, { preview: sync.preview(projectId, selection) });
+      return;
+    }
+
+    const requestId = mutationOptions(request).requestId;
+    if (!requestId) {
+      throw new TypeError("Sync apply requires x-questboard-request-id or idempotency-key header");
+    }
+    sendJson(response, 200, {
+      result: sync.apply(
+        projectId,
+        {
+          ...selection,
+          expectedProjectionFingerprint: requireString(body, "expectedProjectionFingerprint"),
+        },
+        requireActor(request),
+        requestId,
+      ),
+    });
+    return;
+  }
+
+  const codeMapMatch = pathname.match(/^\/projects\/([^/]+)\/code-map$/);
+  if (codeMapMatch) {
+    const projectId = decodePathPart(codeMapMatch[1]);
+    const project = service.getProject(projectId);
+    const codeMapService = options.codeMapService;
+    const availability = options.codeMapAvailability;
+    const enabled = availability?.enabled ?? Boolean(codeMapService);
+    const available = availability?.available ?? Boolean(codeMapService);
+    const provider = availability?.provider ?? codeMapService?.providerId;
+
+    if (method === "GET") {
+      const cached = codeMapService?.getCached(projectId);
+      sendJson(response, 200, {
+        enabled,
+        available,
+        indexed: Boolean(cached),
+        ...(provider ? { provider } : {}),
+        ...(codeMapService ? { capabilities: codeMapService.capabilities } : {}),
+        ...(availability?.reason ? { reason: availability.reason } : {}),
+        ...(availability?.message ? { message: availability.message } : {}),
+        ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
+        graph: cached?.graph ?? null,
+        projection: cached?.projection ?? null,
+      });
+      return;
+    }
+
+    if (method === "POST") {
+      if (!codeMapService) {
+        sendJson(response, 503, {
+          enabled,
+          available: false,
+          ...(provider ? { provider } : {}),
+          ...(availability?.reason ? { reason: availability.reason } : {}),
+          ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
+          error: {
+            code: "code_map_unavailable",
+            message: availability?.message ?? "Code Map indexing is not enabled for this QuestBoard runtime",
+          },
+        });
+        return;
+      }
+      if (!project.rootPath) {
+        sendJson(response, 409, {
+          error: {
+            code: "code_map_root_missing",
+            message: "Project rootPath is required before indexing Code Map",
+          },
+        });
+        return;
+      }
+      let refreshed;
+      try {
+        refreshed = await codeMapService.refresh({ projectId, rootPath: project.rootPath });
+      } catch {
+        const cached = codeMapService.getCached(projectId);
+        sendJson(response, 503, {
+          enabled: true,
+          available: true,
+          indexed: Boolean(cached),
+          provider: codeMapService.providerId,
+          graph: cached?.graph ?? null,
+          projection: cached?.projection ?? null,
+          error: {
+            code: "code_map_provider_failed",
+            message: `Code Map provider ${codeMapService.providerId} failed to index this project`,
+          },
+        });
+        return;
+      }
+      sendJson(response, 200, {
+        enabled: true,
+        available: true,
+        indexed: true,
+        provider: codeMapService.providerId,
+        capabilities: codeMapService.capabilities,
+        mode: refreshed.mode,
+        changedArchitectureNodeIds: refreshed.changedArchitectureNodeIds,
+        graph: refreshed.graph,
+        projection: refreshed.projection,
+      });
       return;
     }
   }
@@ -592,6 +744,16 @@ function optionalStringArrayProperty<K extends string>(
   return { [key]: value as string[] } as Partial<Record<K, string[]>>;
 }
 
+function optionalBooleanProperty<K extends string>(
+  body: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, boolean>> {
+  if (!(key in body)) return {};
+  const value = body[key];
+  if (typeof value !== "boolean") throw new TypeError(`${key} must be a boolean`);
+  return { [key]: value } as Partial<Record<K, boolean>>;
+}
+
 function requireEnum<const T extends readonly string[]>(
   body: Record<string, unknown>,
   key: string,
@@ -649,6 +811,11 @@ function sendNoContent(response: ServerResponse): void {
 }
 
 function sendError(response: ServerResponse, error: unknown): void {
+  if (error instanceof CodeMapInvestigationSyncError) {
+    const statusCode = error.code === "code_map_sync_invalid_selection" ? 400 : 409;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
   if (error instanceof EntityNotFoundError) {
     sendJson(response, 404, { error: { code: "not_found", message: error.message } });
     return;

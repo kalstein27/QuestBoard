@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import type { QuestBoardService } from "../../application/quest-board-service.js";
 import {
   describeQuestBoardError,
   executeQuestBoardAgentTool,
   QUESTBOARD_AGENT_TOOLS,
+  type QuestBoardAgentToolRuntime,
 } from "../agent-tools.js";
 
 const SUPPORTED_PROTOCOL_VERSION = "2025-06-18";
@@ -34,6 +34,7 @@ const MUTATING_TOOLS = new Set([
   "questboard_unlink_investigation_item_from_node",
   "questboard_attach_existing_task_to_investigation",
   "questboard_reorder_investigation_items",
+  "questboard_apply_code_map_investigation_sync",
   "questboard_apply_migration_batch",
 ]);
 
@@ -63,7 +64,7 @@ export interface QuestBoardMcpHandler {
 }
 
 export function createQuestBoardMcpHandler(
-  service: QuestBoardService,
+  runtime: QuestBoardAgentToolRuntime,
   sessionId: string = randomUUID(),
 ): QuestBoardMcpHandler {
   return {
@@ -105,7 +106,7 @@ export function createQuestBoardMcpHandler(
               ? { ...rawArgs, requestId: automaticMutationRequestId(sessionId, request.id, name, rawArgs) }
               : rawArgs;
             try {
-              const result = executeQuestBoardAgentTool(service, name, args);
+              const result = executeQuestBoardAgentTool(runtime, name, args);
               return rpcSuccess(request.id, toolResult(result));
             } catch (error) {
               const described = describeQuestBoardError(error);
@@ -127,11 +128,11 @@ export function createQuestBoardMcpHandler(
 }
 
 export async function runQuestBoardMcpStdio(
-  service: QuestBoardService,
+  runtime: QuestBoardAgentToolRuntime,
   input: Readable = process.stdin,
   output: Writable = process.stdout,
 ): Promise<void> {
-  const handler = createQuestBoardMcpHandler(service);
+  const handler = createQuestBoardMcpHandler(runtime);
   const lines = createInterface({ input, crlfDelay: Infinity, terminal: false });
 
   for await (const line of lines) {

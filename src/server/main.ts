@@ -1,8 +1,10 @@
 import { mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { QuestBoardService } from "../application/quest-board-service.js";
+import { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
 import { createStderrConcurrencyDiagnosticSink } from "../observability/concurrency-log.js";
 import { SqliteQuestBoardRepository } from "../storage/sqlite/sqlite-quest-board-repository.js";
+import { createConfiguredCodeMapRuntime } from "./code-map-config.js";
 import { pinQuestBoardDaemonIdentity, QUESTBOARD_DAEMON_PROTOCOL } from "./daemon-identity.js";
 import { startQuestBoardHttpRuntime } from "./runtime.js";
 import {
@@ -26,10 +28,17 @@ const daemonIdentity = pinQuestBoardDaemonIdentity({
   databasePath: canonicalDatabasePath,
 });
 const service = new QuestBoardService(repository, undefined, undefined, createStderrConcurrencyDiagnosticSink());
+const codeMapRuntime = createConfiguredCodeMapRuntime();
+const codeMapInvestigationSyncService = codeMapRuntime.service
+  ? new CodeMapInvestigationSyncService(codeMapRuntime.service, repository)
+  : undefined;
 const tailnetMode = process.argv.includes("--tailnet") || process.env.QUESTBOARD_TAILNET === "1";
 const httpRuntime = await startQuestBoardHttpRuntime(service, {
   tailnetMode,
   daemonIdentity,
+  ...(codeMapRuntime.service ? { codeMapService: codeMapRuntime.service } : {}),
+  ...(codeMapInvestigationSyncService ? { codeMapInvestigationSyncService } : {}),
+  codeMapAvailability: codeMapRuntime.availability,
   log: (message) => console.log(message),
 });
 const managedHealthRuntime = managedServiceMode

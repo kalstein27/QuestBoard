@@ -12,6 +12,10 @@ import type {
   Task,
   TaskStatus,
 } from "../core/domain.js";
+import type {
+  CodeMapInvestigationNodeBinding,
+  CodeMapInvestigationRelationBinding,
+} from "./code-map-investigation-sync.js";
 
 export interface MutationRequest {
   requestId: string;
@@ -84,6 +88,16 @@ export interface QuestBoardRepository {
   createInvestigationItemTaskLink(link: InvestigationItemTaskLink): InvestigationItemTaskLink;
   listInvestigationItemTaskLinks(projectId: string): InvestigationItemTaskLink[];
   deleteInvestigationItemTaskLink(itemId: string, taskId: string): void;
+
+  getCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): CodeMapInvestigationNodeBinding | undefined;
+  listCodeMapInvestigationNodeBindings(projectId: string): CodeMapInvestigationNodeBinding[];
+  upsertCodeMapInvestigationNodeBinding(binding: CodeMapInvestigationNodeBinding): CodeMapInvestigationNodeBinding;
+  deleteCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): void;
+
+  getCodeMapInvestigationRelationBinding(projectId: string, codeRelationId: string): CodeMapInvestigationRelationBinding | undefined;
+  listCodeMapInvestigationRelationBindings(projectId: string): CodeMapInvestigationRelationBinding[];
+  upsertCodeMapInvestigationRelationBinding(binding: CodeMapInvestigationRelationBinding): CodeMapInvestigationRelationBinding;
+  deleteCodeMapInvestigationRelationBinding(projectId: string, codeRelationId: string): void;
 
   listBoardPositions(projectId: string): BoardNodePosition[];
   upsertBoardPosition(position: BoardNodePosition): BoardNodePosition;

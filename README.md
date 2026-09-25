@@ -84,6 +84,21 @@ On first start, that database receives a stable UUID and the daemon pins it to t
 | `QUESTBOARD_ACTOR_ID` | Default CLI actor ID | `cli:local` |
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
+| `QUESTBOARD_CODE_MAP` | Set to `1` or `true` to enable Code Map indexing | disabled |
+| `QUESTBOARD_CODE_MAP_PROVIDER` | Code intelligence provider: `scip-typescript` or optional `gitnexus` | `scip-typescript` |
+| `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
+| `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | `scip-typescript` executable path/name | `scip-typescript` |
+| `QUESTBOARD_SCIP_EXECUTABLE` | `scip` CLI executable path/name | `scip` |
+| `QUESTBOARD_GITNEXUS_EXECUTABLE` | Optional GitNexus executable path/name | `gitnexus` |
+
+### Code Map provider setup
+
+Code Map is opt-in, but when enabled its default provider is **SCIP TypeScript**. QuestBoard does not bundle the SCIP executables and keeps its zero-runtime-npm-dependency foundation. Install the `scip-typescript` indexer and `scip` CLI separately, make both visible on the daemon's `PATH`, or point QuestBoard at them with `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` and `QUESTBOARD_SCIP_EXECUTABLE`.
+
+If the configured executables are missing, QuestBoard still starts normally: Task, Investigation, MCP, CLI, and Web functionality stay available while Code Map reports a fail-closed `unavailable` state with a setup hint. Generated Code Map indexes live outside the repository under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`.
+
+GitNexus remains available as an explicit optional compatibility and regression-comparison provider by setting `QUESTBOARD_CODE_MAP_PROVIDER=gitnexus` and making `gitnexus` available on `PATH` (or configuring `QUESTBOARD_GITNEXUS_EXECUTABLE`). It is not required for the default Code Map flow.
+Older GitNexus PoC measurements are retained as historical comparison evidence, while current operational setup and default-provider behavior follow this section and use SCIP TypeScript unless `gitnexus` is selected explicitly.
 
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 

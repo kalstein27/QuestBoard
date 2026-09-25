@@ -3,7 +3,10 @@ import { dirname, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { QuestBoardService } from "../application/quest-board-service.js";
+import type { CodeMapService } from "../application/code-map-service.js";
+import type { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
 import type { QuestBoardDaemonIdentity } from "./daemon-identity.js";
+import type { QuestBoardCodeMapAvailability } from "./code-map-config.js";
 import { createQuestBoardHttpServer } from "./http-api.js";
 import { findTailscaleIpv4 } from "./network.js";
 
@@ -16,6 +19,9 @@ export interface QuestBoardHttpRuntimeOptions {
   tailnetMode?: boolean;
   webRoot?: string;
   daemonIdentity?: QuestBoardDaemonIdentity;
+  codeMapService?: CodeMapService;
+  codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  codeMapAvailability?: QuestBoardCodeMapAvailability;
   log?: (message: string) => void;
 }
 
@@ -42,6 +48,9 @@ export async function startQuestBoardHttpRuntime(
   const server = createQuestBoardHttpServer(service, {
     webRoot,
     ...(options.daemonIdentity ? { daemonIdentity: options.daemonIdentity } : {}),
+    ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+    ...(options.codeMapInvestigationSyncService ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService } : {}),
+    ...(options.codeMapAvailability ? { codeMapAvailability: options.codeMapAvailability } : {}),
   });
   await listen(server, requestedPort, host);
 

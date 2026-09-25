@@ -34,6 +34,11 @@ import type {
   UpdateInvestigationNodeInput,
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
+import {
+  CodeMapInvestigationSyncError,
+  type CodeMapInvestigationSyncSelection,
+  type CodeMapInvestigationSyncService,
+} from "../application/code-map-investigation-sync.js";
 
 const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
 
@@ -42,6 +47,13 @@ export interface QuestBoardAgentToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
 }
+
+export interface QuestBoardAgentToolContext {
+  service: QuestBoardService;
+  codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+}
+
+export type QuestBoardAgentToolRuntime = QuestBoardService | QuestBoardAgentToolContext;
 
 export class QuestBoardRemoteToolError extends Error {
   constructor(
@@ -596,6 +608,39 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_preview_code_map_investigation_sync",
+    description: "Preview extraction/synchronization of Code Map architecture nodes and relations into the Investigation graph without mutating it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        codeNodeIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        includeRelations: { type: "boolean" },
+        recreateDetached: { type: "boolean" },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_apply_code_map_investigation_sync",
+    description: "Apply a previously previewed Code Map to Investigation sync transactionally using the exact projection fingerprint.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        codeNodeIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        includeRelations: { type: "boolean" },
+        recreateDetached: { type: "boolean" },
+        expectedProjectionFingerprint: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "expectedProjectionFingerprint", "actor"],
+    },
+  },
+  {
     name: "questboard_apply_migration_batch",
     description: "Apply an all-or-nothing project migration batch for existing-Task attachment, legacy cleanup, and Item reorder.",
     inputSchema: {
@@ -615,10 +660,12 @@ export const QUESTBOARD_AGENT_TOOLS = [
 export type QuestBoardAgentToolName = (typeof QUESTBOARD_AGENT_TOOLS)[number]["name"];
 
 export function executeQuestBoardAgentTool(
-  service: QuestBoardService,
+  runtime: QuestBoardAgentToolRuntime,
   name: string,
   input: unknown = {},
 ): unknown {
+  const context = normalizeAgentToolRuntime(runtime);
+  const service = context.service;
   const args = requireObject(input, "arguments");
 
   switch (name) {
@@ -828,6 +875,26 @@ export function executeQuestBoardAgentTool(
           requireString(args, "nodeId"), requireStringArray(args, "orderedItemIds"), requireActor(args), mutationOptions(args),
         ),
       };
+    case "questboard_preview_code_map_investigation_sync": {
+      const sync = requireCodeMapInvestigationSyncService(context);
+      return {
+        preview: sync.preview(requireString(args, "projectId"), codeMapSyncSelection(args)),
+      };
+    }
+    case "questboard_apply_code_map_investigation_sync": {
+      const sync = requireCodeMapInvestigationSyncService(context);
+      return {
+        result: sync.apply(
+          requireString(args, "projectId"),
+          {
+            ...codeMapSyncSelection(args),
+            expectedProjectionFingerprint: requireString(args, "expectedProjectionFingerprint"),
+          },
+          requireActor(args),
+          requireString(args, "requestId"),
+        ),
+      };
+    }
     case "questboard_apply_migration_batch": {
       const inputValue: ApplyMigrationBatchInput = {
         projectId: requireString(args, "projectId"),
@@ -842,6 +909,7 @@ export function executeQuestBoardAgentTool(
 
 export function describeQuestBoardError(error: unknown): { code: string; message: string } {
   if (error instanceof QuestBoardRemoteToolError) return { code: error.code, message: error.message };
+  if (error instanceof CodeMapInvestigationSyncError) return { code: error.code, message: error.message };
   if (error instanceof EntityNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof ClaimConflictError) return { code: "claim_conflict", message: error.message };
   if (error instanceof ClaimNotFoundError) return { code: "claim_not_found", message: error.message };
@@ -852,6 +920,29 @@ export function describeQuestBoardError(error: unknown): { code: string; message
   if (error instanceof EntityRevisionConflictError) return { code: "revision_conflict", message: error.message };
   if (error instanceof TypeError) return { code: "bad_request", message: error.message };
   return { code: "internal_error", message: "Internal error" };
+}
+
+function normalizeAgentToolRuntime(runtime: QuestBoardAgentToolRuntime): QuestBoardAgentToolContext {
+  if ("service" in runtime) return runtime;
+  return { service: runtime };
+}
+
+function requireCodeMapInvestigationSyncService(context: QuestBoardAgentToolContext): CodeMapInvestigationSyncService {
+  if (!context.codeMapInvestigationSyncService) {
+    throw new QuestBoardRemoteToolError(
+      "code_map_sync_unavailable",
+      "Code Map to Investigation sync is not available in this QuestBoard runtime",
+    );
+  }
+  return context.codeMapInvestigationSyncService;
+}
+
+function codeMapSyncSelection(args: Record<string, unknown>): CodeMapInvestigationSyncSelection {
+  return {
+    ...optionalStringArrayProperty(args, "codeNodeIds"),
+    ...optionalBooleanProperty(args, "includeRelations"),
+    ...optionalBooleanProperty(args, "recreateDetached"),
+  };
 }
 
 function requireActor(args: Record<string, unknown>): ActorRef {
@@ -983,6 +1074,16 @@ function optionalStringArrayProperty<K extends string>(
     throw new TypeError(`${key} must be an array of strings`);
   }
   return { [key]: item as string[] } as Partial<Record<K, string[]>>;
+}
+
+function optionalBooleanProperty<K extends string>(
+  value: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, boolean>> {
+  if (!(key in value)) return {};
+  const item = value[key];
+  if (typeof item !== "boolean") throw new TypeError(`${key} must be a boolean`);
+  return { [key]: item } as Partial<Record<K, boolean>>;
 }
 
 function requireEnum<const T extends readonly string[]>(

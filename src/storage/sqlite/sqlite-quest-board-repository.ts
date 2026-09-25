@@ -37,6 +37,11 @@ import type {
   QuestBoardRepository,
   TaskListFilter,
 } from "../../application/quest-board-repository.js";
+import type {
+  CodeMapInvestigationBindingState,
+  CodeMapInvestigationNodeBinding,
+  CodeMapInvestigationRelationBinding,
+} from "../../application/code-map-investigation-sync.js";
 
 type ProjectRow = {
   id: string;
@@ -166,6 +171,35 @@ type InvestigationItemTaskLinkRow = {
   task_id: string;
   sort_order: number;
   created_at: string;
+};
+
+type CodeMapInvestigationNodeBindingRow = {
+  project_id: string;
+  code_node_id: string;
+  investigation_node_id: string | null;
+  source_kind: CodeMapInvestigationNodeBinding["sourceKind"];
+  source_title: string;
+  source_fingerprint: string;
+  source_indexed_at: string;
+  sync_state: CodeMapInvestigationBindingState;
+  first_synced_at: string;
+  last_synced_at: string;
+};
+
+type CodeMapInvestigationRelationBindingRow = {
+  project_id: string;
+  code_relation_id: string;
+  from_code_node_id: string;
+  to_code_node_id: string;
+  investigation_item_id: string | null;
+  investigation_item_link_id: string | null;
+  relation_kind: CodeMapInvestigationRelationBinding["relationKind"];
+  source_relation_ids_json: string;
+  source_fingerprint: string;
+  source_indexed_at: string;
+  sync_state: CodeMapInvestigationBindingState;
+  first_synced_at: string;
+  last_synced_at: string;
 };
 
 export class SqliteQuestBoardRepository implements QuestBoardRepository {
@@ -673,6 +707,108 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     this.db.prepare("DELETE FROM investigation_item_tasks WHERE item_id = ? AND task_id = ?").run(itemId, taskId);
   }
 
+  getCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): CodeMapInvestigationNodeBinding | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM code_map_investigation_node_bindings WHERE project_id = ? AND code_node_id = ?")
+      .get(projectId, codeNodeId) as CodeMapInvestigationNodeBindingRow | undefined;
+    return row ? mapCodeMapInvestigationNodeBinding(row) : undefined;
+  }
+
+  listCodeMapInvestigationNodeBindings(projectId: string): CodeMapInvestigationNodeBinding[] {
+    return (this.db
+      .prepare("SELECT * FROM code_map_investigation_node_bindings WHERE project_id = ? ORDER BY code_node_id ASC")
+      .all(projectId) as CodeMapInvestigationNodeBindingRow[]).map(mapCodeMapInvestigationNodeBinding);
+  }
+
+  upsertCodeMapInvestigationNodeBinding(binding: CodeMapInvestigationNodeBinding): CodeMapInvestigationNodeBinding {
+    this.db.prepare(`
+      INSERT INTO code_map_investigation_node_bindings (
+        project_id, code_node_id, investigation_node_id, source_kind, source_title,
+        source_fingerprint, source_indexed_at, sync_state, first_synced_at, last_synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, code_node_id) DO UPDATE SET
+        investigation_node_id = excluded.investigation_node_id,
+        source_kind = excluded.source_kind,
+        source_title = excluded.source_title,
+        source_fingerprint = excluded.source_fingerprint,
+        source_indexed_at = excluded.source_indexed_at,
+        sync_state = excluded.sync_state,
+        last_synced_at = excluded.last_synced_at
+    `).run(
+      binding.projectId,
+      binding.codeNodeId,
+      binding.investigationNodeId ?? null,
+      binding.sourceKind,
+      binding.sourceTitle,
+      binding.sourceFingerprint,
+      binding.sourceIndexedAt,
+      binding.syncState,
+      binding.firstSyncedAt,
+      binding.lastSyncedAt,
+    );
+    return this.getCodeMapInvestigationNodeBinding(binding.projectId, binding.codeNodeId)!;
+  }
+
+  deleteCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): void {
+    this.db.prepare("DELETE FROM code_map_investigation_node_bindings WHERE project_id = ? AND code_node_id = ?")
+      .run(projectId, codeNodeId);
+  }
+
+  getCodeMapInvestigationRelationBinding(projectId: string, codeRelationId: string): CodeMapInvestigationRelationBinding | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM code_map_investigation_relation_bindings WHERE project_id = ? AND code_relation_id = ?")
+      .get(projectId, codeRelationId) as CodeMapInvestigationRelationBindingRow | undefined;
+    return row ? mapCodeMapInvestigationRelationBinding(row) : undefined;
+  }
+
+  listCodeMapInvestigationRelationBindings(projectId: string): CodeMapInvestigationRelationBinding[] {
+    return (this.db
+      .prepare("SELECT * FROM code_map_investigation_relation_bindings WHERE project_id = ? ORDER BY code_relation_id ASC")
+      .all(projectId) as CodeMapInvestigationRelationBindingRow[]).map(mapCodeMapInvestigationRelationBinding);
+  }
+
+  upsertCodeMapInvestigationRelationBinding(binding: CodeMapInvestigationRelationBinding): CodeMapInvestigationRelationBinding {
+    this.db.prepare(`
+      INSERT INTO code_map_investigation_relation_bindings (
+        project_id, code_relation_id, from_code_node_id, to_code_node_id,
+        investigation_item_id, investigation_item_link_id, relation_kind,
+        source_relation_ids_json, source_fingerprint, source_indexed_at,
+        sync_state, first_synced_at, last_synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, code_relation_id) DO UPDATE SET
+        from_code_node_id = excluded.from_code_node_id,
+        to_code_node_id = excluded.to_code_node_id,
+        investigation_item_id = excluded.investigation_item_id,
+        investigation_item_link_id = excluded.investigation_item_link_id,
+        relation_kind = excluded.relation_kind,
+        source_relation_ids_json = excluded.source_relation_ids_json,
+        source_fingerprint = excluded.source_fingerprint,
+        source_indexed_at = excluded.source_indexed_at,
+        sync_state = excluded.sync_state,
+        last_synced_at = excluded.last_synced_at
+    `).run(
+      binding.projectId,
+      binding.codeRelationId,
+      binding.fromCodeNodeId,
+      binding.toCodeNodeId,
+      binding.investigationItemId ?? null,
+      binding.investigationItemLinkId ?? null,
+      binding.relationKind,
+      JSON.stringify([...binding.sourceRelationIds]),
+      binding.sourceFingerprint,
+      binding.sourceIndexedAt,
+      binding.syncState,
+      binding.firstSyncedAt,
+      binding.lastSyncedAt,
+    );
+    return this.getCodeMapInvestigationRelationBinding(binding.projectId, binding.codeRelationId)!;
+  }
+
+  deleteCodeMapInvestigationRelationBinding(projectId: string, codeRelationId: string): void {
+    this.db.prepare("DELETE FROM code_map_investigation_relation_bindings WHERE project_id = ? AND code_relation_id = ?")
+      .run(projectId, codeRelationId);
+  }
+
   listBoardPositions(projectId: string): BoardNodePosition[] {
     const rows = this.db
       .prepare("SELECT * FROM board_positions WHERE project_id = ? ORDER BY entity_type ASC, entity_id ASC")
@@ -869,6 +1005,67 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (project_id, entity_type, entity_id)
       );
+
+      CREATE TABLE IF NOT EXISTS code_map_investigation_node_bindings (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        code_node_id TEXT NOT NULL,
+        investigation_node_id TEXT UNIQUE REFERENCES investigation_nodes(id) ON DELETE SET NULL,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('http_api', 'agent_mcp', 'application_service', 'repository_contract', 'sqlite_repository', 'sqlite')),
+        source_title TEXT NOT NULL,
+        source_fingerprint TEXT NOT NULL,
+        source_indexed_at TEXT NOT NULL,
+        sync_state TEXT NOT NULL CHECK (sync_state IN ('active', 'stale', 'detached')),
+        first_synced_at TEXT NOT NULL,
+        last_synced_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, code_node_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS code_map_investigation_node_bindings_project_state_idx
+        ON code_map_investigation_node_bindings(project_id, sync_state);
+
+      CREATE TABLE IF NOT EXISTS code_map_investigation_relation_bindings (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        code_relation_id TEXT NOT NULL,
+        from_code_node_id TEXT NOT NULL,
+        to_code_node_id TEXT NOT NULL,
+        investigation_item_id TEXT UNIQUE REFERENCES investigation_items(id) ON DELETE SET NULL,
+        investigation_item_link_id TEXT UNIQUE REFERENCES investigation_item_links(id) ON DELETE SET NULL,
+        relation_kind TEXT NOT NULL CHECK (relation_kind IN ('invokes', 'depends_on_contract', 'implemented_by', 'persists_to')),
+        source_relation_ids_json TEXT NOT NULL DEFAULT '[]',
+        source_fingerprint TEXT NOT NULL,
+        source_indexed_at TEXT NOT NULL,
+        sync_state TEXT NOT NULL CHECK (sync_state IN ('active', 'stale', 'detached')),
+        first_synced_at TEXT NOT NULL,
+        last_synced_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, code_relation_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS code_map_investigation_relation_bindings_project_state_idx
+        ON code_map_investigation_relation_bindings(project_id, sync_state);
+
+      CREATE TRIGGER IF NOT EXISTS code_map_investigation_node_binding_detach
+      BEFORE DELETE ON investigation_nodes
+      FOR EACH ROW BEGIN
+        UPDATE code_map_investigation_node_bindings
+        SET investigation_node_id = NULL, sync_state = 'detached'
+        WHERE investigation_node_id = OLD.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS code_map_investigation_relation_item_binding_detach
+      BEFORE DELETE ON investigation_items
+      FOR EACH ROW BEGIN
+        UPDATE code_map_investigation_relation_bindings
+        SET investigation_item_id = NULL, sync_state = 'detached'
+        WHERE investigation_item_id = OLD.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS code_map_investigation_relation_link_binding_detach
+      BEFORE DELETE ON investigation_item_links
+      FOR EACH ROW BEGIN
+        UPDATE code_map_investigation_relation_bindings
+        SET investigation_item_link_id = NULL, sync_state = 'detached'
+        WHERE investigation_item_link_id = OLD.id;
+      END;
     `);
 
     const claimColumns = this.db.prepare("PRAGMA table_info(claims)").all() as Array<{ name: string }>;
@@ -1092,4 +1289,37 @@ function mapInvestigationItemLink(row: InvestigationItemLinkRow): InvestigationI
 
 function mapInvestigationItemTaskLink(row: InvestigationItemTaskLinkRow): InvestigationItemTaskLink {
   return { itemId: row.item_id, taskId: row.task_id, sortOrder: row.sort_order, createdAt: row.created_at };
+}
+
+function mapCodeMapInvestigationNodeBinding(row: CodeMapInvestigationNodeBindingRow): CodeMapInvestigationNodeBinding {
+  return {
+    projectId: row.project_id,
+    codeNodeId: row.code_node_id,
+    sourceKind: row.source_kind,
+    sourceTitle: row.source_title,
+    sourceFingerprint: row.source_fingerprint,
+    sourceIndexedAt: row.source_indexed_at,
+    syncState: row.sync_state,
+    firstSyncedAt: row.first_synced_at,
+    lastSyncedAt: row.last_synced_at,
+    ...(row.investigation_node_id ? { investigationNodeId: row.investigation_node_id } : {}),
+  };
+}
+
+function mapCodeMapInvestigationRelationBinding(row: CodeMapInvestigationRelationBindingRow): CodeMapInvestigationRelationBinding {
+  return {
+    projectId: row.project_id,
+    codeRelationId: row.code_relation_id,
+    fromCodeNodeId: row.from_code_node_id,
+    toCodeNodeId: row.to_code_node_id,
+    relationKind: row.relation_kind,
+    sourceRelationIds: JSON.parse(row.source_relation_ids_json) as string[],
+    sourceFingerprint: row.source_fingerprint,
+    sourceIndexedAt: row.source_indexed_at,
+    syncState: row.sync_state,
+    firstSyncedAt: row.first_synced_at,
+    lastSyncedAt: row.last_synced_at,
+    ...(row.investigation_item_id ? { investigationItemId: row.investigation_item_id } : {}),
+    ...(row.investigation_item_link_id ? { investigationItemLinkId: row.investigation_item_link_id } : {}),
+  };
 }

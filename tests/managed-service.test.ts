@@ -33,6 +33,12 @@ test("package declares a generic managed service launch and bounded health contr
       "QUESTBOARD_IDENTITY_PATH",
       "QUESTBOARD_PORT",
       "QUESTBOARD_CONCURRENCY_LOG",
+      "QUESTBOARD_CODE_MAP",
+      "QUESTBOARD_CODE_MAP_PROVIDER",
+      "QUESTBOARD_CODE_MAP_STORAGE_ROOT",
+      "QUESTBOARD_GITNEXUS_EXECUTABLE",
+      "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
+      "QUESTBOARD_SCIP_EXECUTABLE",
     ],
   });
   assert.deepEqual(service?.health, {
