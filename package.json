@@ -11,7 +11,11 @@
     "managedService": {
       "launch": {
         "command": "node",
-        "args": ["dist/src/server/main.js", "--tailnet", "--managed-service"],
+        "args": [
+          "dist/src/server/main.js",
+          "--tailnet",
+          "--managed-service"
+        ],
         "cwdRelative": ".",
         "inheritEnvKeys": [
           "QUESTBOARD_DB_PATH",
@@ -22,8 +26,7 @@
           "QUESTBOARD_CODE_MAP_PROVIDER",
           "QUESTBOARD_CODE_MAP_STORAGE_ROOT",
           "QUESTBOARD_GITNEXUS_EXECUTABLE",
-          "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
-          "QUESTBOARD_SCIP_EXECUTABLE"
+          "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE"
         ]
       },
       "health": {
@@ -47,6 +50,9 @@
     "mcp": "node dist/src/adapters/mcp/main.js",
     "test:race": "npm run build && node dist/src/testing/claim-race-main.js",
     "verify": "npm run typecheck && npm run check:web && npm test && npm run test:race"
+  },
+  "dependencies": {
+    "@sourcegraph/scip-typescript": "0.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   CodeGraphSnapshot,
   CodeIndexRequest,
@@ -80,8 +82,45 @@ export class ScipProcessError extends Error {
 export interface ScipTypeScriptProviderOptions {
   storageRoot: string;
   indexerExecutable?: string;
-  scipExecutable?: string;
+  indexReader?: ScipIndexReader;
   now?: () => string;
+}
+
+export interface ScipIndexReader {
+  read(indexPath: string): Promise<ScipJsonIndex>;
+}
+
+interface BundledScipDecoder {
+  Index: {
+    deserializeBinary(bytes: Uint8Array): { toObject(): unknown };
+  };
+}
+
+const require = createRequire(import.meta.url);
+let bundledScipDecoderPromise: Promise<BundledScipDecoder> | undefined;
+
+async function bundledScipDecoder(): Promise<BundledScipDecoder> {
+  bundledScipDecoderPromise ??= (async () => {
+    const decoderPath = require.resolve("@sourcegraph/scip-typescript/dist/src/scip.js");
+    const module = await import(pathToFileURL(decoderPath).href) as {
+      scip?: BundledScipDecoder;
+      default?: { scip?: BundledScipDecoder };
+    };
+    const decoder = module.scip ?? module.default?.scip;
+    if (!decoder?.Index?.deserializeBinary) {
+      throw new Error("Bundled scip-typescript decoder is unavailable");
+    }
+    return decoder;
+  })();
+  return await bundledScipDecoderPromise;
+}
+
+class BundledScipIndexReader implements ScipIndexReader {
+  async read(indexPath: string): Promise<ScipJsonIndex> {
+    const decoder = await bundledScipDecoder();
+    const raw = decoder.Index.deserializeBinary(readFileSync(indexPath)).toObject();
+    return parseScipJsonIndex(raw);
+  }
 }
 
 function indexDirectory(storageRoot: string, request: CodeIndexRequest): string {
@@ -119,7 +158,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
   readonly #runner: ScipProcessRunner;
   readonly #storageRoot: string;
   readonly #indexerExecutable: string;
-  readonly #scipExecutable: string;
+  readonly #indexReader: ScipIndexReader;
   readonly #now: () => string;
 
   constructor(runner: ScipProcessRunner, options: ScipTypeScriptProviderOptions) {
@@ -127,7 +166,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
     this.#runner = runner;
     this.#storageRoot = options.storageRoot;
     this.#indexerExecutable = options.indexerExecutable?.trim() || "scip-typescript";
-    this.#scipExecutable = options.scipExecutable?.trim() || "scip";
+    this.#indexReader = options.indexReader ?? new BundledScipIndexReader();
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -142,19 +181,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
       ["index", "--output", indexPath],
       { cwd: request.rootPath },
     );
-    const printed = await this.#runner.run(
-      this.#scipExecutable,
-      ["print", "--json", indexPath],
-      { cwd: outputDirectory },
-    );
-
-    let raw: unknown;
-    try {
-      raw = JSON.parse(printed.stdout);
-    } catch (error) {
-      throw new Error("scip print --json returned invalid JSON", { cause: error });
-    }
-    const index = parseScipJsonIndex(raw);
+    const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
       projectId: request.projectId,
       rootPath: request.rootPath,

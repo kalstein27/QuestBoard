@@ -5,10 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ScipTypeScriptCodeIntelligenceProvider,
+  type ScipIndexReader,
   type ScipProcessRunOptions,
   type ScipProcessRunResult,
   type ScipProcessRunner,
 } from "../src/adapters/code-intelligence/scip-provider.js";
+import { parseScipJsonIndex } from "../src/adapters/code-intelligence/scip-normalizer.js";
 
 interface Call {
   executable: string;
@@ -36,6 +38,18 @@ function success(stdout = ""): ScipProcessRunResult {
   return { stdout, stderr: "", exitCode: 0 };
 }
 
+class FakeIndexReader implements ScipIndexReader {
+  readonly #json: string;
+
+  constructor(json: string) {
+    this.#json = json;
+  }
+
+  async read() {
+    return parseScipJsonIndex(JSON.parse(this.#json));
+  }
+}
+
 const fixture = JSON.stringify({
   documents: [{
     relativePath: "src/application/quest-board-service.ts",
@@ -50,14 +64,14 @@ const fixture = JSON.stringify({
   }],
 });
 
-test("SCIP TypeScript provider keeps index.scip outside the repository and normalizes scip print JSON", async () => {
+test("SCIP TypeScript provider keeps index.scip outside the repository and normalizes the bundled decoder result", async () => {
   const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-"));
   try {
-    const runner = new FakeRunner([success(), success(fixture)]);
+    const runner = new FakeRunner([success()]);
     const provider = new ScipTypeScriptCodeIntelligenceProvider(runner, {
       storageRoot,
       indexerExecutable: "scip-typescript-test",
-      scipExecutable: "scip-test",
+      indexReader: new FakeIndexReader(fixture),
       now: () => "2026-09-23T00:00:00.000Z",
     });
 
@@ -75,9 +89,7 @@ test("SCIP TypeScript provider keeps index.scip outside the repository and norma
     assert.equal(outputPath.startsWith("/workspace/questboard"), false);
     assert.equal(outputPath.endsWith("/index.scip"), true);
     assert.equal(runner.calls[0]?.options.cwd, "/workspace/questboard");
-    assert.equal(runner.calls[1]?.executable, "scip-test");
-    assert.deepEqual(runner.calls[1]?.args, ["print", "--json", outputPath]);
-    assert.equal(runner.calls[1]?.options.cwd, join(outputPath, ".."));
+    assert.equal(runner.calls.length, 1, "provider should not require a separate scip CLI print step");
   } finally {
     rmSync(storageRoot, { recursive: true, force: true });
   }
@@ -121,11 +133,11 @@ test("SCIP provider enriches call relations from indexed source text", async () 
         },
       ],
     });
-    const runner = new FakeRunner([success(), success(liveFixture)]);
+    const runner = new FakeRunner([success()]);
     const provider = new ScipTypeScriptCodeIntelligenceProvider(runner, {
       storageRoot,
       indexerExecutable: "scip-typescript-test",
-      scipExecutable: "scip-test",
+      indexReader: new FakeIndexReader(liveFixture),
       now: () => "2026-09-23T00:00:00.000Z",
     });
 

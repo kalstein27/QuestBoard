@@ -16,7 +16,6 @@ export type QuestBoardCodeMapProvider = "gitnexus" | "scip-typescript";
 export interface QuestBoardCodeMapConfig {
   provider: QuestBoardCodeMapProvider;
   executable: string;
-  scipExecutable: string;
   storageRoot: string;
 }
 
@@ -36,8 +35,17 @@ export interface QuestBoardCodeMapRuntime {
   availability: QuestBoardCodeMapAvailability;
 }
 
+export function withManagedServiceCodeMapDefault(
+  env: NodeJS.ProcessEnv = process.env,
+  managedServiceMode = false,
+): NodeJS.ProcessEnv {
+  if (!managedServiceMode || env.QUESTBOARD_CODE_MAP?.trim()) return env;
+  return { ...env, QUESTBOARD_CODE_MAP: "1" };
+}
+
 export function resolveQuestBoardCodeMapConfig(
   env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
 ): QuestBoardCodeMapConfig | null {
   const enabled = env.QUESTBOARD_CODE_MAP?.trim().toLowerCase();
   if (enabled !== "1" && enabled !== "true") return null;
@@ -48,9 +56,9 @@ export function resolveQuestBoardCodeMapConfig(
   }
   const provider: QuestBoardCodeMapProvider = requestedProvider;
   const executable = provider === "scip-typescript"
-    ? env.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE?.trim() || "scip-typescript"
+    ? env.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE?.trim()
+      || join(cwd, "node_modules", ".bin", process.platform === "win32" ? "scip-typescript.cmd" : "scip-typescript")
     : env.QUESTBOARD_GITNEXUS_EXECUTABLE?.trim() || "gitnexus";
-  const scipExecutable = env.QUESTBOARD_SCIP_EXECUTABLE?.trim() || "scip";
   const configuredStorageRoot = env.QUESTBOARD_CODE_MAP_STORAGE_ROOT?.trim();
   const dataHome = env.XDG_DATA_HOME?.trim()
     ? resolve(env.XDG_DATA_HOME.trim())
@@ -59,7 +67,7 @@ export function resolveQuestBoardCodeMapConfig(
     ? resolve(configuredStorageRoot)
     : join(dataHome, "questboard", "code-map");
 
-  return { provider, executable, scipExecutable, storageRoot };
+  return { provider, executable, storageRoot };
 }
 
 export function createConfiguredCodeMapService(
@@ -75,7 +83,6 @@ export function createConfiguredCodeMapService(
       {
         storageRoot: config.storageRoot,
         indexerExecutable: config.executable,
-        scipExecutable: config.scipExecutable,
       },
     );
     return new CodeMapService(provider);
@@ -134,17 +141,13 @@ export function createConfiguredCodeMapRuntime(
   }
 
   const executable = findQuestBoardCodeMapExecutable(config.executable, env);
-  const scipExecutable = config.provider === "scip-typescript"
-    ? findQuestBoardCodeMapExecutable(config.scipExecutable, env)
-    : undefined;
   const missingExecutables = [
     ...(!executable ? [config.executable] : []),
-    ...(config.provider === "scip-typescript" && !scipExecutable ? [config.scipExecutable] : []),
   ];
 
   if (missingExecutables.length > 0) {
     const setup = config.provider === "scip-typescript"
-      ? "Install scip-typescript and scip, add them to PATH, or set QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE and QUESTBOARD_SCIP_EXECUTABLE."
+      ? "Install QuestBoard dependencies with npm install/npm ci, or set QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE to an explicit indexer path."
       : "Install GitNexus, add it to PATH, or set QUESTBOARD_GITNEXUS_EXECUTABLE.";
     return {
       availability: {
@@ -164,7 +167,6 @@ export function createConfiguredCodeMapRuntime(
     ...(config.provider === "scip-typescript"
       ? {
           QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: executable,
-          QUESTBOARD_SCIP_EXECUTABLE: scipExecutable,
         }
       : { QUESTBOARD_GITNEXUS_EXECUTABLE: executable }),
   };

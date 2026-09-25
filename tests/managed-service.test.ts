@@ -11,6 +11,7 @@ import {
 
 test("package declares a generic managed service launch and bounded health contract", async () => {
   const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
+    dependencies?: Record<string, string>;
     chatgpt2codex?: {
       managedService?: {
         launch?: {
@@ -38,9 +39,9 @@ test("package declares a generic managed service launch and bounded health contr
       "QUESTBOARD_CODE_MAP_STORAGE_ROOT",
       "QUESTBOARD_GITNEXUS_EXECUTABLE",
       "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
-      "QUESTBOARD_SCIP_EXECUTABLE",
     ],
   });
+  assert.equal(packageJson.dependencies?.["@sourcegraph/scip-typescript"], "0.4.0");
   assert.deepEqual(service?.health, {
     url: "http://127.0.0.1:4318/health",
     timeoutMs: 15_000,

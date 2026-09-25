@@ -41,6 +41,8 @@ QuestBoard declares its optional persistent service contract in `package.json` u
 
 The declared service launches `dist/src/server/main.js --tailnet --managed-service`. In managed-service mode, an existing pinned daemon identity is authoritative for `workspacePath` and `databasePath`, so running code from a managed installation checkout does not silently create a second SQLite database. If no identity is pinned yet, the normal `QUESTBOARD_DB_PATH` / current-workspace defaults establish the first profile.
 
+Managed-MCP installation is also the Code Map provisioning boundary. The repository declares `@sourcegraph/scip-typescript` as a pinned runtime dependency, so the host's normal dependency installation provisions the SCIP TypeScript indexer automatically. Managed-service mode enables Code Map by default when `QUESTBOARD_CODE_MAP` is unset, and QuestBoard decodes `.scip` indexes in-process with the decoder shipped by that package. A separate global `scip-typescript` install, `scip` CLI install, PATH edit, or post-install feature toggle is therefore unnecessary. Set `QUESTBOARD_CODE_MAP=0` (or another non-enabling value) only when an operator intentionally wants Code Map disabled.
+
 The Tailnet Web/API remains on the normal QuestBoard port (`4317` by default). Managed lifecycle health uses a separate loopback-only endpoint at `http://127.0.0.1:4318/health`, so a host can verify the persistent process without needing to know the machine's current Tailscale IPv4 address. MCP remains a stdio proxy to this daemon and never becomes the authoritative state owner.
 
 ## 2. Choose an adapter

@@ -1,19 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  accessSync,
-  chmodSync,
-  constants,
   existsSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
-  realpathSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
@@ -41,22 +35,15 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     { name: "Actual SCIP Sync E2E", rootPath: projectRoot },
     actor,
   );
-  const discoveredScip = discoverScipExecutables(tempRoot);
   const codeMapRuntime = createConfiguredCodeMapRuntime({
     ...process.env,
     QUESTBOARD_CODE_MAP: "1",
     QUESTBOARD_CODE_MAP_PROVIDER: "scip-typescript",
     QUESTBOARD_CODE_MAP_STORAGE_ROOT: join(tempRoot, "code-map"),
-    ...(discoveredScip.indexer ? { QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: discoveredScip.indexer } : {}),
-    ...(discoveredScip.scip ? { QUESTBOARD_SCIP_EXECUTABLE: discoveredScip.scip } : {}),
   });
 
-  if (!codeMapRuntime.service || !codeMapRuntime.availability.available) {
-    repository.close();
-    rmSync(tempRoot, { recursive: true, force: true });
-    t.skip(`actual SCIP tools unavailable: ${codeMapRuntime.availability.missingExecutables?.join(", ") || codeMapRuntime.availability.reason || "unknown"}`);
-    return;
-  }
+  assert.ok(codeMapRuntime.service, JSON.stringify(codeMapRuntime.availability));
+  assert.equal(codeMapRuntime.availability.available, true, JSON.stringify(codeMapRuntime.availability));
 
   const syncService = new CodeMapInvestigationSyncService(codeMapRuntime.service, repository);
   const server = createQuestBoardHttpServer(service, {
@@ -284,114 +271,6 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
-
-function discoverScipExecutables(tempRoot: string): { indexer?: string; scip?: string } {
-  const home = homedir();
-  const directories = [
-    join(home, ".local", "bin"),
-    join(home, "Library", "pnpm"),
-    join(home, ".volta", "bin"),
-    join(home, ".bun", "bin"),
-    join(home, ".asdf", "shims"),
-    join(home, ".npm-global", "bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-  ];
-
-  const nvmVersions = join(home, ".nvm", "versions", "node");
-  if (existsSync(nvmVersions)) {
-    for (const entry of readdirSync(nvmVersions, { withFileTypes: true })) {
-      if (entry.isDirectory()) directories.push(join(nvmVersions, entry.name, "bin"));
-    }
-  }
-
-  const fnmVersions = join(home, ".local", "share", "fnm", "node-versions");
-  if (existsSync(fnmVersions)) {
-    for (const entry of readdirSync(fnmVersions, { withFileTypes: true })) {
-      if (entry.isDirectory()) directories.push(join(fnmVersions, entry.name, "installation", "bin"));
-    }
-  }
-
-  let indexer = findExecutableInDirectories("scip-typescript", directories);
-  let packageRoot = indexer ? scipTypeScriptPackageRoot(indexer) : undefined;
-  if (!indexer) {
-    const cached = findCachedNpxScipTypeScript(home);
-    indexer = cached?.indexer;
-    packageRoot = cached?.packageRoot;
-  }
-  const scip = findExecutableInDirectories("scip", directories)
-    ?? (packageRoot ? createScipPrintWrapper(tempRoot, packageRoot) : undefined);
-  return {
-    ...(indexer ? { indexer } : {}),
-    ...(scip ? { scip } : {}),
-  };
-}
-
-function findExecutableInDirectories(
-  name: string,
-  directories: readonly string[],
-): string | undefined {
-  for (const directory of directories) {
-    const candidate = join(directory, name);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Keep the integration test bounded to known developer tool locations.
-    }
-  }
-  return undefined;
-}
-
-function scipTypeScriptPackageRoot(indexer: string): string | undefined {
-  try {
-    const packageRoot = resolve(realpathSync(indexer), "../../..");
-    return existsSync(join(packageRoot, "dist", "src", "scip.js")) ? packageRoot : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function findCachedNpxScipTypeScript(home: string): { indexer: string; packageRoot: string } | undefined {
-  const npxRoot = join(home, ".npm", "_npx");
-  if (!existsSync(npxRoot)) return undefined;
-  for (const entry of readdirSync(npxRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const nodeModules = join(npxRoot, entry.name, "node_modules");
-    const indexer = join(nodeModules, ".bin", "scip-typescript");
-    const packageRoot = join(nodeModules, "@sourcegraph", "scip-typescript");
-    try {
-      accessSync(indexer, constants.X_OK);
-      if (existsSync(join(packageRoot, "dist", "src", "scip.js"))) return { indexer, packageRoot };
-    } catch {
-      // Another cached npx installation may contain the executable.
-    }
-  }
-  return undefined;
-}
-
-function createScipPrintWrapper(tempRoot: string, packageRoot: string): string {
-  const executable = join(tempRoot, "scip-print-wrapper");
-  const decoder = join(packageRoot, "dist", "src", "scip.js");
-  writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
-const { pathToFileURL } = require("node:url");
-(async () => {
-  const args = process.argv.slice(2);
-  if (args[0] !== "print" || args[1] !== "--json" || !args[2]) {
-    throw new Error("expected: print --json <index.scip>");
-  }
-  const module = await import(pathToFileURL(${JSON.stringify(decoder)}).href);
-  const index = module.scip.Index.deserializeBinary(fs.readFileSync(args[2])).toObject();
-  process.stdout.write(JSON.stringify(index));
-})().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
-`, "utf8");
-  chmodSync(executable, 0o755);
-  return executable;
-}
 
 async function mcpToolCall(
   baseUrl: string,

@@ -4,7 +4,7 @@ import { QuestBoardService } from "../application/quest-board-service.js";
 import { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
 import { createStderrConcurrencyDiagnosticSink } from "../observability/concurrency-log.js";
 import { SqliteQuestBoardRepository } from "../storage/sqlite/sqlite-quest-board-repository.js";
-import { createConfiguredCodeMapRuntime } from "./code-map-config.js";
+import { createConfiguredCodeMapRuntime, withManagedServiceCodeMapDefault } from "./code-map-config.js";
 import { pinQuestBoardDaemonIdentity, QUESTBOARD_DAEMON_PROTOCOL } from "./daemon-identity.js";
 import { startQuestBoardHttpRuntime } from "./runtime.js";
 import {
@@ -28,7 +28,8 @@ const daemonIdentity = pinQuestBoardDaemonIdentity({
   databasePath: canonicalDatabasePath,
 });
 const service = new QuestBoardService(repository, undefined, undefined, createStderrConcurrencyDiagnosticSink());
-const codeMapRuntime = createConfiguredCodeMapRuntime();
+const codeMapEnv = withManagedServiceCodeMapDefault(process.env, managedServiceMode);
+const codeMapRuntime = createConfiguredCodeMapRuntime(codeMapEnv);
 const codeMapInvestigationSyncService = codeMapRuntime.service
   ? new CodeMapInvestigationSyncService(codeMapRuntime.service, repository)
   : undefined;

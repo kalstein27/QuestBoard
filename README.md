@@ -84,18 +84,17 @@ On first start, that database receives a stable UUID and the daemon pins it to t
 | `QUESTBOARD_ACTOR_ID` | Default CLI actor ID | `cli:local` |
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
-| `QUESTBOARD_CODE_MAP` | Set to `1` or `true` to enable Code Map indexing | disabled |
+| `QUESTBOARD_CODE_MAP` | Set to `1` or `true` to enable Code Map indexing; managed-service mode defaults it on when unset | disabled normally; enabled in managed-service mode |
 | `QUESTBOARD_CODE_MAP_PROVIDER` | Code intelligence provider: `scip-typescript` or optional `gitnexus` | `scip-typescript` |
 | `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
-| `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | `scip-typescript` executable path/name | `scip-typescript` |
-| `QUESTBOARD_SCIP_EXECUTABLE` | `scip` CLI executable path/name | `scip` |
+| `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | Optional override for the bundled `scip-typescript` indexer executable | local `node_modules/.bin/scip-typescript` |
 | `QUESTBOARD_GITNEXUS_EXECUTABLE` | Optional GitNexus executable path/name | `gitnexus` |
 
 ### Code Map provider setup
 
-Code Map is opt-in, but when enabled its default provider is **SCIP TypeScript**. QuestBoard does not bundle the SCIP executables and keeps its zero-runtime-npm-dependency foundation. Install the `scip-typescript` indexer and `scip` CLI separately, make both visible on the daemon's `PATH`, or point QuestBoard at them with `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` and `QUESTBOARD_SCIP_EXECUTABLE`.
+Code Map is opt-in for ordinary daemon launches, while ChatGPT2Codex managed-service mode enables it by default unless `QUESTBOARD_CODE_MAP` is explicitly set to a disabling value. When enabled its default provider is **SCIP TypeScript**. QuestBoard declares `@sourcegraph/scip-typescript` as the Code Map adapter's pinned runtime dependency, so a normal `npm install` / `npm ci` or managed-MCP install provisions the indexer automatically. QuestBoard reads the generated `.scip` file through the decoder shipped in that same package, so a separate `scip` CLI install, global PATH setup, or post-install Code Map toggle is not required. `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` remains available only as an explicit override.
 
-If the configured executables are missing, QuestBoard still starts normally: Task, Investigation, MCP, CLI, and Web functionality stay available while Code Map reports a fail-closed `unavailable` state with a setup hint. Generated Code Map indexes live outside the repository under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`.
+If the bundled indexer is unexpectedly missing, QuestBoard still starts normally: Task, Investigation, MCP, CLI, and Web functionality stay available while Code Map reports a fail-closed `unavailable` state with a setup hint. Generated Code Map indexes live outside the repository under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`.
 
 GitNexus remains available as an explicit optional compatibility and regression-comparison provider by setting `QUESTBOARD_CODE_MAP_PROVIDER=gitnexus` and making `gitnexus` available on `PATH` (or configuring `QUESTBOARD_GITNEXUS_EXECUTABLE`). It is not required for the default Code Map flow.
 Older GitNexus PoC measurements are retained as historical comparison evidence, while current operational setup and default-provider behavior follow this section and use SCIP TypeScript unless `gitnexus` is selected explicitly.

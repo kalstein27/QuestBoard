@@ -8,9 +8,9 @@ This document records the smallest implementation decisions needed to begin the 
 - TypeScript in strict mode
 - SQLite through Node's built-in `node:sqlite` module
 - `node:test` for the initial test suite
-- no runtime framework, ORM, HTTP framework, agent SDK, or vendor-specific dependency in the foundation
+- no runtime framework, ORM, HTTP framework, agent SDK, or vendor-specific dependency in the foundation/core layers
 
-The only initial development dependencies are TypeScript and Node.js type definitions. Using built-in SQLite, HTTP, test, stream, and readline modules keeps the runtime dependency surface at zero while allowing HTTP, Web, CLI, and MCP adapters to evolve independently.
+The foundation/core runtime continues to use Node built-ins for SQLite, HTTP, streams, readline, and tests. Code Map is an optional adapter capability and carries one pinned runtime dependency, `@sourcegraph/scip-typescript`, behind the code-intelligence adapter boundary. That package supplies both the TypeScript SCIP indexer and the decoder QuestBoard uses to read generated `.scip` files, which keeps managed-MCP installation self-contained without moving provider-specific concepts into the core domain.
 
 ## Dependency direction
 
