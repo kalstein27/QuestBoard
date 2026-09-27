@@ -679,11 +679,16 @@ main { min-height: 0; overflow: hidden; }
 .investigation-graph-description, .investigation-item-description, .investigation-item-links { display: none; }
 .investigation-item { padding: 6px 10px; }
 .investigation-item-head {
-  position: absolute; top: 3px; right: 4px; z-index: 3;
-  width: auto; justify-content: flex-end; pointer-events: none;
+  position: relative; top: auto; right: auto; z-index: 3;
+  width: 100%; align-items: center; justify-content: space-between; pointer-events: auto;
 }
-.investigation-item-title { display: none; }
-.investigation-item-actions { pointer-events: auto; }
+.investigation-item-title {
+  display: block; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.investigation-item-actions { display: none; pointer-events: auto; }
+.investigation-item:hover .investigation-item-actions,
+.investigation-item:focus-within .investigation-item-actions { display: flex; }
 .graph-add-button { width: 26px; height: 24px; margin: 4px 7px 7px; padding: 0; text-align: center; }
 .graph-add-button { opacity: 0; transition: opacity .12s ease, background .12s ease; }
 .investigation-graph-node:hover > .graph-add-button,
@@ -817,7 +822,8 @@ main { min-height: 0; overflow: hidden; }
 }
 
 @media (pointer: coarse) {
-  .investigation-item-actions,
+  .investigation-item-actions { display: none; opacity: 0; }
+  .investigation-item:focus-within .investigation-item-actions { display: flex; opacity: 1; }
   .investigation-graph-node > .investigation-node-head .graph-icon-button,
   .graph-add-button,
   .investigation-link-remove { opacity: 1; }

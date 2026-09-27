@@ -58,10 +58,30 @@ test("workspace chrome uses Quest, Flow, and Code terminology", () => {
   assert.match(app, /codeMap \? "Code" : investigation \? "Flow" : "Quest"/);
 });
 
-test("coarse pointer devices keep Investigation actions discoverable", () => {
+test("coarse pointer Flow keeps Item titles primary and reveals row actions on focus", () => {
   assert.match(css, /@media \(pointer: coarse\)/);
-  assert.match(css, /\.investigation-item-actions[\s\S]*opacity: 1/);
+  assert.match(css, /\.investigation-item-title \{[\s\S]*display: block/);
+  assert.match(css, /\.investigation-item-actions \{ display: none; pointer-events: auto; \}/);
+  assert.match(css, /\.investigation-item:focus-within \.investigation-item-actions \{ display: flex; \}/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.investigation-item:focus-within \.investigation-item-actions \{ display: flex; opacity: 1; \}/);
+  assert.match(app, /wrapper\.tabIndex = 0/);
   assert.match(css, /\.graph-add-button[\s\S]*opacity: 1/);
+});
+
+test("Flow default placement derives columns from the live board width while preserving saved positions", () => {
+  assert.match(app, /function investigationDefaultColumnCount\(\)[\s\S]*clientWidth[\s\S]*return clamp\([\s\S]*1, 4\)/);
+  assert.match(app, /const defaultColumns = investigationDefaultColumnCount\(\)/);
+  assert.match(app, /Math\.ceil\(entityCount \/ defaultColumns\)/);
+  assert.match(app, /const saved = state\.boardPositions\.get[\s\S]*if \(saved\) return \{ x: saved\.x, y: saved\.y \}/);
+});
+
+test("Flow viewport performs a device-aware initial fit before reusing persisted pan and zoom", () => {
+  assert.match(app, /investigationViewportMeta: loadInvestigationViewportMeta\(\)/);
+  assert.match(app, /function shouldAutoFitInvestigationViewport\(\)/);
+  assert.match(app, /meta\.projectId !== state\.projectId/);
+  assert.match(app, /widthDelta > 0\.2 \|\| heightDelta > 0\.3/);
+  assert.match(app, /if \(shouldAutoFitInvestigationViewport\(\)\) fitInvestigationContent\(\)/);
+  assert.match(app, /questboard\.investigationViewportMeta/);
 });
 
 test("Code Map gives sync the primary hierarchy only after indexing", () => {

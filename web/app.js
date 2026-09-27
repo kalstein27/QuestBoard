@@ -31,6 +31,7 @@ const state = {
   displayPositions: new Map(),
   investigationZoom: loadInvestigationZoom(),
   investigationPan: loadInvestigationPan(),
+  investigationViewportMeta: loadInvestigationViewportMeta(),
   investigationPointers: new Map(),
   investigationGesture: null,
   investigationUndo: [],
@@ -335,6 +336,17 @@ function loadInvestigationPan() {
     return Number.isFinite(stored?.x) && Number.isFinite(stored?.y) ? stored : { x: 0, y: 0 };
   } catch {
     return { x: 0, y: 0 };
+  }
+}
+
+function loadInvestigationViewportMeta() {
+  try {
+    const stored = JSON.parse(localStorage.getItem("questboard.investigationViewportMeta") || "null");
+    if (!stored || typeof stored.projectId !== "string") return null;
+    if (!Number.isFinite(stored.width) || !Number.isFinite(stored.height)) return null;
+    return stored;
+  } catch {
+    return null;
   }
 }
 
@@ -812,7 +824,8 @@ function renderInvestigationBoard() {
   const canvasWidth = 1800;
   const graphMode = state.investigationGraphNodes.length > 0;
   const entityCount = graphMode ? state.investigationGraphNodes.length : state.tasks.length + state.projectArtifacts.length;
-  const canvasHeight = Math.max(1000, 420 + Math.ceil(entityCount / 4) * 230);
+  const defaultColumns = investigationDefaultColumnCount();
+  const canvasHeight = Math.max(1000, 420 + Math.ceil(entityCount / defaultColumns) * 230);
   canvas.style.width = `${canvasWidth}px`;
   canvas.style.height = `${canvasHeight}px`;
   applyInvestigationViewport();
@@ -829,6 +842,7 @@ function renderInvestigationBoard() {
     renderInvestigationInspector();
     requestAnimationFrame(() => {
       drawInvestigationEdges();
+      if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
       focusCodeMapSyncNodes();
     });
     return;
@@ -849,17 +863,30 @@ function renderInvestigationBoard() {
   nodesLayer.replaceChildren(...taskNodes, ...artifactNodes);
   state.selectedInvestigationNodeId = null;
   renderInvestigationInspector();
-  drawInvestigationEdges();
+  requestAnimationFrame(() => {
+    drawInvestigationEdges();
+    if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
+  });
+}
+
+function investigationDefaultColumnCount() {
+  const boardWidth = el["investigation-board"]?.clientWidth || 1440;
+  const cardWidth = 330;
+  const columnStep = 360;
+  const horizontalPadding = 40;
+  const usableWidth = Math.max(cardWidth, boardWidth - horizontalPadding * 2);
+  return clamp(Math.floor((usableWidth + (columnStep - cardWidth)) / columnStep), 1, 4);
 }
 
 function investigationPosition(entityType, entityId, index, artifact) {
   const saved = state.boardPositions.get(boardNodeKey(entityType, entityId));
   if (saved) return { x: saved.x, y: saved.y };
-  const column = index % 4;
-  const row = Math.floor(index / 4);
+  const columns = investigationDefaultColumnCount();
+  const column = index % columns;
+  const row = Math.floor(index / columns);
   return artifact
-    ? { x: 180 + column * 360, y: 570 + row * 170 }
-    : { x: 80 + column * 360, y: 90 + row * 180 };
+    ? { x: 40 + column * 360, y: 570 + row * 170 }
+    : { x: 40 + column * 360, y: 90 + row * 180 };
 }
 
 function investigationTaskNode(task, position) {
@@ -1068,9 +1095,21 @@ function fitInvestigationContent() {
   renderInvestigationControls();
 }
 
+function shouldAutoFitInvestigationViewport() {
+  const board = el["investigation-board"];
+  if (!board || !state.projectId || board.clientWidth <= 0 || board.clientHeight <= 0) return false;
+  const meta = state.investigationViewportMeta;
+  if (!meta || meta.projectId !== state.projectId) return true;
+  const widthDelta = Math.abs(meta.width - board.clientWidth) / Math.max(meta.width, board.clientWidth, 1);
+  const heightDelta = Math.abs(meta.height - board.clientHeight) / Math.max(meta.height, board.clientHeight, 1);
+  return widthDelta > 0.2 || heightDelta > 0.3;
+}
+
 function investigationGraphItem(item) {
   const wrapper = node("section", "investigation-item");
   wrapper.dataset.investigationItemId = item.id;
+  wrapper.tabIndex = 0;
+  wrapper.setAttribute("aria-label", item.title);
   const codeMapBinding = codeMapRelationBindingForInvestigationItem(item.id);
   if (codeMapBinding) wrapper.append(codeMapBindingBadges(codeMapBinding.state));
   const head = node("div", "investigation-item-head");
@@ -1580,6 +1619,15 @@ function resetInvestigationViewport() {
 function persistInvestigationViewport() {
   localStorage.setItem("questboard.investigationZoom", String(state.investigationZoom));
   localStorage.setItem("questboard.investigationPan", JSON.stringify(state.investigationPan));
+  const board = el["investigation-board"];
+  if (state.projectId && board?.clientWidth > 0 && board?.clientHeight > 0) {
+    state.investigationViewportMeta = {
+      projectId: state.projectId,
+      width: board.clientWidth,
+      height: board.clientHeight,
+    };
+    localStorage.setItem("questboard.investigationViewportMeta", JSON.stringify(state.investigationViewportMeta));
+  }
 }
 
 function applyInvestigationViewport() {
