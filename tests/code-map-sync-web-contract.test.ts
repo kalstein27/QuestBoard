@@ -7,11 +7,11 @@ const html = readFileSync(resolve("web/index.html"), "utf8");
 const app = readFileSync(resolve("web/app.js"), "utf8");
 const css = readFileSync(resolve("web/styles.css"), "utf8");
 
-test("Code Map Web exposes preview-first Extract / Sync UX", () => {
-  assert.match(html, /id="code-map-sync"[^>]*>Extract \/ Sync</);
+test("Code Map Web exposes preview-first Flow sync UX", () => {
+  assert.match(html, /id="code-map-sync"[^>]*>Sync to Flow</);
   assert.match(html, /id="code-map-sync-dialog"/);
   assert.match(html, /id="code-map-sync-recreate-detached"/);
-  assert.match(html, /id="code-map-sync-open-investigation"[^>]*>Open Investigation</);
+  assert.match(html, /id="code-map-sync-open-investigation"[^>]*>Open Flow</);
 
   assert.match(app, /syncAction\.classList\.toggle\("hidden", state\.viewMode !== "code-map" \|\| !map\.indexed \|\| !map\.projection\)/);
   assert.match(app, /openCodeMapSyncPreview/);
@@ -28,12 +28,12 @@ test("Code Map Web apply uses preview fingerprint and explicit detached confirma
   assert.match(app, /expectedProjectionFingerprint: preview\.projectionFingerprint/);
   assert.match(app, /recreateDetached/);
   assert.match(app, /detached > 0 && !el\["code-map-sync-recreate-detached"\]\.checked/);
-  assert.match(app, /Code Map synced to Investigation/);
+  assert.match(app, /Code synced to Flow/);
 });
 
-test("Code Map Web surfaces binding badges and Investigation focus without raw provenance chrome", () => {
+test("Code Map Web surfaces binding badges and Flow focus without raw provenance chrome", () => {
   assert.match(app, /codeMapBindingBadges/);
-  assert.match(app, /"Code Map"/);
+  assert.match(app, /"Code"/);
   assert.match(app, /"Stale"/);
   assert.match(app, /focusCodeMapSyncNodes/);
   assert.match(css, /\.code-map-binding-badge/);

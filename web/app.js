@@ -78,7 +78,7 @@ function collectElements() {
     "workspace-title", "workspace-context", "workspace-nav",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
     "drawer-scrim", "task-dialog", "task-form", "task-dialog-title", "task-id", "task-title",
-    "task-description", "task-goal", "task-status", "task-priority", "task-tags", "project-dialog",
+    "task-description", "task-goal", "task-status", "task-priority", "task-tags", "task-more", "project-dialog",
     "project-form", "project-name", "project-description", "toast", "connection-label",
   ].forEach((id) => { el[id] = document.getElementById(id); });
 }
@@ -353,8 +353,8 @@ function renderViewSwitch() {
   el["investigation-add-node"].classList.toggle("hidden", !investigation);
   el["code-map-refresh"].classList.toggle("hidden", !codeMap);
   if (!codeMap) el["code-map-sync"].classList.add("hidden");
-  const title = codeMap ? "Code Map" : investigation ? "Investigation" : "Quest";
-  const role = codeMap ? "Architecture" : investigation ? "Execution map" : "Work queue";
+  const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
+  const role = codeMap ? "Code context" : investigation ? "Work map" : "Work queue";
   const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
   el["workspace-title"].textContent = title;
   el["workspace-context"].textContent = projectName ? `${projectName} · ${role}` : role;
@@ -407,9 +407,9 @@ async function refreshCodeMap() {
     renderCodeMapBoard();
     state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`, { method: "POST" });
     state.codeMapIndexError = null;
-    toast(state.codeMap.mode === "cache-hit" ? "Code Map is current" : "Code Map indexed");
+    toast(state.codeMap.mode === "cache-hit" ? "Code is current" : "Code indexed");
   } catch (error) {
-    state.codeMapIndexError = error.message || "Code Map indexing failed";
+    state.codeMapIndexError = error.message || "Code indexing failed";
     try {
       state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
     } catch {}
@@ -445,12 +445,12 @@ function renderCodeMapBoard() {
     state.selectedCodeMapDetail = null;
     renderCodeMapInspector();
     if (map.enabled) {
-      const provider = map.provider && map.provider !== "unknown" ? map.provider : "Code Map";
+      const provider = map.provider && map.provider !== "unknown" ? map.provider : "Code";
       el["code-map-status"].textContent = `${provider} unavailable`;
-      el["code-map-content"].replaceChildren(node("div", "code-map-state", map.message || "The configured Code Map provider is unavailable."));
+      el["code-map-content"].replaceChildren(node("div", "code-map-state", map.message || "The configured Code provider is unavailable."));
     } else {
       el["code-map-status"].textContent = "Disabled";
-      el["code-map-content"].replaceChildren(node("div", "code-map-state", "Code Map is not enabled for this QuestBoard runtime."));
+      el["code-map-content"].replaceChildren(node("div", "code-map-state", "Code is not enabled for this QuestBoard runtime."));
     }
     return;
   }
@@ -680,7 +680,7 @@ function renderCodeMapSyncDialog() {
       ["Detached", counts.detachedBindings],
       ["Blocked", counts.blockedRelations],
     ]);
-    const copy = node("p", "code-map-sync-result-copy", "Sync completed. Generated Investigation content remains editable and future syncs preserve user fields.");
+    const copy = node("p", "code-map-sync-result-copy", "Sync completed. Generated Flow content remains editable and future syncs preserve user fields.");
     el["code-map-sync-body"].replaceChildren(summary, copy);
     recreateRow.classList.add("hidden");
     openInvestigation.classList.remove("hidden");
@@ -776,7 +776,7 @@ async function applyCodeMapSync() {
     state.codeMapSyncFocusDeadline = 0;
     state.codeMapSyncFocusCentered = false;
     await loadBoard();
-    toast("Code Map synced to Investigation");
+    toast("Code synced to Flow");
   } catch (error) {
     fail(error);
   } finally {
@@ -793,7 +793,7 @@ async function openInvestigationFromCodeMapSync() {
 
 function codeMapBindingBadges(status) {
   const badges = node("span", "code-map-binding-badges");
-  badges.append(node("span", "code-map-binding-badge", "Code Map"));
+  badges.append(node("span", "code-map-binding-badge", "Code"));
   if (status === "stale") badges.append(node("span", "code-map-binding-badge stale", "Stale"));
   return badges;
 }
@@ -1784,8 +1784,10 @@ function renderDrawer(task, claim, artifacts, relations) {
   if (task.guardrail) continuityGrid.append(currentItem("Guardrail", task.guardrail, "continuity-guardrail"));
   continuitySection.append(continuityGrid);
 
+  const checkpointDetails = document.createElement("details");
+  checkpointDetails.className = "checkpoint-details";
+  checkpointDetails.append(node("summary", "checkpoint-details-summary", "Checkpoint"));
   const checkpointForm = node("form", "checkpoint-form");
-  checkpointForm.append(node("h4", "subsection-title", "Leave checkpoint"));
   const checkpointField = (label, value, placeholder) => {
     const wrapper = node("label", "checkpoint-field");
     wrapper.append(node("span", "checkpoint-label", label));
@@ -1850,7 +1852,8 @@ function renderDrawer(task, claim, artifacts, relations) {
     if (checkpointNote) payload.activity = { type: "note_added", summary: checkpointNote };
     void saveCheckpoint(task.id, payload);
   });
-  continuitySection.append(checkpointForm);
+  checkpointDetails.append(checkpointForm);
+  continuitySection.append(checkpointDetails);
 
   const summary = node("section", "detail-section");
   summary.append(node("p", "detail-description", task.description || "No description yet."));
@@ -2005,7 +2008,7 @@ function renderDrawer(task, claim, artifacts, relations) {
 
   const details = document.createElement("details");
   details.className = "drawer-details";
-  details.append(node("summary", "drawer-details-summary", "Task details & history"));
+  details.append(node("summary", "drawer-details-summary", "Details & tools"));
   const detailsContent = node("div", "drawer-details-content");
   detailsContent.append(summary, claimSection, evidenceSection, activitySection);
   details.append(detailsContent);
@@ -2164,6 +2167,7 @@ function openTaskDialog(task = null) {
   el["task-status"].value = task?.status ?? "inbox";
   el["task-priority"].value = task?.priority ?? "normal";
   el["task-tags"].value = task?.tags?.join(", ") ?? "";
+  el["task-more"].open = Boolean(task);
   el["task-dialog"].showModal();
   queueMicrotask(() => el["task-title"].focus());
 }

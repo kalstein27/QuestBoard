@@ -292,7 +292,10 @@ main { min-width: 0; }
 .continuity-goal .continuity-value { color: #aeb5bf; }
 .continuity-blocked .continuity-label { color: #df8a84; }
 .continuity-guardrail .continuity-label { color: #c6a078; }
-.checkpoint-form { display: grid; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #222831; }
+.checkpoint-details { margin-top: 12px; border-top: 1px solid #222831; }
+.checkpoint-details-summary { cursor: pointer; padding: 11px 0 5px; color: #929aa5; font-size: 10px; font-weight: 700; list-style-position: inside; }
+.checkpoint-details[open] .checkpoint-details-summary { color: #c3c9d1; }
+.checkpoint-form { display: grid; gap: 8px; margin-top: 4px; padding: 4px 0; }
 .checkpoint-field { display: grid; gap: 5px; min-width: 0; }
 .checkpoint-label { color: #7f8792; font-size: 8px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
 .checkpoint-field textarea { width: 100%; min-width: 0; resize: vertical; min-height: 48px; }
@@ -352,6 +355,10 @@ a.evidence-locator:hover { text-decoration: underline; }
 .quest-dialog form { padding: 18px; }
 .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 17px; }
 .dialog-header h2 { margin: 3px 0 0; font-size: 18px; }
+.task-more { margin: 2px 0 4px; border-top: 1px solid var(--line); }
+.task-more > summary { cursor: pointer; padding: 10px 0; color: #7f8792; font-size: 10px; font-weight: 700; }
+.task-more[open] > summary { color: #b9c0ca; }
+.task-more-content { padding-top: 2px; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .field { display: grid; gap: 5px; color: #858d99; font-size: 9px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
 .field.wide { margin-bottom: 10px; }

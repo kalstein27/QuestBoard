@@ -189,7 +189,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const title = document.querySelector('#workspace-title')?.textContent || '';
         const nodes = document.querySelectorAll('.investigation-graph-node').length;
         const focused = document.querySelectorAll('.investigation-graph-node.code-map-sync-focus').length;
-        if (title === 'Investigation' && nodes === 6 && focused > 0) return focused;
+        if (title === 'Flow' && nodes === 6 && focused > 0) return focused;
         await sleep(50);
       }
       return 0;
@@ -204,7 +204,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const items = document.querySelectorAll('.investigation-item').length;
         const flows = document.querySelectorAll('.investigation-flow-line').length;
         const badges = document.querySelectorAll('.code-map-binding-badge').length;
-        if (title === 'Investigation' && nodes === 6 && items === 5 && flows === 5 && badges >= 11) {
+        if (title === 'Flow' && nodes === 6 && items === 5 && flows === 5 && badges >= 11) {
           return { title, nodes, items, flows, badges };
         }
         await sleep(100);
@@ -218,7 +218,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         items: investigationRender.items,
         flows: investigationRender.flows,
       },
-      { title: "Investigation", nodes: 6, items: 5, flows: 5 },
+      { title: "Flow", nodes: 6, items: 5, flows: 5 },
     );
     assert.ok(investigationRender.badges >= 11);
 

@@ -33,11 +33,11 @@
             </button>
             <button class="workspace-nav-button" type="button" data-board-view="investigation">
               <span class="workspace-nav-icon" aria-hidden="true">⌘</span>
-              <span class="workspace-nav-copy"><strong>Investigation</strong><small class="workspace-nav-description">Execution map</small></span>
+              <span class="workspace-nav-copy"><strong>Flow</strong><small class="workspace-nav-description">Work map</small></span>
             </button>
             <button class="workspace-nav-button" type="button" data-board-view="code-map">
               <span class="workspace-nav-icon" aria-hidden="true">⌬</span>
-              <span class="workspace-nav-copy"><strong>Code Map</strong><small class="workspace-nav-description">Architecture</small></span>
+              <span class="workspace-nav-copy"><strong>Code</strong><small class="workspace-nav-description">Code context</small></span>
             </button>
           </nav>
         </section>
@@ -72,8 +72,8 @@
           </div>
           <div class="toolbar">
             <button id="new-task-button" class="button primary" type="button">New task</button>
-            <button id="investigation-add-node" class="button primary hidden" type="button" title="Create a standalone Investigation node">+ Node</button>
-            <button id="code-map-sync" class="button secondary compact hidden" type="button">Extract / Sync</button>
+            <button id="investigation-add-node" class="button primary hidden" type="button" title="Create a standalone Flow node">+ Node</button>
+            <button id="code-map-sync" class="button secondary compact hidden" type="button">Sync to Flow</button>
             <button id="code-map-refresh" class="button primary compact hidden" type="button">Index code</button>
             <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
           </div>
@@ -105,8 +105,8 @@
               <button id="empty-new-project-button" class="button primary" type="button">Create project</button>
             </div>
             <div id="kanban-board" class="kanban-board hidden"></div>
-            <div id="investigation-board" class="investigation-board hidden" aria-label="Investigation board">
-              <div id="investigation-controls" class="investigation-controls hidden" role="group" aria-label="Investigation board controls">
+            <div id="investigation-board" class="investigation-board hidden" aria-label="Flow board">
+              <div id="investigation-controls" class="investigation-controls hidden" role="group" aria-label="Flow board controls">
                 <button id="investigation-undo" class="investigation-control-button" type="button" aria-label="Undo node move" title="Undo node move (⌘/Ctrl+Z)">↶</button>
                 <button id="investigation-redo" class="investigation-control-button" type="button" aria-label="Redo node move" title="Redo node move (⌘/Ctrl+Shift+Z)">↷</button>
                 <span class="investigation-control-divider" aria-hidden="true"></span>
@@ -120,7 +120,7 @@
                 <svg id="investigation-edges" class="investigation-edges" aria-hidden="true"></svg>
                 <div id="investigation-nodes" class="investigation-nodes"></div>
               </div>
-              <aside id="investigation-inspector" class="investigation-inspector hidden" aria-label="Investigation node inspector">
+              <aside id="investigation-inspector" class="investigation-inspector hidden" aria-label="Flow node inspector">
                 <div class="investigation-inspector-head">
                   <div>
                     <span class="investigation-inspector-kicker">Selected node</span>
@@ -131,7 +131,7 @@
                 <div id="investigation-inspector-body" class="investigation-inspector-body"></div>
               </aside>
             </div>
-            <div id="code-map-board" class="code-map-board hidden" aria-label="Code Map">
+            <div id="code-map-board" class="code-map-board hidden" aria-label="Code">
               <div class="code-map-toolbar">
                 <div class="code-map-heading">
                   <strong>Architecture</strong>
@@ -139,13 +139,13 @@
                 </div>
               </div>
               <div id="code-map-content" class="code-map-content"></div>
-              <aside id="code-map-inspector" class="code-map-inspector hidden" aria-label="Code Map detail inspector">
+              <aside id="code-map-inspector" class="code-map-inspector hidden" aria-label="Code detail inspector">
                 <div class="code-map-inspector-head">
                   <div>
                     <span id="code-map-inspector-kicker" class="code-map-inspector-kicker">Code detail</span>
                     <strong id="code-map-inspector-title"></strong>
                   </div>
-                  <button id="code-map-inspector-close" class="graph-icon-button" type="button" aria-label="Close Code Map inspector">×</button>
+                  <button id="code-map-inspector-close" class="graph-icon-button" type="button" aria-label="Close Code inspector">×</button>
                 </div>
                 <div id="code-map-inspector-body" class="code-map-inspector-body"></div>
               </aside>
@@ -178,13 +178,18 @@
         </div>
         <input id="task-id" type="hidden" />
         <label class="field wide">Title <input id="task-title" required maxlength="180" /></label>
-        <label class="field wide">Description <textarea id="task-description" rows="5"></textarea></label>
-        <label class="field wide">Goal <textarea id="task-goal" rows="3" placeholder="Defaults to description or title for a new task"></textarea></label>
-        <div class="field-grid">
-          <label class="field">Status <select id="task-status"></select></label>
-          <label class="field">Priority <select id="task-priority"></select></label>
-        </div>
-        <label class="field wide">Tags <input id="task-tags" placeholder="api, ui, foundation" /></label>
+        <label class="field wide">Goal <textarea id="task-goal" rows="3" placeholder="What are we trying to achieve?"></textarea></label>
+        <details id="task-more" class="task-more">
+          <summary>More options</summary>
+          <div class="task-more-content">
+            <label class="field wide">Description <textarea id="task-description" rows="4"></textarea></label>
+            <div class="field-grid">
+              <label class="field">Status <select id="task-status"></select></label>
+              <label class="field">Priority <select id="task-priority"></select></label>
+            </div>
+            <label class="field wide">Tags <input id="task-tags" placeholder="api, ui, foundation" /></label>
+          </div>
+        </details>
         <div class="dialog-actions">
           <button class="button secondary" type="button" data-close-dialog="task-dialog">Cancel</button>
           <button class="button primary" type="submit">Save task</button>
@@ -196,10 +201,10 @@
       <div class="code-map-sync-shell">
         <div class="dialog-header code-map-sync-header">
           <div>
-            <div class="dialog-label">Code Map</div>
-            <h2>Extract / Sync to Investigation</h2>
+            <div class="dialog-label">Code</div>
+            <h2>Sync Code to Flow</h2>
           </div>
-          <button id="code-map-sync-close" class="icon-button" type="button" aria-label="Close Code Map sync preview">×</button>
+          <button id="code-map-sync-close" class="icon-button" type="button" aria-label="Close Code sync preview">×</button>
         </div>
         <div id="code-map-sync-body" class="code-map-sync-body"></div>
         <label id="code-map-sync-recreate-row" class="code-map-sync-confirm hidden">
@@ -207,7 +212,7 @@
           <span>Recreate detached targets that were previously deleted</span>
         </label>
         <div class="dialog-actions code-map-sync-actions">
-          <button id="code-map-sync-open-investigation" class="button secondary hidden" type="button">Open Investigation</button>
+          <button id="code-map-sync-open-investigation" class="button secondary hidden" type="button">Open Flow</button>
           <button id="code-map-sync-apply" class="button primary" type="button">Apply sync</button>
         </div>
       </div>

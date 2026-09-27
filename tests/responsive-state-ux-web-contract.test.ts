@@ -30,6 +30,7 @@ test("Task drawer puts Goal, Now, and Next first with an explicit checkpoint con
   assert.match(app, /currentItem\("Now", task\.now/);
   assert.match(app, /currentItem\("Next", task\.next/);
   assert.match(app, /"Save checkpoint"/);
+  assert.match(app, /checkpointDetails\.append\(node\("summary", "checkpoint-details-summary", "Checkpoint"\)\)/);
   assert.match(app, /clearGuardrail\?\.checked\) payload\.guardrail = null/);
   assert.match(app, /clearBlocked\?\.checked\) payload\.blocked = null/);
   assert.match(html, /id="task-goal"/);
@@ -37,10 +38,24 @@ test("Task drawer puts Goal, Now, and Next first with an explicit checkpoint con
 
 test("Task drawer keeps history and evidence out of default chrome without adding a new dashboard", () => {
   assert.match(app, /document\.createElement\("details"\)/);
-  assert.match(app, /"Task details & history"/);
+  assert.match(app, /"Details & tools"/);
   assert.match(app, /body\.append\(continuitySection, details\)/);
   assert.match(css, /\.checkpoint-field textarea \{ width: 100%; min-width: 0/);
   assert.match(css, /\.drawer-details-content \{ min-width: 0; \}/);
+});
+
+test("New Task keeps Goal primary and advanced project-management fields collapsed", () => {
+  assert.match(html, /id="task-title"/);
+  assert.match(html, /id="task-goal"/);
+  assert.match(html, /<details id="task-more" class="task-more">/);
+  assert.match(html, /<summary>More options<\/summary>/);
+  assert.match(app, /el\["task-more"\]\.open = Boolean\(task\)/);
+});
+
+test("workspace chrome uses Quest, Flow, and Code terminology", () => {
+  assert.match(html, /data-board-view="investigation"[\s\S]*?<strong>Flow<\/strong>/);
+  assert.match(html, /data-board-view="code-map"[\s\S]*?<strong>Code<\/strong>/);
+  assert.match(app, /codeMap \? "Code" : investigation \? "Flow" : "Quest"/);
 });
 
 test("coarse pointer devices keep Investigation actions discoverable", () => {
