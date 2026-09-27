@@ -1699,12 +1699,186 @@ function setInvestigationNodePosition(card, position) {
   card.style.top = `${position.y}px`;
 }
 
+function investigationEdgeRect(card, padding = 0) {
+  const key = boardNodeKey(card.dataset.entityType, card.dataset.entityId);
+  const position = state.displayPositions.get(key);
+  if (!position) return null;
+  return {
+    left: position.x - padding,
+    top: position.y - padding,
+    right: position.x + card.offsetWidth + padding,
+    bottom: position.y + card.offsetHeight + padding,
+    width: card.offsetWidth + padding * 2,
+    height: card.offsetHeight + padding * 2,
+    centerX: position.x + card.offsetWidth / 2,
+    centerY: position.y + card.offsetHeight / 2,
+  };
+}
+
+function investigationEdgeAnchor(rect, towardRect, itemY = null) {
+  const dx = towardRect.centerX - rect.centerX;
+  const dy = towardRect.centerY - rect.centerY;
+  if (Math.abs(dx) >= Math.abs(dy) * 0.8) {
+    const side = dx >= 0 ? "right" : "left";
+    return {
+      side,
+      x: side === "right" ? rect.right : rect.left,
+      y: clamp(itemY ?? rect.centerY, rect.top + 16, rect.bottom - 16),
+    };
+  }
+  const side = dy >= 0 ? "bottom" : "top";
+  return {
+    side,
+    x: rect.centerX,
+    y: side === "bottom" ? rect.bottom : rect.top,
+  };
+}
+
+function investigationEdgeLead(anchor, clearance = 16) {
+  if (anchor.side === "left") return { x: anchor.x - clearance, y: anchor.y };
+  if (anchor.side === "right") return { x: anchor.x + clearance, y: anchor.y };
+  if (anchor.side === "top") return { x: anchor.x, y: anchor.y - clearance };
+  return { x: anchor.x, y: anchor.y + clearance };
+}
+
+function simplifyOrthogonalPoints(points) {
+  const deduped = points.filter((point, index) => index === 0 || point.x !== points[index - 1].x || point.y !== points[index - 1].y);
+  return deduped.filter((point, index) => {
+    if (index === 0 || index === deduped.length - 1) return true;
+    const previous = deduped[index - 1];
+    const next = deduped[index + 1];
+    return !((previous.x === point.x && point.x === next.x) || (previous.y === point.y && point.y === next.y));
+  });
+}
+
+function orthogonalSegmentHitsRect(from, to, rect) {
+  if (from.x === to.x) {
+    const minY = Math.min(from.y, to.y);
+    const maxY = Math.max(from.y, to.y);
+    return from.x > rect.left && from.x < rect.right && maxY > rect.top && minY < rect.bottom;
+  }
+  if (from.y === to.y) {
+    const minX = Math.min(from.x, to.x);
+    const maxX = Math.max(from.x, to.x);
+    return from.y > rect.top && from.y < rect.bottom && maxX > rect.left && minX < rect.right;
+  }
+  return true;
+}
+
+function orthogonalRouteClear(points, obstacles) {
+  for (let index = 1; index < points.length; index += 1) {
+    if (obstacles.some((rect) => orthogonalSegmentHitsRect(points[index - 1], points[index], rect))) return false;
+  }
+  return true;
+}
+
+function orthogonalRouteScore(points) {
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    length += Math.abs(points[index].x - points[index - 1].x) + Math.abs(points[index].y - points[index - 1].y);
+  }
+  return length + Math.max(0, points.length - 2) * 8;
+}
+
+function routeInvestigationEdge(sourceAnchor, targetAnchor, obstacles, allRects) {
+  const sourceLead = investigationEdgeLead(sourceAnchor);
+  const targetLead = investigationEdgeLead(targetAnchor);
+  const bounds = allRects.reduce((result, rect) => ({
+    left: Math.min(result.left, rect.left),
+    top: Math.min(result.top, rect.top),
+    right: Math.max(result.right, rect.right),
+    bottom: Math.max(result.bottom, rect.bottom),
+  }), { left: sourceLead.x, top: sourceLead.y, right: sourceLead.x, bottom: sourceLead.y });
+  const outer = 28;
+  const xCorridors = [
+    (sourceLead.x + targetLead.x) / 2,
+    bounds.left - outer,
+    bounds.right + outer,
+  ];
+  const yCorridors = [
+    (sourceLead.y + targetLead.y) / 2,
+    bounds.top - outer,
+    bounds.bottom + outer,
+  ];
+  const candidates = [];
+
+  xCorridors.forEach((x) => {
+    candidates.push([sourceAnchor, sourceLead, { x, y: sourceLead.y }, { x, y: targetLead.y }, targetLead, targetAnchor]);
+  });
+  yCorridors.forEach((y) => {
+    candidates.push([sourceAnchor, sourceLead, { x: sourceLead.x, y }, { x: targetLead.x, y }, targetLead, targetAnchor]);
+  });
+  [bounds.left - outer, bounds.right + outer].forEach((x) => {
+    [bounds.top - outer, bounds.bottom + outer].forEach((y) => {
+      candidates.push([
+        sourceAnchor,
+        sourceLead,
+        { x, y: sourceLead.y },
+        { x, y },
+        { x: targetLead.x, y },
+        targetLead,
+        targetAnchor,
+      ]);
+      candidates.push([
+        sourceAnchor,
+        sourceLead,
+        { x: sourceLead.x, y },
+        { x, y },
+        { x, y: targetLead.y },
+        targetLead,
+        targetAnchor,
+      ]);
+    });
+  });
+
+  const clearRoutes = candidates
+    .map(simplifyOrthogonalPoints)
+    .filter((points) => orthogonalRouteClear(points, obstacles))
+    .sort((left, right) => orthogonalRouteScore(left) - orthogonalRouteScore(right));
+  const bentRoutes = clearRoutes.filter((points) => points.length >= 4);
+  return bentRoutes[0] ?? clearRoutes[0] ?? simplifyOrthogonalPoints([
+    sourceAnchor,
+    sourceLead,
+    { x: bounds.right + outer, y: sourceLead.y },
+    { x: bounds.right + outer, y: targetLead.y },
+    targetLead,
+    targetAnchor,
+  ]);
+}
+
+function investigationEdgePath(points) {
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${Math.round(point.x)} ${Math.round(point.y)}`).join(" ");
+}
+
+function investigationArrowDefs() {
+  const defs = svgNode("defs");
+  const marker = svgNode("marker");
+  marker.setAttribute("id", "investigation-flow-arrow");
+  marker.setAttribute("viewBox", "0 0 8 8");
+  marker.setAttribute("refX", "7");
+  marker.setAttribute("refY", "4");
+  marker.setAttribute("markerWidth", "6");
+  marker.setAttribute("markerHeight", "6");
+  marker.setAttribute("orient", "auto-start-reverse");
+  const arrow = svgNode("path");
+  arrow.setAttribute("d", "M 0 0 L 8 4 L 0 8 z");
+  arrow.setAttribute("class", "investigation-flow-arrow");
+  marker.append(arrow);
+  defs.append(marker);
+  return defs;
+}
+
 function drawInvestigationEdges() {
   const svg = el["investigation-edges"];
   svg.setAttribute("width", String(el["investigation-canvas"].clientWidth || 1800));
   svg.setAttribute("height", String(el["investigation-canvas"].clientHeight || 1000));
-  const children = [];
+  const children = [investigationArrowDefs()];
   if (state.investigationGraphNodes.length > 0) {
+    const graphCards = [...el["investigation-nodes"].children]
+      .filter((candidate) => candidate.dataset.entityType === "investigation_node");
+    const rects = graphCards
+      .map((card) => ({ card, rect: investigationEdgeRect(card) }))
+      .filter((entry) => entry.rect);
     state.investigationItemLinks.forEach((link) => {
       const itemElement = [...el["investigation-nodes"].querySelectorAll("[data-investigation-item-id]")]
         .find((candidate) => candidate.dataset.investigationItemId === link.fromItemId);
@@ -1715,17 +1889,22 @@ function drawInvestigationEdges() {
       const source = state.displayPositions.get(boardNodeKey("investigation_node", sourceCard.dataset.entityId));
       const target = state.displayPositions.get(boardNodeKey("investigation_node", link.toNodeId));
       if (!source || !target) return;
-      const x1 = source.x + sourceCard.offsetWidth;
-      const y1 = source.y + itemElement.offsetTop + itemElement.offsetHeight / 2;
-      const x2 = target.x;
-      const y2 = target.y + Math.min(targetCard.offsetHeight / 2, 72);
-      const line = svgNode("line");
-      line.setAttribute("x1", String(x1));
-      line.setAttribute("y1", String(y1));
-      line.setAttribute("x2", String(x2));
-      line.setAttribute("y2", String(y2));
-      line.setAttribute("class", "investigation-edge-line investigation-flow-line");
-      children.push(line);
+      const sourceRect = investigationEdgeRect(sourceCard);
+      const targetRect = investigationEdgeRect(targetCard);
+      if (!sourceRect || !targetRect) return;
+      const itemY = source.y + itemElement.offsetTop + itemElement.offsetHeight / 2;
+      const sourceAnchor = investigationEdgeAnchor(sourceRect, targetRect, itemY);
+      const targetAnchor = investigationEdgeAnchor(targetRect, sourceRect);
+      const obstacles = rects
+        .filter(({ card }) => card !== sourceCard && card !== targetCard)
+        .map(({ card }) => investigationEdgeRect(card, 12))
+        .filter(Boolean);
+      const points = routeInvestigationEdge(sourceAnchor, targetAnchor, obstacles, rects.map(({ rect }) => rect));
+      const path = svgNode("path");
+      path.setAttribute("d", investigationEdgePath(points));
+      path.setAttribute("class", "investigation-edge-line investigation-flow-line");
+      path.setAttribute("marker-end", "url(#investigation-flow-arrow)");
+      children.push(path);
     });
     svg.replaceChildren(...children);
     return;

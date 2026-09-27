@@ -84,6 +84,16 @@ test("Flow canvas bounds follow measured laid-out extents", () => {
   assert.match(app, /Math\.ceil\(maxY \+ 80\)/);
 });
 
+test("Flow edges route orthogonally around Node obstacles with directional arrowheads", () => {
+  assert.match(app, /function routeInvestigationEdge\(sourceAnchor, targetAnchor, obstacles, allRects\)/);
+  assert.match(app, /function orthogonalRouteClear\(points, obstacles\)/);
+  assert.match(app, /investigationEdgeRect\(card, 12\)/);
+  assert.match(app, /path\.setAttribute\("d", investigationEdgePath\(points\)\)/);
+  assert.match(app, /path\.setAttribute\("marker-end", "url\(#investigation-flow-arrow\)"\)/);
+  assert.match(app, /investigationArrowDefs\(\)/);
+  assert.match(css, /\.investigation-flow-line \{[^}]*stroke-linejoin: round/);
+});
+
 test("Flow viewport performs a device-aware initial fit before reusing persisted pan and zoom", () => {
   assert.match(app, /investigationViewportMeta: loadInvestigationViewportMeta\(\)/);
   assert.match(app, /function shouldAutoFitInvestigationViewport\(\)/);

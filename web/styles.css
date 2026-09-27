@@ -198,7 +198,8 @@ main { min-width: 0; }
 .investigation-item-link-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
 .investigation-item-link-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .graph-add-button { margin: 9px 12px 11px; padding: 7px 9px; border-style: dashed; border-radius: 6px; font-size: 9px; }
-.investigation-flow-line { stroke: rgba(133,148,255,.72); stroke-width: 1.8; }
+.investigation-flow-line { stroke: rgba(133,148,255,.72); stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.investigation-flow-arrow { fill: rgba(133,148,255,.9); }
 .investigation-flow-label { fill: #9da8ff; }
 .investigation-node-head, .investigation-node-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .investigation-node-type { color: #818a96; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
@@ -207,7 +208,7 @@ main { min-width: 0; }
 .investigation-node-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .investigation-node-copy { color: #858e99; font-size: 9px; line-height: 1.45; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .investigation-node-locator { color: #5e928f; font-size: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.investigation-edge-line { stroke: rgba(137,148,166,.52); stroke-width: 1.5; }
+.investigation-edge-line { stroke: rgba(137,148,166,.52); stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .investigation-edge-label { fill: #747d89; font-size: 9px; text-anchor: middle; paint-order: stroke; stroke: #0c0f13; stroke-width: 4px; stroke-linejoin: round; }
 .column-header {
   height: 42px; padding: 0 10px; display: flex; align-items: center; justify-content: space-between;
