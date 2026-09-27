@@ -297,7 +297,6 @@ test("builds a bounded Resume Capsule from normalized Task state without expandi
 
     repository.listTaskActivity = () => { throw new Error("Resume must not read Activity history"); };
     repository.listTaskArtifacts = () => { throw new Error("Resume must not expand Artifacts"); };
-    repository.listTaskRelations = () => { throw new Error("Resume must not expand Relations"); };
     repository.listInvestigationNodes = () => { throw new Error("Resume must not read Investigation graph"); };
     repository.listInvestigationItems = () => { throw new Error("Resume must not read Investigation graph"); };
     repository.listInvestigationItemLinks = () => { throw new Error("Resume must not read Investigation graph"); };
@@ -326,6 +325,7 @@ test("builds a bounded Resume Capsule from normalized Task state without expandi
     const leanResume = service.resumeTask(leanTask.id);
     assert.equal(Object.hasOwn(leanResume, "blocked"), false);
     assert.equal(Object.hasOwn(leanResume, "guardrail"), false);
+    assert.equal(Object.hasOwn(leanResume, "nextTaskId"), false);
     assert.equal(Object.hasOwn(leanResume, "activity"), false);
     assert.equal(Object.hasOwn(leanResume, "artifacts"), false);
     assert.equal(Object.hasOwn(leanResume, "relations"), false);
@@ -334,6 +334,145 @@ test("builds a bounded Resume Capsule from normalized Task state without expandi
     assert.equal(Object.hasOwn(leanResume, "state"), false);
     assert.equal(Object.hasOwn(leanResume, "currentFocus"), false);
     assert.equal(Object.hasOwn(leanResume, "decision"), false);
+  } finally {
+    repository.close();
+  }
+});
+
+test("derives nextTaskId only from an explicit next-task relation to one active canonical child", () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  try {
+    const project = service.createProject({ name: "Next Task pointer" }, human);
+    const parent = service.createTask({
+      projectId: project.id,
+      title: "Phase umbrella",
+      goal: "Continue through one canonical child at a time",
+      now: "Earlier children are complete",
+      next: "Continue with the current child",
+      status: "in_progress",
+    }, human);
+    const activeChild = service.createTask({
+      projectId: project.id,
+      title: "Current child",
+      status: "in_progress",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: activeChild.id,
+      toType: "task",
+      toId: parent.id,
+      kind: "part-of",
+    }, human);
+
+    // Hierarchy alone is not enough to infer that the prose Next points at this child.
+    assert.equal(Object.hasOwn(service.resumeTask(parent.id), "nextTaskId"), false);
+
+    service.createRelation({
+      fromType: "task",
+      fromId: parent.id,
+      toType: "task",
+      toId: activeChild.id,
+      kind: "next-task",
+    }, human);
+    assert.equal(service.resumeTask(parent.id).nextTaskId, activeChild.id);
+
+    const secondActiveChild = service.createTask({
+      projectId: project.id,
+      title: "Another active child",
+      status: "ready",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: secondActiveChild.id,
+      toType: "task",
+      toId: parent.id,
+      kind: "part-of",
+    }, human);
+    // Another active child does not create ambiguity until it is explicitly marked as Next.
+    assert.equal(service.resumeTask(parent.id).nextTaskId, activeChild.id);
+
+    service.createRelation({
+      fromType: "task",
+      fromId: parent.id,
+      toType: "task",
+      toId: secondActiveChild.id,
+      kind: "next-task",
+    }, human);
+    assert.equal(Object.hasOwn(service.resumeTask(parent.id), "nextTaskId"), false);
+
+    const containsParent = service.createTask({
+      projectId: project.id,
+      title: "Contains parent",
+      next: "Run the contained child",
+      status: "in_progress",
+    }, human);
+    const containedChild = service.createTask({
+      projectId: project.id,
+      title: "Contained child",
+      status: "ready",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: containsParent.id,
+      toType: "task",
+      toId: containedChild.id,
+      kind: "contains",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: containsParent.id,
+      toType: "task",
+      toId: containedChild.id,
+      kind: "next-task",
+    }, human);
+    assert.equal(service.resumeTask(containsParent.id).nextTaskId, containedChild.id);
+
+    const unrelated = service.createTask({
+      projectId: project.id,
+      title: "Unrelated task",
+      status: "ready",
+    }, human);
+    const nonChildParent = service.createTask({
+      projectId: project.id,
+      title: "Non-child pointer",
+      next: "Do something else",
+      status: "in_progress",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: nonChildParent.id,
+      toType: "task",
+      toId: unrelated.id,
+      kind: "next-task",
+    }, human);
+    assert.equal(Object.hasOwn(service.resumeTask(nonChildParent.id), "nextTaskId"), false);
+
+    const unrecordedParent = service.createTask({
+      projectId: project.id,
+      title: "No explicit Next",
+      status: "in_progress",
+    }, human);
+    const onlyChild = service.createTask({
+      projectId: project.id,
+      title: "Only child",
+      status: "ready",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: onlyChild.id,
+      toType: "task",
+      toId: unrecordedParent.id,
+      kind: "part-of",
+    }, human);
+    service.createRelation({
+      fromType: "task",
+      fromId: unrecordedParent.id,
+      toType: "task",
+      toId: onlyChild.id,
+      kind: "next-task",
+    }, human);
+    assert.equal(Object.hasOwn(service.resumeTask(unrecordedParent.id), "nextTaskId"), false);
   } finally {
     repository.close();
   }

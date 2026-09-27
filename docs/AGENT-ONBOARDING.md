@@ -152,12 +152,13 @@ Keep handoffs short and operational. Conceptually, a useful resume capsule answe
 - **Goal**: what this work is trying to achieve;
 - **Now**: the current verified state or last meaningful checkpoint;
 - **Next**: the most useful next action;
+- **Next Task**: only when `Next` has an explicit canonical child pointer, an opaque `nextTaskId` reference that lets the next session jump there without listing Tasks;
 - **Blocked**: only when something currently prevents progress;
 - **Code**: only the relevant file/symbol/component anchors when code context is needed;
 - **Evidence**: only the tests/logs/screenshots/operations needed to trust the current state;
 - **Guardrail**: only when a constraint or "do not repeat" fact must survive the handoff.
 
-Do not fill every field mechanically. Leave the smallest capsule that lets the next session act correctly. Activity, Artifacts, Relations, Investigation, and Code Map are drill-down context, not a mandatory pre-read bundle.
+Do not fill every field mechanically. Leave the smallest capsule that lets the next session act correctly. Activity, Artifacts, Relations, Investigation, and Code Map are drill-down context, not a mandatory pre-read bundle. `nextTaskId` is derived rather than persisted as a second workflow state: when `Next` is explicitly recorded, the parent has a `next-task` relation to a canonical child represented by `part-of` / `contains`, and exactly one such non-done child is selected, Resume may expose that child's id; missing, stale, non-child, or ambiguous pointers are omitted fail-closed.
 
 Do not put secrets into Activity text or Artifact locators.
 

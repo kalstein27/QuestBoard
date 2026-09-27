@@ -97,10 +97,51 @@ interface BundledScipDecoder {
 }
 
 const require = createRequire(import.meta.url);
+
+interface GoogleProtobufBinaryReader {
+  readPackedInt32?: () => number[];
+  readPackedEnum?: () => number[];
+  readPackableInt32Into?: (values: number[]) => void;
+  readPackableEnumInto?: (values: number[]) => void;
+}
+
+interface GoogleProtobufRuntime {
+  BinaryReader?: { prototype?: GoogleProtobufBinaryReader };
+}
+
+function installGoogleProtobufV4Compatibility(): void {
+  const runtime = require("google-protobuf") as GoogleProtobufRuntime;
+  const prototype = runtime.BinaryReader?.prototype;
+  if (!prototype) throw new Error("google-protobuf BinaryReader is unavailable");
+
+  if (typeof prototype.readPackedInt32 !== "function") {
+    if (typeof prototype.readPackableInt32Into !== "function") {
+      throw new Error("google-protobuf runtime does not support packed int32 decoding");
+    }
+    prototype.readPackedInt32 = function readPackedInt32Compat(this: GoogleProtobufBinaryReader): number[] {
+      const values: number[] = [];
+      this.readPackableInt32Into!(values);
+      return values;
+    };
+  }
+
+  if (typeof prototype.readPackedEnum !== "function") {
+    if (typeof prototype.readPackableEnumInto !== "function") {
+      throw new Error("google-protobuf runtime does not support packed enum decoding");
+    }
+    prototype.readPackedEnum = function readPackedEnumCompat(this: GoogleProtobufBinaryReader): number[] {
+      const values: number[] = [];
+      this.readPackableEnumInto!(values);
+      return values;
+    };
+  }
+}
+
 let bundledScipDecoderPromise: Promise<BundledScipDecoder> | undefined;
 
 async function bundledScipDecoder(): Promise<BundledScipDecoder> {
   bundledScipDecoderPromise ??= (async () => {
+    installGoogleProtobufV4Compatibility();
     const decoderPath = require.resolve("@sourcegraph/scip-typescript/dist/src/scip.js");
     const module = await import(pathToFileURL(decoderPath).href) as {
       scip?: BundledScipDecoder;

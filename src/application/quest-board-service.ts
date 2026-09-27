@@ -97,6 +97,7 @@ export interface TaskResumeCapsule {
   goal: string;
   now: string;
   next: string;
+  nextTaskId?: string;
   blocked?: string;
   guardrail?: string;
 }
@@ -328,6 +329,7 @@ export class QuestBoardService {
 
   resumeTask(taskId: string): TaskResumeCapsule {
     const task = this.getTask(taskId);
+    const nextTaskId = this.resolveNextTaskId(task);
     return {
       taskId: task.id,
       projectId: task.projectId,
@@ -335,6 +337,7 @@ export class QuestBoardService {
       goal: task.goal,
       now: task.now,
       next: task.next,
+      ...(nextTaskId ? { nextTaskId } : {}),
       ...(task.blocked ? { blocked: task.blocked } : {}),
       ...(task.guardrail ? { guardrail: task.guardrail } : {}),
     };
@@ -1176,6 +1179,35 @@ export class QuestBoardService {
       };
       return this.repository.upsertBoardPosition(position);
     });
+  }
+
+  private resolveNextTaskId(task: Task): string | undefined {
+    if (task.status === "done" || task.next === defaultTaskNext(task.status)) return undefined;
+
+    const childTaskIds = new Set<string>();
+    const explicitNextTaskIds = new Set<string>();
+    for (const relation of this.repository.listTaskRelations(task.id)) {
+      if (relation.fromType !== "task" || relation.toType !== "task") continue;
+
+      if (relation.kind === "part-of" && relation.toId === task.id) {
+        childTaskIds.add(relation.fromId);
+      } else if (relation.kind === "contains" && relation.fromId === task.id) {
+        childTaskIds.add(relation.toId);
+      } else if (relation.kind === "next-task" && relation.fromId === task.id) {
+        explicitNextTaskIds.add(relation.toId);
+      }
+    }
+
+    const activeCandidates = [...explicitNextTaskIds]
+      .filter((candidateTaskId) => childTaskIds.has(candidateTaskId))
+      .map((candidateTaskId) => this.repository.getTask(candidateTaskId))
+      .filter(
+        (candidate): candidate is Task =>
+          candidate !== undefined && candidate.projectId === task.projectId && candidate.status !== "done",
+      );
+
+    const activeCandidate = activeCandidates[0];
+    return activeCandidates.length === 1 && activeCandidate ? activeCandidate.id : undefined;
   }
 
   private runMutation<T>(

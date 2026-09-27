@@ -49,6 +49,7 @@ QuestBoard의 핵심 산출물은 거대한 작업 일지가 아니라, 언제�
 Goal      지금 해결하려는 것
 Now       현재 도달한 상태 / 방금 확인한 사실
 Next      바로 다음 액션
+Next Task Next가 `next-task` relation으로 특정 canonical child Task를 명시할 때만 opaque task id reference
 Blocked   진행을 막는 조건이 있을 때만
 Code      관련 코드/컴포넌트 위치가 필요할 때만
 Evidence  테스트·로그·스크린샷 등 판단에 필요한 최소 근거

@@ -10,7 +10,7 @@ This document records the smallest implementation decisions needed to begin the 
 - `node:test` for the initial test suite
 - no runtime framework, ORM, HTTP framework, agent SDK, or vendor-specific dependency in the foundation/core layers
 
-The foundation/core runtime continues to use Node built-ins for SQLite, HTTP, streams, readline, and tests. Code Map is an optional adapter capability and carries one pinned runtime dependency, `@sourcegraph/scip-typescript`, behind the code-intelligence adapter boundary. That package supplies both the TypeScript SCIP indexer and the decoder QuestBoard uses to read generated `.scip` files, which keeps managed-MCP installation self-contained without moving provider-specific concepts into the core domain.
+The foundation/core runtime continues to use Node built-ins for SQLite, HTTP, streams, readline, and tests. Code Map is an optional adapter capability behind the code-intelligence boundary. Managed installation pins `@sourcegraph/scip-typescript` for the TypeScript SCIP indexer and `google-protobuf` 4.0.3 for secure binary decoding; the adapter installs a narrow compatibility shim for the v3-generated SCIP decoder methods removed by protobuf v4. This keeps the managed-MCP install self-contained without moving provider-specific concepts into the core domain.
 
 ## Dependency direction
 
