@@ -68,11 +68,20 @@ test("coarse pointer Flow keeps Item titles primary and reveals row actions on f
   assert.match(css, /\.graph-add-button[\s\S]*opacity: 1/);
 });
 
-test("Flow default placement derives columns from the live board width while preserving saved positions", () => {
+test("Flow default placement uses measured Node heights and preserves saved positions", () => {
   assert.match(app, /function investigationDefaultColumnCount\(\)[\s\S]*clientWidth[\s\S]*return clamp\([\s\S]*1, 4\)/);
-  assert.match(app, /const defaultColumns = investigationDefaultColumnCount\(\)/);
-  assert.match(app, /Math\.ceil\(entityCount \/ defaultColumns\)/);
-  assert.match(app, /const saved = state\.boardPositions\.get[\s\S]*if \(saved\) return \{ x: saved\.x, y: saved\.y \}/);
+  assert.match(app, /function layoutUnsavedInvestigationGraphNodes\(cards\)/);
+  assert.match(app, /state\.boardPositions\.has\(key\)\) return/);
+  assert.match(app, /card\.offsetHeight \+ gap/);
+  assert.match(app, /columnBottoms\[candidate\] < columnBottoms\[column\]/);
+  assert.match(app, /layoutUnsavedInvestigationGraphNodes\(graphNodes\)[\s\S]*syncInvestigationCanvasBounds\(\)[\s\S]*drawInvestigationEdges\(\)/);
+});
+
+test("Flow canvas bounds follow measured laid-out extents", () => {
+  assert.match(app, /function syncInvestigationCanvasBounds\(\)/);
+  assert.match(app, /maxX = Math\.max\(maxX, position\.x \+ card\.offsetWidth\)/);
+  assert.match(app, /maxY = Math\.max\(maxY, position\.y \+ card\.offsetHeight\)/);
+  assert.match(app, /Math\.ceil\(maxY \+ 80\)/);
 });
 
 test("Flow viewport performs a device-aware initial fit before reusing persisted pan and zoom", () => {

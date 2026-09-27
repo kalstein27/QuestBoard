@@ -821,26 +821,29 @@ function codeMapRelationBindingForInvestigationItem(itemId) {
 function renderInvestigationBoard() {
   const canvas = el["investigation-canvas"];
   const nodesLayer = el["investigation-nodes"];
-  const canvasWidth = 1800;
   const graphMode = state.investigationGraphNodes.length > 0;
-  const entityCount = graphMode ? state.investigationGraphNodes.length : state.tasks.length + state.projectArtifacts.length;
-  const defaultColumns = investigationDefaultColumnCount();
-  const canvasHeight = Math.max(1000, 420 + Math.ceil(entityCount / defaultColumns) * 230);
-  canvas.style.width = `${canvasWidth}px`;
-  canvas.style.height = `${canvasHeight}px`;
+  canvas.style.width = "1800px";
+  canvas.style.height = "1000px";
   applyInvestigationViewport();
   state.displayPositions = new Map();
 
   if (graphMode) {
+    const columns = investigationDefaultColumnCount();
     const graphNodes = state.investigationGraphNodes.map((graphNode, index) => {
-      const position = investigationPosition("investigation_node", graphNode.id, index, false);
+      const key = boardNodeKey("investigation_node", graphNode.id);
+      const saved = state.boardPositions.get(key);
+      const position = saved
+        ? { x: saved.x, y: saved.y }
+        : { x: 40 + (index % columns) * 360, y: 90 };
       const card = investigationGraphNode(graphNode, position);
-      state.displayPositions.set(boardNodeKey("investigation_node", graphNode.id), position);
+      state.displayPositions.set(key, position);
       return card;
     });
     nodesLayer.replaceChildren(...graphNodes);
     renderInvestigationInspector();
     requestAnimationFrame(() => {
+      layoutUnsavedInvestigationGraphNodes(graphNodes);
+      syncInvestigationCanvasBounds();
       drawInvestigationEdges();
       if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
       focusCodeMapSyncNodes();
@@ -864,6 +867,7 @@ function renderInvestigationBoard() {
   state.selectedInvestigationNodeId = null;
   renderInvestigationInspector();
   requestAnimationFrame(() => {
+    syncInvestigationCanvasBounds();
     drawInvestigationEdges();
     if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
   });
@@ -876,6 +880,58 @@ function investigationDefaultColumnCount() {
   const horizontalPadding = 40;
   const usableWidth = Math.max(cardWidth, boardWidth - horizontalPadding * 2);
   return clamp(Math.floor((usableWidth + (columnStep - cardWidth)) / columnStep), 1, 4);
+}
+
+function layoutUnsavedInvestigationGraphNodes(cards) {
+  const columns = investigationDefaultColumnCount();
+  const columnStep = 360;
+  const columnWidth = 330;
+  const gap = 28;
+  const columnX = Array.from({ length: columns }, (_, index) => 40 + index * columnStep);
+  const columnBottoms = Array(columns).fill(90);
+
+  state.investigationGraphNodes.forEach((graphNode, index) => {
+    const key = boardNodeKey("investigation_node", graphNode.id);
+    const saved = state.boardPositions.get(key);
+    const card = cards[index];
+    if (!saved || !card) return;
+    const right = saved.x + card.offsetWidth;
+    columnX.forEach((x, column) => {
+      const overlapsColumn = saved.x < x + columnWidth && right > x;
+      if (overlapsColumn) columnBottoms[column] = Math.max(columnBottoms[column], saved.y + card.offsetHeight + gap);
+    });
+  });
+
+  state.investigationGraphNodes.forEach((graphNode, index) => {
+    const key = boardNodeKey("investigation_node", graphNode.id);
+    if (state.boardPositions.has(key)) return;
+    const card = cards[index];
+    if (!card) return;
+    let column = 0;
+    for (let candidate = 1; candidate < columns; candidate += 1) {
+      if (columnBottoms[candidate] < columnBottoms[column]) column = candidate;
+    }
+    const position = { x: columnX[column], y: columnBottoms[column] };
+    setInvestigationNodePosition(card, position);
+    state.displayPositions.set(key, position);
+    columnBottoms[column] = position.y + card.offsetHeight + gap;
+  });
+}
+
+function syncInvestigationCanvasBounds() {
+  const cards = [...el["investigation-nodes"].children].filter((card) => card.dataset.entityId);
+  const boardWidth = el["investigation-board"]?.clientWidth || 0;
+  let maxX = 0;
+  let maxY = 0;
+  cards.forEach((card) => {
+    const key = boardNodeKey(card.dataset.entityType, card.dataset.entityId);
+    const position = state.displayPositions.get(key);
+    if (!position) return;
+    maxX = Math.max(maxX, position.x + card.offsetWidth);
+    maxY = Math.max(maxY, position.y + card.offsetHeight);
+  });
+  el["investigation-canvas"].style.width = `${Math.max(1000, boardWidth, Math.ceil(maxX + 80))}px`;
+  el["investigation-canvas"].style.height = `${Math.max(1000, Math.ceil(maxY + 80))}px`;
 }
 
 function investigationPosition(entityType, entityId, index, artifact) {
