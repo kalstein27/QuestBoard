@@ -49,32 +49,89 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     );
     assert.equal(projectUpdated.body.project.status, "active");
 
-    const taskCreated = await jsonRequest<{ task: { id: string; status: string; revision: number } }>(
+    const taskCreated = await jsonRequest<{ task: { id: string; status: string; revision: number; goal: string; now: string; next: string; blocked?: string } }>(
       `${baseUrl}/tasks`,
       {
         method: "POST",
         actor: human,
-        body: { projectId, title: "Expose local API", status: "ready", priority: "high", tags: ["api"] },
+        body: {
+          projectId,
+          title: "Expose local API",
+          goal: "Keep the Task continuity contract vendor-neutral",
+          now: "HTTP Task creation is under verification",
+          next: "Verify continuity update and persistence",
+          status: "ready",
+          priority: "high",
+          tags: ["api"],
+        },
       },
     );
     assert.equal(taskCreated.response.status, 201);
+    assert.equal(taskCreated.body.task.goal, "Keep the Task continuity contract vendor-neutral");
+    assert.equal(taskCreated.body.task.now, "HTTP Task creation is under verification");
+    assert.equal(taskCreated.body.task.next, "Verify continuity update and persistence");
+    assert.equal(taskCreated.body.task.blocked, undefined);
     const taskId = taskCreated.body.task.id;
+
+    const initialResume = await jsonRequest<{
+      resume: { taskId: string; projectId: string; status: string; goal: string; now: string; next: string; blocked?: string; guardrail?: string };
+    }>(`${baseUrl}/tasks/${taskId}/resume`);
+    assert.equal(initialResume.response.status, 200);
+    assert.deepEqual(initialResume.body.resume, {
+      taskId,
+      projectId,
+      status: "ready",
+      goal: "Keep the Task continuity contract vendor-neutral",
+      now: "HTTP Task creation is under verification",
+      next: "Verify continuity update and persistence",
+    });
 
     const readyTasks = await jsonRequest<{ tasks: Array<{ id: string }> }>(
       `${baseUrl}/tasks?projectId=${encodeURIComponent(projectId)}&status=ready`,
     );
     assert.deepEqual(readyTasks.body.tasks.map((task) => task.id), [taskId]);
 
-    const taskUpdated = await jsonRequest<{ task: { status: string; revision: number } }>(
+    const taskUpdated = await jsonRequest<{ task: { status: string; revision: number; now: string; next: string; guardrail?: string } }>(
       `${baseUrl}/tasks/${taskId}`,
-      { method: "PATCH", actor: chatgpt, requestId: "http:update:0001", body: { status: "in_progress" } },
+      {
+        method: "PATCH",
+        actor: chatgpt,
+        requestId: "http:update:0001",
+        body: {
+          status: "in_progress",
+          now: "HTTP continuity update verified",
+          next: "Continue to evidence attachment",
+          guardrail: "Do not duplicate Task status as a separate State field",
+        },
+      },
     );
     assert.equal(taskUpdated.body.task.status, "in_progress");
+    assert.equal(taskUpdated.body.task.now, "HTTP continuity update verified");
+    assert.equal(taskUpdated.body.task.next, "Continue to evidence attachment");
+    assert.equal(taskUpdated.body.task.guardrail, "Do not duplicate Task status as a separate State field");
     assert.equal(taskUpdated.body.task.revision, 2);
+
+    const updatedResume = await jsonRequest<{ resume: { status: string; now: string; next: string; guardrail?: string } }>(
+      `${baseUrl}/tasks/${taskId}/resume`,
+    );
+    assert.equal(updatedResume.body.resume.status, "in_progress");
+    assert.equal(updatedResume.body.resume.now, "HTTP continuity update verified");
+    assert.equal(updatedResume.body.resume.next, "Continue to evidence attachment");
+    assert.equal(updatedResume.body.resume.guardrail, "Do not duplicate Task status as a separate State field");
 
     const replayedUpdate = await jsonRequest<{ task: { status: string; revision: number } }>(
       `${baseUrl}/tasks/${taskId}`,
-      { method: "PATCH", actor: chatgpt, requestId: "http:update:0001", body: { status: "in_progress" } },
+      {
+        method: "PATCH",
+        actor: chatgpt,
+        requestId: "http:update:0001",
+        body: {
+          status: "in_progress",
+          now: "HTTP continuity update verified",
+          next: "Continue to evidence attachment",
+          guardrail: "Do not duplicate Task status as a separate State field",
+        },
+      },
     );
     assert.equal(replayedUpdate.body.task.revision, 2);
 
@@ -85,6 +142,57 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     assert.equal(staleUpdate.response.status, 409);
     assert.equal(staleUpdate.body.error.code, "revision_conflict");
     assert.equal(staleUpdate.body.error.actualRevision, 2);
+
+    const checkpoint = await jsonRequest<{
+      resume: { taskId: string; status: string; goal: string; now: string; next: string; guardrail?: string };
+    }>(`${baseUrl}/tasks/${taskId}/checkpoint`, {
+      method: "POST",
+      actor: chatgpt,
+      requestId: "http:checkpoint:0001",
+      body: {
+        now: "HTTP checkpoint write verified",
+        next: "Read back the same Resume Capsule",
+        guardrail: null,
+        activity: { type: "note_added", summary: "HTTP checkpoint contract verified" },
+      },
+    });
+    assert.equal(checkpoint.response.status, 200);
+    assert.equal(checkpoint.body.resume.status, "in_progress");
+    assert.equal(checkpoint.body.resume.now, "HTTP checkpoint write verified");
+    assert.equal(checkpoint.body.resume.next, "Read back the same Resume Capsule");
+    assert.equal(Object.hasOwn(checkpoint.body.resume, "guardrail"), false);
+    assert.deepEqual(checkpoint.body.resume, service.resumeTask(taskId));
+    assert.equal(service.getTask(taskId).revision, 3);
+    assert.equal(service.listTaskActivity(taskId).length, 3);
+
+    const replayedCheckpoint = await jsonRequest<{ resume: Record<string, unknown> }>(`${baseUrl}/tasks/${taskId}/checkpoint`, {
+      method: "POST",
+      actor: chatgpt,
+      requestId: "http:checkpoint:0001",
+      body: {
+        now: "HTTP checkpoint write verified",
+        next: "Read back the same Resume Capsule",
+        guardrail: null,
+        activity: { type: "note_added", summary: "HTTP checkpoint contract verified" },
+      },
+    });
+    assert.equal(replayedCheckpoint.response.status, 200);
+    assert.deepEqual(replayedCheckpoint.body.resume, checkpoint.body.resume);
+    assert.equal(service.getTask(taskId).revision, 3);
+    assert.equal(service.listTaskActivity(taskId).length, 3);
+
+    const blankCheckpointClear = await jsonRequest<{ error: { code: string } }>(`${baseUrl}/tasks/${taskId}/checkpoint`, {
+      method: "POST",
+      actor: chatgpt,
+      body: {
+        now: "Blank string is not a clear signal",
+        next: "Use null for explicit clear",
+        guardrail: "   ",
+      },
+    });
+    assert.equal(blankCheckpointClear.response.status, 400);
+    assert.equal(blankCheckpointClear.body.error.code, "bad_request");
+    assert.equal(service.getTask(taskId).revision, 3);
 
     const claimed = await jsonRequest<{ claim: { id: string; agentId: string; state: string } }>(
       `${baseUrl}/tasks/${taskId}/claim`,
@@ -175,7 +283,7 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     assert.deepEqual(investigation.body.artifacts.map((item) => item.id), [artifactId]);
     assert.deepEqual(investigation.body.relations.map((item) => item.id), [relationCreated.body.relation.id]);
     assert.equal(investigation.body.positions.length, 2);
-    assert.equal(investigation.body.tasks[0]?.revision, 2);
+    assert.equal(investigation.body.tasks[0]?.revision, 3);
 
     const graphNodeCreated = await jsonRequest<{ node: { id: string; title: string } }>(
       `${baseUrl}/projects/${projectId}/investigation/nodes`,
@@ -263,6 +371,7 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     assert.deepEqual(activity.body.activities.map((item) => item.type), [
       "task_created",
       "status_changed",
+      "note_added",
       "task_claimed",
       "note_added",
       "artifact_attached",

@@ -1,48 +1,80 @@
 # QuestBoard 프로젝트 계획서
 
-상태: 구현 진행 / Foundation + Local HTTP API + Web Quest Board + Investigation Board MVP + CLI + MCP + Evidence Layer
+상태: 제품 방향 재정렬 / AI-human work continuity 중심
 
-이 문서는 **QuestBoard**라는 독립 프로젝트의 제품 방향, 범위, 데이터 모델, 에이전트 연동 방식, 단계별 구현 계획을 정의한다. 최초 작성 시점에는 구현 전 계획 문서였으며, 현재는 agent-neutral core, SQLite foundation, localhost/Tailnet HTTP API, Web Quest Board, CLI/MCP adapter, Artifact/Relation 기반 Evidence layer와 첫 Investigation Board MVP까지 구현이 진행되었다.
+이 문서는 **QuestBoard**의 제품 방향에 대한 최상위 기준이다. 현재 구현에는 Task/Claim/Activity/Artifact/Relation, Investigation Graph, Code Map, HTTP/CLI/MCP/Web이 포함되어 있지만, 기능의 존재 자체가 앞으로도 유지·확장해야 할 이유는 아니다. 이후 기능 판단은 항상 **사람과 AI가 작업 목표와 현재 위치를 공유하고, 컨텍스트가 끊겨도 최소 토큰과 최소 액션으로 같은 작업 흐름에 복귀할 수 있는가**를 기준으로 한다.
+
+아래 세 가지 원칙이 하위 구현 세부사항과 충돌하면 이 원칙을 우선한다.
+
+1. **Continuity first**: AI의 세션·컨텍스트·메모리가 끊겨도 작업은 이어져야 한다.
+2. **Minimal outside, dense inside**: 사람에게 보이는 화면과 조작은 단순하게, 내부 연결과 복구 정보는 촘촘하게 유지한다.
+3. **Do not replace specialist tools**: Git, Jira, Confluence, Mantis가 잘하는 일을 QuestBoard가 다시 만들지 않는다.
 
 ---
 
-## 1. 이름과 콘셉트
+## 1. 제품 정체성
 
 제품명: **QuestBoard**
 
-핵심 이미지:
-- 게임 속 길드의 의뢰 게시판처럼 여러 작업이 걸려 있고, 에이전트가 의뢰를 선택해 수행하는 공간
-- 추리물/형사물의 사건 보드처럼 작업, 증거, 관련 문서, 에이전트 활동, 의존성을 카드와 연결선으로 배열하는 공간
+QuestBoard는 개인 작업자가 AI와 함께 요구사항을 구현하고 개선할 때 사용하는 **작업 연속성(work continuity) 협업 도구**다.
 
-QuestBoard는 단순 TODO 앱이 아니라 **사람과 여러 AI 에이전트가 함께 사용하는 로컬 우선 작업 조정 보드**를 목표로 한다.
+핵심 질문은 세 개뿐이다.
+
+- **무엇을 하려는가?** — 공유된 Goal / Task
+- **지금 어디까지 왔는가?** — 현재 Focus / 의미 있는 Checkpoint
+- **다음에 무엇을 해야 하는가?** — Next Action / Blocker / 최소 Evidence
+
+사람은 이 세 질문의 답을 짧게 보고 판단할 수 있어야 한다. AI는 필요할 때만 뒤에 연결된 코드 위치, 검증 결과, 관련 Task, Activity, Artifact, Code Map 근거를 더 읽는다.
+
+QuestBoard가 성공하면 새 AI 세션은 긴 대화 기록을 재독하거나 사용자가 장문의 인수인계를 다시 작성하지 않고도 몇 번의 조회만으로 기존 작업 레일에 복귀할 수 있다.
 
 ---
 
 ## 2. 핵심 목표
 
-QuestBoard는 ChatGPT/C2CT, Claude, Antigravity 및 향후 추가되는 다른 에이전트가 특정 벤더에 종속되지 않고 같은 작업 상태를 공유할 수 있게 한다.
+1. **사람과 AI가 같은 목표를 본다.** 요청의 목적, 현재 범위, 완료 기준을 하나의 짧은 작업 상태로 공유한다.
+2. **현재 작업 위치를 잃지 않는다.** 지금 진행 중인 단계, 방금 확인된 사실, 다음 액션, 막힌 이유를 명확히 남긴다.
+3. **AI가 싸게 복귀한다.** 새 채팅, 컨텍스트 압축, 모델 교체, 에이전트 교체 뒤에도 최소 조회와 최소 토큰으로 작업을 재개할 수 있다.
+4. **사람이 쉽게 따라간다.** 내부 추론 전문을 노출하지 않고도 어떤 목표를 향해 어떤 단계가 완료됐고 무엇이 남았는지 이해할 수 있다.
+5. **필요한 근거만 연결한다.** 코드 위치, 테스트 결과, 스크린샷, operation, 문서 링크 등 재개와 판단에 필요한 Evidence만 연결한다.
+6. **vendor-neutral을 유지한다.** ChatGPT/C2CT, Claude, CLI, MCP 및 미래 에이전트가 같은 canonical work state를 공유할 수 있게 한다.
 
-주요 목표:
-1. 사용자와 여러 에이전트가 같은 Task / Project / Activity 상태를 읽고 수정할 수 있다.
-2. 작업이 어느 에이전트에 의해 진행 중인지 명확하게 표시한다.
-3. 한 에이전트가 남긴 작업 결과를 다른 에이전트가 자연스럽게 이어받을 수 있다.
-4. 작업의 문서, 파일, 커밋, 스크린샷, 로그 등 관련 증거를 하나의 카드 주변에 연결할 수 있다.
-5. 특정 에이전트의 내부 개념을 핵심 데이터 모델에 강제하지 않는다.
+### Resume Capsule
+
+QuestBoard의 핵심 산출물은 거대한 작업 일지가 아니라, 언제든 다시 작업을 시작할 수 있게 하는 작은 **Resume Capsule**이다.
+
+개념적으로 다음 정보면 충분해야 한다.
+
+```text
+Goal      지금 해결하려는 것
+Now       현재 도달한 상태 / 방금 확인한 사실
+Next      바로 다음 액션
+Blocked   진행을 막는 조건이 있을 때만
+Code      관련 코드/컴포넌트 위치가 필요할 때만
+Evidence  테스트·로그·스크린샷 등 판단에 필요한 최소 근거
+Guardrail 다시 하지 말아야 할 것 / 보존해야 할 제약이 있을 때만
+```
+
+모든 필드를 항상 채우는 것이 목표가 아니다. **재개에 필요한 최소 정보만 남기는 것**이 목표다.
 
 ---
 
 ## 3. 비목표
 
-QuestBoard 초기 버전은 다음을 목표로 하지 않는다.
+QuestBoard는 다음 제품을 대체하지 않는다.
 
-- 범용 프로젝트 관리 SaaS
-- GitHub/Jira/Linear 대체
-- 원격 다중 사용자 인증 시스템
-- 에이전트 런타임 자체
-- 코드 실행기
-- C2CT의 work lane이나 runtime approval을 대체하는 권한 시스템
+- **Git / GitHub**: 소스 백업, 버전 이력, branch, diff, merge, release 관리
+- **Jira / Linear**: 일정, sprint, 조직 단위 backlog, 담당자·리소스·프로젝트 관리
+- **Confluence / Wiki**: 장문 지식 베이스, 상세 설계 문서, 조직 문서 허브
+- **Mantis 등 bug tracker**: 정식 오류 접수, triage, 버그 수명주기 관리
+- **IDE / code browser**: 범용 symbol explorer, 전체 call graph 탐색, 소스 편집 환경
+- **AI transcript recorder**: chain-of-thought, 모든 시행착오, 모든 tool call을 영구 기록하는 시스템
+- **에이전트 런타임 / 권한 시스템**: 코드 실행, filesystem 권한, C2CT lane/runtime approval 대체
+- **범용 프로젝트 관리 SaaS**: 조직 운영 전반을 한곳으로 흡수하는 제품
 
 QuestBoard의 Claim은 협업 상태이고, 로컬 프로젝트 변경 권한은 각 에이전트/도구의 별도 보안 경계를 따른다.
+
+외부 전문 도구의 정보를 QuestBoard에 복제해서 또 하나의 source of truth를 만들지 않는다. 필요하면 링크나 짧은 참조만 둔다.
 
 ---
 
@@ -149,31 +181,37 @@ Task / Artifact / Note 사이의 연결.
 
 ## 5. 제품 경험
 
-QuestBoard는 두 개의 축으로 성장한다.
+제품 경험은 기능 수가 아니라 **작업 재개 비용**을 줄이는 방향으로 설계한다.
 
-### Quest Board
+개념적으로 세 surface면 충분하다.
 
-작업 진행 관점.
+### Quest — 무엇을 하는가
 
-- 여러 status column
-- priority / tag
-- Claim 표시
-- agent/human attribution
-- drag-and-drop
-- task drawer
+- 현재 목표와 Task
+- 상태와 다음 액션
+- 필요할 때만 Claim/actor 표시
+- 상세 정보는 drawer에서 요청 시 노출
 
-### Investigation Board
+### Flow — 어디까지 왔는가
 
-프로젝트 동작 구조와 그 위치의 실제 작업을 함께 보는 실행 지도 관점.
+현재 구현의 Investigation 기능을 이 역할로 사용한다.
 
-- 독립적인 Investigation Node로 기능/흐름/컴포넌트/아이디어를 표현
-- Node마다 설명과 여러 Item을 보유하고, Item마다 별도 설명을 기록
-- 하나의 Item에 여러 canonical Task를 연결해 Quest Board와 동일한 작업 상태를 공유
-- 특정 Item에서 다른 Investigation Node로 방향성 flow edge 연결
-- 아직 어디에도 연결하지 않은 Node도 TODO/후보 구조로 유지
-- 기존 Artifact/Relation은 증거 관계로 보존하고 기존 Task/Artifact free-layout도 Graph 도입 전 프로젝트의 호환 화면으로 유지
+- 전체 사고 과정을 그리지 않는다.
+- 의미 있는 단계, 결정, 분기, blocker, 완료 checkpoint만 표현한다.
+- 사람이 현재 위치와 다음 흐름을 빠르게 파악하는 것이 목적이다.
+- Node/Item/edge의 존재가 목적이 아니라 **현재 작업의 지도**가 되는 것이 목적이다.
 
-1차 Investigation Graph는 Node/Item/Task overlay/Item-origin flow link의 SQLite·service·HTTP·Web·agent-tool/MCP 수직 슬라이스를 구현한다. Node 위치는 Task revision/Activity와 분리된 `board_positions`에 저장하며 기존 위치 이동 undo/redo와 50~150% 확대/축소를 그대로 사용한다. 검색/필터, Item reorder, 전용 pan, semantic zoom, 더 풍부한 편집 UI는 후속 단계다.
+### Code — 어디를 보고 있는가
+
+현재 Code Map을 범용 코드 탐색기가 아니라 **작업 컨텍스트 복구 장치**로 제한한다.
+
+- 관련 architecture 영역과 핵심 symbol/file 위치를 찾는다.
+- Task/Flow에서 관련 코드로 이동하고 다시 돌아올 수 있게 한다.
+- relation의 근거가 필요할 때 source evidence를 보여준다.
+- Git이 담당하는 코드 snapshot/diff/version history는 중복 구현하지 않는다.
+- IDE가 담당하는 전체 symbol browser/call graph 기능을 목표로 하지 않는다.
+
+화면은 기본적으로 현재 작업에 필요한 정보만 보여준다. 고급 구조와 근거는 drill-down으로 숨긴다. **백조처럼 표면은 조용하고, 내부 연결은 빠르고 정교하게** 유지한다.
 
 ---
 
@@ -263,13 +301,11 @@ Task 변경/Claim/release는 Activity와 같은 transaction에서 기록한다.
 
 public internet 노출과 원격 auth는 후속 범위다.
 
-초기에는 DB를 Git에 직접 버전 관리하지 않는다.
+DB 자체를 Git으로 버전 관리하지 않는다.
 
-필요하면 추후 다음을 추가한다.
-- export/import JSON
-- markdown snapshot
-- backup
-- external sync
+QuestBoard가 저장 데이터의 버전관리·백업 시스템으로 확장되는 것도 목표가 아니다. 필요하면 **작업 상태 이동을 위한 얇은 export/import** 정도만 추가하고, 소스 이력은 Git, 문서 이력은 문서 도구, 백업은 OS/스토리지 도구에 맡긴다.
+
+외부 시스템과 연동하더라도 전체 데이터를 복제하지 않고 QuestBoard의 resume에 필요한 reference/link만 유지하는 것을 기본으로 한다.
 
 ---
 
@@ -348,118 +384,130 @@ CLAUDE.md 또는 agent onboarding 문서에는 QuestBoard 사용 규칙만 얇�
 
 ---
 
-## 12. UI 방향
+## 12. UI / interaction 원칙
 
-QuestBoard UI는 일반적인 Kanban과 사건 보드 두 가지 관점을 제공하는 방향이 좋다.
+QuestBoard의 화면은 정보를 많이 보여주는 것이 아니라 **다음 판단을 빨리 하게 하는 것**을 목표로 한다.
 
-### View A: Quest Board
+기본 원칙:
+- 한 화면에는 하나의 주된 질문과 하나의 주된 액션만 둔다.
+- 사람에게는 현재 Goal / Now / Next가 먼저 보이고, 나머지는 요청 시 펼친다.
+- ID, revision, provider, raw relation, 내부 provenance 같은 구현 정보는 기본 chrome에서 숨긴다.
+- priority, tag, Claim actor도 항상 보이지 않는다. 실제 판단에 필요할 때만 노출한다.
+- 고급 정보는 삭제하지 않고 drill-down으로 내린다.
+- 기능을 추가할수록 화면이 복잡해지면 기능을 다시 축소한다.
 
-- Inbox
-- Planned
-- Ready
-- In Progress
-- Blocked
-- Review
-- Done
-
-카드는 작업 도구처럼 높은 정보 밀도와 낮은 장식성을 우선한다.
-
-### View B: Investigation Board
-
-후속 단계에서 구현한다.
-
-- 자유 배치 node
-- relation edge
-- artifact preview
-- activity/handoff trace
+제품 surface는 개념적으로 **Quest / Flow / Code** 세 가지면 충분하다. 이름과 navigation은 구현 과정에서 더 단순해질 수 있지만 각 surface가 답하는 질문은 유지한다.
 
 ---
 
-## 13. Task 카드 정보
+## 13. Quest — 무엇을 하고 있는가
 
-최소 표시:
-- title
-- priority
-- tags
-- Claim actor
-- status
+Quest는 사람과 AI가 공유하는 현재 작업 상태다.
 
-상세 drawer:
-- description
-- edit
-- Claim / Release
-- Activity
-- Note / handoff
+기본적으로 한 Task에서 가장 먼저 읽혀야 하는 정보:
+- **Goal**: 무엇을 해결하려는가
+- **Now**: 현재 확인된 상태 / 마지막 의미 있는 checkpoint
+- **Next**: 바로 다음 액션
+- **Blocked**: 진행을 막는 것이 있을 때만
+- **Guardrail**: 다시 하지 말아야 할 것, 보존해야 할 제약이 있을 때만
 
----
+Task 상태와 board column은 협업에 필요한 최소 workflow 표현으로 유지하지만, Jira식 일정·sprint·resource 관리로 확장하지 않는다.
 
-## 14. Claim UX
-
-Claim은 경쟁 잠금이 아니라 협업 신호로 표현한다.
-
-UI/MCP/CLI 모두 같은 의미를 사용한다.
-
-- unclaimed
-- claimed by actor
-- conflicting claim
-- explicit release
-
-다른 actor가 Claim 중이면 일반 mutation까지 금지하지 않는다. Claim은 coordination signal이다.
+Task card 기본 화면은 title과 현재 상태를 중심으로 얇게 유지한다. description, Activity, Claim, Evidence, relation, 내부 메타데이터는 상세 surface에서 필요할 때만 읽는다.
 
 ---
 
-## 15. 에이전트 도구 인터페이스
+## 14. Flow — 어디까지 왔는가
 
-현재 공통 adapter tool boundary는 다음을 제공한다.
+현재 Investigation 기능은 범용 화이트보드가 아니라 **작업 흐름의 의미 있는 checkpoint 지도**로 다듬는다.
+
+Flow에 남길 가치가 있는 것:
+- 작업 시작점
+- 방향을 바꾼 결정
+- 중요한 확인/검증 결과
+- blocker와 해소
+- 의미 있는 분기
+- 완료 checkpoint
+- 다음 단계로 넘어간 이유
+
+Flow에 남기지 않는 것:
+- 모든 tool call
+- 모든 파일 read
+- 모든 재시도
+- 내부 chain-of-thought
+- 디버그 로그 전체
+- 실행 시간순 transcript 복제
+
+사람은 Flow를 보고 현재 위치와 큰 진행 방향을 이해할 수 있어야 한다. AI는 Resume Capsule만으로 부족할 때에만 Flow의 인접 checkpoint를 추가로 읽는다.
+
+---
+
+## 15. Code — 어디를 보고 있는가
+
+Code Map의 역할은 **범용 코드 탐색**이 아니라 작업 컨텍스트 복구다.
+
+우선 가치가 높은 기능:
+- 현재 Task/Flow와 관련된 architecture 영역 focus
+- 파일명 / 핵심 symbol / relation 검색
+- Task·Flow에서 관련 코드 위치로 이동
+- Code에서 관련 Task·Flow로 돌아오기
+- 관계가 왜 존재하는지 확인할 최소 source evidence
+
+우선순위에서 제외하거나 외부 도구에 맡기는 기능:
+- 소스 버전 이력과 코드 snapshot/diff 저장
+- Git 대체용 변경 추적
+- IDE급 전체 symbol hierarchy browser
+- 전체 call graph explorer
+- 독자적인 대규모 impact-analysis engine
+- 코드 편집 기능
+
+Git/IDE가 이미 가진 정보를 QuestBoard가 다시 저장하지 않는다. 필요한 경우 file/symbol/commit 같은 **anchor만 연결**한다.
+
+---
+
+## 16. 기능 추가 판단 기준
+
+새 기능은 구현 전에 아래 질문을 통과해야 한다.
+
+1. 이 기능이 없으면 사람이나 AI가 **현재 목표·현재 위치·다음 액션을 잃기 쉬운가?**
+2. 이 기능이 실제로 **재개에 필요한 조회 수, 토큰 수, 사용자 재설명 횟수**를 줄이는가?
+3. Git / Jira / Confluence / Mantis / IDE 같은 전문 도구가 이미 더 잘 해결하는 문제인가?
+4. 별도의 source of truth를 하나 더 만드는가?
+5. 기본 화면에 항상 보여야 하는가, 아니면 drill-down으로 충분한가?
+6. 같은 효과를 더 적은 필드·버튼·상태로 만들 수 있는가?
+
+1~2의 답이 약하거나 3~4의 답이 강하면 QuestBoard core에 넣지 않는다. 외부 링크, Artifact reference, Code anchor처럼 얇게 연결하는 방식을 먼저 선택한다.
+
+---
+
+## 17. 에이전트 도구 인터페이스 방향
+
+현재 저수준 CRUD/MCP tool은 호환성과 자동화를 위해 유지할 수 있다. 다만 AI가 정상적으로 작업을 재개하기 위해 여러 도구를 연속 호출해야 한다면 제품 목표에 맞지 않는다.
+
+앞으로 가장 중요한 고수준 계약은 두 가지다.
+
+### Resume
+
+한 번의 읽기로 가능한 한 다음을 돌려준다.
 
 ```text
-questboard_list_projects
-questboard_create_project
-questboard_list_tasks
-questboard_get_task
-questboard_create_task
-questboard_update_task
-questboard_get_claim
-questboard_claim_task
-questboard_release_task
-questboard_list_activity
-questboard_add_activity
+Goal
+Now
+Next
+Blocked?
+Guardrail?
+필요한 경우에만 Code / Flow / Evidence pointer
 ```
 
-CLI와 MCP가 같은 tool executor를 사용하고, executor는 `QuestBoardService`만 호출한다.
+기본 응답에는 전체 Activity history, 전체 graph, 전체 Code Map을 넣지 않는다.
 
-mutation은 neutral actor `{ id, provider, displayName? }`를 명시한다.
+### Checkpoint
 
----
+의미 있는 상태 변화가 생겼을 때 한 번의 쓰기로 Resume Capsule을 최신화하고 필요한 최소 Activity/Evidence 연결을 남길 수 있어야 한다.
 
-## 16. CLI 방향
+handoff는 별도의 장문 보고서 작성 작업이 아니라 **마지막 Checkpoint를 정확히 남기는 것**에 가깝게 만든다.
 
-CLI는 자동화/디버깅/비-MCP 에이전트용 얇은 surface다.
-
-현재 명령:
-- projects
-- tasks
-- task
-- create-task
-- update-task
-- claim / release / claim-status
-- activity / add-activity
-
-출력은 JSON으로 유지한다.
-
----
-
-## 17. MCP 방향
-
-현재 런타임은 **daemon 1 + session client N** 구조다. 장기 실행 QuestBoard daemon 하나가 SQLite, `QuestBoardService`, Web UI/API를 독점 소유하고, Claude 등 MCP host가 세션마다 띄우는 MCP executable은 DB를 열지 않는 얇은 stdio proxy로 동작한다. 각 proxy는 수명 동안 고유 session id를 유지해 자동 mutation requestId 격리를 보존하며, proxy 종료는 daemon이나 다른 세션을 종료하지 않는다. canonical `npm run daemon`/`npm start`는 기본적으로 활성 Tailscale IPv4의 `:4317`에 바인딩하고, localhost 전용 실행은 `:local` 스크립트로 명시한다. MCP/CLI client는 `QUESTBOARD_DAEMON_URL`이 없으면 활성 Tailscale IPv4를 자동 탐색하고 Tailscale이 없을 때만 localhost로 fallback한다. 공개 인터넷 직접 노출은 지원 범위가 아니다.
-
-지원:
-- initialize
-- ping
-- tools/list
-- tools/call
-
-agent SDK나 특정 vendor SDK를 core/runtime 의존성으로 추가하지 않는다.
+최적화 목표는 tool 개수가 아니라 **resume까지 필요한 round-trip 수**다.
 
 ---
 
@@ -467,13 +515,15 @@ agent SDK나 특정 vendor SDK를 core/runtime 의존성으로 추가하지 않�
 
 QuestBoard 자체 actor id/provider는 attribution이다.
 
-아직 제공하지 않는 것:
-- authentication
-- authorization
+제공하지 않는 것:
+- authentication / authorization 대체
 - filesystem permission
 - process execution permission
+- 에이전트 runtime lease / approval 대체
 
-따라서 Tailnet access도 trusted private-network deployment 전제로만 사용한다.
+따라서 C2CT work lane, Codex sandbox, OS 권한 등 실제 실행 권한은 각 runtime/tool의 보안 경계를 그대로 따른다. QuestBoard Claim은 누가 작업 중인지 알려주는 coordination signal일 뿐이다.
+
+Tailnet access도 trusted private-network deployment 전제로만 사용하며, 공개 인터넷 배포가 필요하면 별도의 인증/전송 보안 계층을 둔다.
 
 ---
 
@@ -501,34 +551,59 @@ QuestBoard 자체 actor id/provider는 attribution이다.
 
 ---
 
-## 20. 단계별 구현
+## 20. 현재 제품 우선순위
 
-### MVP 0: Foundation
-- core domain
-- SQLite schema
-- service/repository boundary
-- architecture decisions
+기반 기능은 이미 충분히 넓다. 당분간 새로운 관리 영역을 추가하기보다 기존 기능을 **작업 연속성 중심으로 축소·연결**한다.
 
-### MVP 1: Shared Quest Board
-- Project/Task CRUD 기본
-- status/priority/tags
-- Claim/Release
-- Activity
-- local HTTP API
-- minimal Web Kanban
+### Priority A: Resume flow
 
-### MVP 2: Agent connectivity
-- CLI
-- MCP adapter
-- neutral actor/tool boundary
-- agent-neutral onboarding 문서
-- 실제 외부 client cross-agent E2E
+- Task에서 Goal / Now / Next / Blocker / Guardrail을 빠르게 읽고 갱신
+- agent handoff를 장문 보고서가 아니라 Resume Capsule 갱신으로 단순화
+- 새 에이전트가 한두 번의 조회로 이어서 작업할 수 있는 MCP/API 읽기 경로 정리
 
-### MVP 3: Evidence / Investigation
-- Artifact
-- Relation
-- Investigation Board
-- search/filter
+### Priority B: Minimal Flow
+
+- Investigation을 범용 화이트보드가 아니라 의미 있는 checkpoint 흐름으로 다듬기
+- 현재 위치와 다음 단계가 시각적으로 명확할 것
+- 모든 tool call·재시도·내부 추론을 기록하지 않을 것
+
+### Priority C: Contextual Code
+
+- Search / Focus
+- Task·Flow ↔ Code 양방향 이동
+- 필요한 source evidence drill-down
+- 범용 code browser, 자체 snapshot/diff, 과도한 impact-analysis는 우선순위에서 제외
+
+### Priority D: Cross-agent resume E2E
+
+- 한 에이전트가 중간에 멈춘 작업을 다른 세션/에이전트가 QuestBoard만 읽고 재개
+- 재개에 필요한 조회 수와 토큰 비용을 실제 측정
+- 사람이 같은 화면을 보고 현재 목표·현재 위치·다음 액션을 오해 없이 파악하는지 검증
+
+### 명시적 보류
+
+- Wiki / Knowledge Base
+- 일정·sprint·resource 관리
+- bug tracker 기능
+- Git 대체용 Code Map snapshot/diff/version history
+- 전체 AI work transcript / 모든 실행 단계 자동 기록
+- 범용 IDE급 symbol hierarchy / call graph explorer
+
+### 기존 backlog 정리 기준
+
+현재 등록된 backlog는 아래처럼 해석한다.
+
+- **UI/UX 보완 2차**: 1/4~4/4 결과를 현재 baseline으로 삼고 부모 작업은 최종 audit 후 닫는다.
+- **Code Map+ 1/6 Search / Filter / Focus**: 유지. 다만 현재 Task/Flow와 관련된 코드에 빠르게 도달하는 범위로 제한한다.
+- **Code Map+ 2/6 Node drill-down / symbol-file hierarchy**: 축소. 전체 hierarchy browser가 아니라 관련 file/symbol anchor 몇 개를 보여주는 수준으로 흡수한다.
+- **Code Map+ 3/6 Source evidence explorer**: 유지. relation을 신뢰할 최소 근거만 drill-down으로 제공한다.
+- **Code Map+ 4/6 Investigation / Task 양방향 navigation**: 유지. Quest / Flow / Code 사이의 복귀 비용을 줄이는 핵심 기능으로 본다.
+- **Code Map+ 5/6 Durable snapshot + Diff**: 중단/보류. Git과 역할이 겹치므로 QuestBoard가 별도 source of truth를 만들지 않는다.
+- **Code Map+ 6/6 Changed-files impact**: 축소. 독자 impact engine은 만들지 않고, 필요하면 Git changed-file anchor와 현재 architecture focus를 연결하는 정도만 검토한다. 최종 E2E는 Cross-agent resume E2E로 재정의한다.
+- **작업 경로 / 진행 과정 시각화**: 축소. 모든 행동 기록이 아니라 Flow checkpoint와 현재 focus를 사람에게 보여주는 기능으로 재정의한다.
+- **Wiki / Knowledge Base**: 보류. 장문 지식과 상세 문서는 외부 문서 도구를 source of truth로 사용한다.
+
+backlog 이름이 남아 있더라도 위 해석과 충돌하는 세부 요구사항은 그대로 구현하지 않는다. 실제 Task 설명은 구현에 들어가기 전에 이 제품 기준에 맞춰 갱신한다.
 
 ---
 
@@ -536,28 +611,30 @@ QuestBoard 자체 actor id/provider는 attribution이다.
 
 QuestBoard를 한 문장으로 정의하면:
 
-> **사람과 여러 AI 에이전트가 의뢰를 맡고, 단서를 연결하고, 작업의 흔적을 공유하는 로컬 작업 보드.**
+> **사람과 AI가 같은 작업 목표와 현재 위치를 공유하고, 컨텍스트가 끊겨도 최소 비용으로 다시 이어서 일하게 해 주는 로컬 작업 연속성 보드.**
 
-제품이 성장해도 단순 "AI TODO 앱"보다 이 정체성을 유지한다.
+기능을 추가할 때는 항상 "이 기능이 없으면 작업 재개가 실제로 어려운가?"를 먼저 묻는다. 답이 아니면 QuestBoard core에 넣지 않거나 외부 도구 링크로 해결한다.
 
 ---
 
-## 22. 구현 시작 시 첫 작업
+## 22. AI 작업 재개 원칙
 
-향후 다른 에이전트가 구현을 시작한다면 다음 순서로 진행한다.
+새 세션이나 다른 에이전트가 작업을 이어받을 때 권장 흐름은 다음과 같다.
 
-1. 독립 저장소 `QuestBoard` 생성
-2. AGENTS.md / agent onboarding 문서에 agent-neutral 원칙 기록
-3. architecture + schema 문서 확정
-4. SQLite schema와 core domain 구현
-5. local API 구현
-6. 최소 Web Kanban 구현
-7. CLI 구현
-8. MCP adapter 구현
-9. ChatGPT + Claude 교차 E2E
-10. Evidence Board 확장
+1. Project와 active Task를 찾는다.
+2. Task의 Resume Capsule을 읽는다.
+3. 필요한 경우에만 연결된 Flow checkpoint와 Code anchor를 읽는다.
+4. 바로 다음 액션을 수행한다.
+5. 의미 있는 상태 변화가 생겼을 때만 Resume Capsule / checkpoint / Evidence를 갱신한다.
 
-각 단계는 작게 검증하고, 초기부터 C2CT 전용 데이터 모델로 굳히지 않는다.
+목표는 "QuestBoard를 많이 읽고 많이 쓰는 것"이 아니다. **가장 적게 읽고 써도 정확히 이어갈 수 있는 것**이다.
+
+따라서 handoff 품질을 다음 지표로 본다.
+
+- 새 세션이 작업 목표를 이해하기까지 필요한 조회 수
+- 실제 다음 액션에 도달하기까지 필요한 토큰 수
+- 사용자가 추가 설명을 반복해야 하는 횟수
+- 오래된/중복 상태 때문에 잘못된 방향으로 진입하는 빈도
 
 ---
 
@@ -571,8 +648,13 @@ QuestBoard를 한 문장으로 정의하면:
 - SQLite 권장
 - HTTP API + CLI + MCP adapter 계층
 - Claim은 협업 상태를 표시하는 coordination signal이며 일반 Task mutation을 막지 않음
-- Kanban형 Quest Board + 사건/증거형 Investigation Board를 장기 UI 방향으로 사용
-- Shared Browser는 후속 확장
+- 핵심 목적은 **AI-human work continuity / cheap resume**
+- UI는 **minimal outside, dense inside** 원칙을 따름
+- Quest / Flow / Code 세 관점으로 현재 작업을 설명하되 기존 구현 명칭은 점진적으로 정리
+- Flow에는 의미 있는 checkpoint만 남기고 AI 내부 추론 전문은 저장하지 않음
+- Code Map은 작업 컨텍스트 탐색 보조이며 Git/IDE를 대체하지 않음
+- Wiki, 일정 관리, bug tracker, 소스 버전 관리는 외부 전문 도구 영역으로 유지
+- 외부 도구의 데이터를 QuestBoard에 중복 복제하지 않고 필요 시 링크/참조만 연결
 
 ## 24. 아직 결정하지 않은 사항
 

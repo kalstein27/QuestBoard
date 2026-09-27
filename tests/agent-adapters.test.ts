@@ -29,11 +29,29 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
     const created = executeQuestBoardAgentTool(service, "questboard_create_task", {
       projectId: project.id,
       title: "Connect agents",
+      goal: "Expose one continuity state across agent adapters",
+      now: "Shared adapter boundary exists",
+      next: "Verify Task updates through the neutral tool contract",
       status: "ready",
       priority: "high",
       tags: ["mcp", "cli"],
       actor: agent,
-    }) as { task: { id: string; status: string } };
+    }) as { task: { id: string; status: string; goal: string; now: string; next: string } };
+    assert.equal(created.task.goal, "Expose one continuity state across agent adapters");
+    assert.equal(created.task.now, "Shared adapter boundary exists");
+    assert.equal(created.task.next, "Verify Task updates through the neutral tool contract");
+
+    const resumed = executeQuestBoardAgentTool(service, "questboard_resume_task", {
+      taskId: created.task.id,
+    }) as { resume: { taskId: string; projectId: string; status: string; goal: string; now: string; next: string } };
+    assert.deepEqual(resumed.resume, {
+      taskId: created.task.id,
+      projectId: project.id,
+      status: "ready",
+      goal: "Expose one continuity state across agent adapters",
+      now: "Shared adapter boundary exists",
+      next: "Verify Task updates through the neutral tool contract",
+    });
 
     const listed = executeQuestBoardAgentTool(service, "questboard_list_tasks", {
       projectId: project.id,
@@ -44,9 +62,13 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
     const updated = executeQuestBoardAgentTool(service, "questboard_update_task", {
       taskId: created.task.id,
       status: "in_progress",
+      now: "Neutral tool update verified",
+      next: "Continue with evidence only if needed",
       actor: agent,
-    }) as { task: { revision: number } };
+    }) as { task: { revision: number; now: string; next: string } };
     assert.equal(updated.task.revision, 2);
+    assert.equal(updated.task.now, "Neutral tool update verified");
+    assert.equal(updated.task.next, "Continue with evidence only if needed");
     assert.throws(
       () => executeQuestBoardAgentTool(service, "questboard_update_task", {
         taskId: created.task.id,
@@ -56,6 +78,31 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
       }),
       /revision conflict/,
     );
+
+    const checkpointed = executeQuestBoardAgentTool(service, "questboard_checkpoint_task", {
+      taskId: created.task.id,
+      now: "Checkpoint tool writes canonical continuity",
+      next: "Read the same capsule from resume",
+      guardrail: "Keep adapters thin",
+      activity: { type: "note_added", summary: "Neutral checkpoint tool verified" },
+      requestId: "agent:checkpoint:0001",
+      actor: agent,
+    }) as { resume: { now: string; next: string; guardrail?: string } };
+    assert.equal(checkpointed.resume.now, "Checkpoint tool writes canonical continuity");
+    assert.equal(checkpointed.resume.next, "Read the same capsule from resume");
+    assert.equal(checkpointed.resume.guardrail, "Keep adapters thin");
+    assert.deepEqual(checkpointed.resume, service.resumeTask(created.task.id));
+    assert.equal(service.getTask(created.task.id).revision, 3);
+
+    const checkpointCleared = executeQuestBoardAgentTool(service, "questboard_checkpoint_task", {
+      taskId: created.task.id,
+      now: "Checkpoint clear semantics verified",
+      next: "Continue through the shared service path",
+      guardrail: null,
+      actor: agent,
+    }) as { resume: Record<string, unknown> };
+    assert.equal(Object.hasOwn(checkpointCleared.resume, "guardrail"), false);
+    assert.equal(service.getTask(created.task.id).revision, 4);
 
     const claimed = executeQuestBoardAgentTool(service, "questboard_claim_task", {
       taskId: created.task.id,
@@ -131,6 +178,7 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
     assert.deepEqual(activity.activities.map((item) => item.type), [
       "task_created",
       "status_changed",
+      "note_added",
       "task_claimed",
       "agent_handoff",
       "artifact_attached",
@@ -293,7 +341,7 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
   const project = service.createProject({ name: "MCP" }, owner);
-  service.createTask({ projectId: project.id, title: "Ready via MCP", status: "ready" }, owner);
+  const task = service.createTask({ projectId: project.id, title: "Ready via MCP", status: "ready" }, owner);
 
   const input = new PassThrough();
   const output = new PassThrough();
@@ -312,6 +360,12 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
       method: "tools/call",
       params: { name: "questboard_list_tasks", arguments: { projectId: project.id, status: "ready" } },
     })}\n`);
+    input.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "questboard_resume_task", arguments: { taskId: task.id } },
+    })}\n`);
     input.end();
     await running;
 
@@ -319,10 +373,11 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
       id: number;
       result: Record<string, unknown>;
     });
-    assert.equal(messages.length, 3);
+    assert.equal(messages.length, 4);
     assert.equal((messages[0]?.result.serverInfo as { name: string }).name, "questboard");
     const toolNames = (messages[1]?.result.tools as Array<{ name: string }>).map((tool) => tool.name);
     assert.ok(toolNames.includes("questboard_create_project"));
+    assert.ok(toolNames.includes("questboard_resume_task"));
     assert.ok(toolNames.includes("questboard_claim_task"));
     assert.ok(toolNames.includes("questboard_add_artifact"));
     assert.ok(toolNames.includes("questboard_add_relation"));
@@ -340,6 +395,10 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
     const content = messages[2]?.result.content as Array<{ text: string }>;
     const payload = JSON.parse(content[0]?.text ?? "{}") as { tasks: Array<{ title: string }> };
     assert.equal(payload.tasks[0]?.title, "Ready via MCP");
+    const resumeContent = messages[3]?.result.content as Array<{ text: string }>;
+    const resumePayload = JSON.parse(resumeContent[0]?.text ?? "{}") as { resume: { taskId: string; goal: string } };
+    assert.equal(resumePayload.resume.taskId, task.id);
+    assert.equal(resumePayload.resume.goal, "Ready via MCP");
   } finally {
     repository.close();
   }
@@ -402,6 +461,15 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
     assert.equal(listExit, 0);
     assert.equal((JSON.parse(stdout.at(-1) ?? "{}") as { tasks: Array<{ id: string }> }).tasks[0]?.id, task.id);
 
+    const resumeExit = await runQuestBoardCli(service, ["resume", task.id], {
+      io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) },
+    });
+    assert.equal(resumeExit, 0);
+    assert.deepEqual(
+      (JSON.parse(stdout.at(-1) ?? "{}") as { resume: Record<string, unknown> }).resume,
+      service.resumeTask(task.id),
+    );
+
     const claimExit = await runQuestBoardCli(
       service,
       ["claim", task.id, "--actor-id", "agent:cli-test", "--actor-provider", "test-cli"],
@@ -417,6 +485,37 @@ test("CLI uses the same agent tool boundary and supports neutral actor overrides
     );
     assert.equal(updateExit, 0);
     assert.equal(service.getTask(task.id).revision, 2);
+
+    const checkpointExit = await runQuestBoardCli(
+      service,
+      [
+        "checkpoint", task.id,
+        "--now", "CLI checkpoint writes current position",
+        "--next", "CLI resume should match",
+        "--guardrail", "Keep the CLI boundary thin",
+        "--activity-type", "note_added",
+        "--summary", "CLI checkpoint verified",
+      ],
+      { io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) } },
+    );
+    assert.equal(checkpointExit, 0);
+    assert.equal((JSON.parse(stdout.at(-1) ?? "{}") as { resume: { guardrail?: string } }).resume.guardrail, "Keep the CLI boundary thin");
+    assert.equal(service.getTask(task.id).revision, 3);
+
+    const checkpointClearExit = await runQuestBoardCli(
+      service,
+      [
+        "checkpoint", task.id,
+        "--now", "CLI explicit clear is verified",
+        "--next", "Continue without a guardrail",
+        "--clear-guardrail",
+      ],
+      { io: { stdout: (value) => stdout.push(value), stderr: (value) => stderr.push(value) } },
+    );
+    assert.equal(checkpointClearExit, 0);
+    const clearedResume = (JSON.parse(stdout.at(-1) ?? "{}") as { resume: Record<string, unknown> }).resume;
+    assert.equal(Object.hasOwn(clearedResume, "guardrail"), false);
+    assert.equal(service.getTask(task.id).revision, 4);
 
     const artifactExit = await runQuestBoardCli(
       service,

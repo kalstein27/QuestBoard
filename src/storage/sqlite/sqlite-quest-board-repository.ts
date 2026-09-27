@@ -21,6 +21,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../../core/domain.js";
+import { defaultTaskGoal, defaultTaskNext, defaultTaskNow } from "../../core/domain.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
@@ -58,6 +59,7 @@ type TaskRow = {
   project_id: string;
   title: string;
   description: string;
+  continuity_json: string;
   status: TaskStatus;
   priority: TaskPriority;
   tags_json: string;
@@ -304,15 +306,16 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       this.db
         .prepare(`
           INSERT INTO tasks (
-            id, project_id, title, description, status, priority, tags_json,
+            id, project_id, title, description, continuity_json, status, priority, tags_json,
             created_by, created_at, updated_at, revision
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           task.id,
           task.projectId,
           task.title,
           task.description,
+          serializeTaskContinuity(task),
           task.status,
           task.priority,
           JSON.stringify(task.tags),
@@ -349,17 +352,18 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     return rows.map(mapTask);
   }
 
-  updateTask(task: Task, activity: Activity, expectedRevision: number): void {
+  updateTask(task: Task, activity: Activity | undefined, expectedRevision: number): void {
     this.transaction(() => {
       const result = this.db
         .prepare(`
           UPDATE tasks
-          SET title = ?, description = ?, status = ?, priority = ?, tags_json = ?, updated_at = ?, revision = ?
+          SET title = ?, description = ?, continuity_json = ?, status = ?, priority = ?, tags_json = ?, updated_at = ?, revision = ?
           WHERE id = ? AND revision = ?
         `)
         .run(
           task.title,
           task.description,
+          serializeTaskContinuity(task),
           task.status,
           task.priority,
           JSON.stringify(task.tags),
@@ -373,7 +377,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         if (!current) throw new EntityNotFoundError("Task", task.id);
         throw new RevisionConflictError(task.id, expectedRevision, current.revision);
       }
-      this.insertActivity(activity);
+      if (activity) this.insertActivity(activity);
     });
   }
 
@@ -860,6 +864,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
         title TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
+        continuity_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL CHECK (status IN ('inbox', 'planned', 'ready', 'in_progress', 'blocked', 'review', 'done')),
         priority TEXT NOT NULL CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
         tags_json TEXT NOT NULL DEFAULT '[]',
@@ -1074,6 +1079,11 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       this.db.exec("UPDATE claims SET claim_id = 'legacy:' || task_id WHERE claim_id IS NULL");
     }
 
+    const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    if (!taskColumns.some((column) => column.name === "continuity_json")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN continuity_json TEXT NOT NULL DEFAULT '{}'");
+    }
+
     const boardPositionDefinition = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'board_positions'").get() as { sql: string } | undefined;
     if (boardPositionDefinition && !boardPositionDefinition.sql.includes("investigation_node")) {
       this.transaction(() => {
@@ -1166,11 +1176,22 @@ function mapProject(row: ProjectRow): Project {
 }
 
 function mapTask(row: TaskRow): Task {
+  const continuity = parseTaskContinuity(row.continuity_json);
+  const goal = storedText(continuity.goal) ?? defaultTaskGoal(row.title, row.description);
+  const now = storedText(continuity.now) ?? defaultTaskNow(row.status);
+  const next = storedText(continuity.next) ?? defaultTaskNext(row.status);
+  const blocked = row.status === "blocked" ? storedText(continuity.blocked) : undefined;
+  const guardrail = storedText(continuity.guardrail);
   return {
     id: row.id,
     projectId: row.project_id,
     title: row.title,
     description: row.description,
+    goal,
+    now,
+    next,
+    ...(blocked ? { blocked } : {}),
+    ...(guardrail ? { guardrail } : {}),
     status: row.status,
     priority: row.priority,
     tags: JSON.parse(row.tags_json) as string[],
@@ -1179,6 +1200,33 @@ function mapTask(row: TaskRow): Task {
     updatedAt: row.updated_at,
     revision: row.revision,
   };
+}
+
+function serializeTaskContinuity(task: Task): string {
+  return JSON.stringify({
+    goal: task.goal,
+    now: task.now,
+    next: task.next,
+    ...(task.blocked ? { blocked: task.blocked } : {}),
+    ...(task.guardrail ? { guardrail: task.guardrail } : {}),
+  });
+}
+
+function parseTaskContinuity(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function storedText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 
 function mapClaim(row: ClaimRow): Claim {

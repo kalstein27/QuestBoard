@@ -60,11 +60,41 @@ export async function runQuestBoardCli(
           taskId: positional(parsed.positionals, 1, "task id"),
         });
         break;
+      case "resume":
+        result = await execute("questboard_resume_task", {
+          taskId: positional(parsed.positionals, 1, "task id"),
+        });
+        break;
+      case "checkpoint": {
+        const blocked = checkpointClearableFlag(parsed.flags, "blocked", "clear-blocked");
+        const guardrail = checkpointClearableFlag(parsed.flags, "guardrail", "clear-guardrail");
+        const activityType = parsed.flags.get("activity-type");
+        const summary = parsed.flags.get("summary");
+        if ((activityType === undefined) !== (summary === undefined)) {
+          throw new TypeError("--activity-type and --summary must be provided together");
+        }
+        result = await execute("questboard_checkpoint_task", compact({
+          taskId: positional(parsed.positionals, 1, "task id"),
+          now: requiredFlag(parsed.flags, "now"),
+          next: requiredFlag(parsed.flags, "next"),
+          blocked,
+          guardrail,
+          activity: activityType && summary ? { type: activityType, summary } : undefined,
+          requestId,
+          actor,
+        }));
+        break;
+      }
       case "create-task":
         result = await execute("questboard_create_task", compact({
           projectId: requiredFlag(parsed.flags, "project"),
           title: requiredFlag(parsed.flags, "title"),
           description: parsed.flags.get("description"),
+          goal: parsed.flags.get("goal"),
+          now: parsed.flags.get("now"),
+          next: parsed.flags.get("next"),
+          blocked: parsed.flags.get("blocked"),
+          guardrail: parsed.flags.get("guardrail"),
           status: parsed.flags.get("status"),
           priority: parsed.flags.get("priority"),
           tags: splitTags(parsed.flags.get("tags")),
@@ -78,6 +108,11 @@ export async function runQuestBoardCli(
           expectedRevision: optionalPositiveIntegerFlag(parsed.flags, "revision"),
           title: parsed.flags.get("title"),
           description: parsed.flags.get("description"),
+          goal: parsed.flags.get("goal"),
+          now: parsed.flags.get("now"),
+          next: parsed.flags.get("next"),
+          blocked: parsed.flags.get("blocked"),
+          guardrail: parsed.flags.get("guardrail"),
           status: parsed.flags.get("status"),
           priority: parsed.flags.get("priority"),
           tags: parsed.flags.has("tags") ? splitTags(parsed.flags.get("tags")) : undefined,
@@ -185,7 +220,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       continue;
     }
     const key = token.slice(2);
-    if (key === "help") {
+    if (["help", "clear-blocked", "clear-guardrail"].includes(key)) {
       flags.set(key, "true");
       continue;
     }
@@ -212,6 +247,18 @@ function compact<T extends Record<string, unknown>>(value: T): Record<string, un
 function splitTags(value: string | undefined): string[] | undefined {
   if (value === undefined) return undefined;
   return value.split(",").map((tag) => tag.trim()).filter(Boolean);
+}
+
+function checkpointClearableFlag(
+  flags: Map<string, string>,
+  key: string,
+  clearKey: string,
+): string | null | undefined {
+  if (flags.has(key) && flags.has(clearKey)) {
+    throw new TypeError(`--${key} and --${clearKey} cannot be used together`);
+  }
+  if (flags.has(clearKey)) return null;
+  return flags.get(key);
 }
 
 function requiredFlag(flags: Map<string, string>, key: string): string {
@@ -245,8 +292,10 @@ function helpText(): string {
     "  projects",
     "  tasks [--project ID] [--status STATUS]",
     "  task TASK_ID",
-    "  create-task --project ID --title TITLE [--description TEXT] [--status STATUS] [--priority PRIORITY] [--tags a,b]",
-    "  update-task TASK_ID [--revision N] [--title TITLE] [--description TEXT] [--status STATUS] [--priority PRIORITY] [--tags a,b]",
+    "  resume TASK_ID",
+    "  checkpoint TASK_ID --now TEXT --next TEXT [--blocked TEXT | --clear-blocked] [--guardrail TEXT | --clear-guardrail] [--activity-type note_added|agent_handoff --summary TEXT]",
+    "  create-task --project ID --title TITLE [--description TEXT] [--goal TEXT] [--now TEXT] [--next TEXT] [--blocked TEXT] [--guardrail TEXT] [--status STATUS] [--priority PRIORITY] [--tags a,b]",
+    "  update-task TASK_ID [--revision N] [--title TITLE] [--description TEXT] [--goal TEXT] [--now TEXT] [--next TEXT] [--blocked TEXT] [--guardrail TEXT] [--status STATUS] [--priority PRIORITY] [--tags a,b]",
     "  claim TASK_ID [--actor-id ID] [--actor-provider PROVIDER]",
     "  release TASK_ID [--claim-id CLAIM_ID] [--actor-id ID] [--actor-provider PROVIDER]",
     "  claim-status TASK_ID",

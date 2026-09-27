@@ -280,6 +280,29 @@ main { min-width: 0; }
 .status-kicker { color: #929cf4; text-transform: uppercase; letter-spacing: .07em; font-size: 8px; font-weight: 800; }
 .drawer-body { padding: 0 16px 28px; overflow-y: auto; }
 .detail-section { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.continuity-section { padding-top: 14px; }
+.continuity-title { margin-bottom: 9px; }
+.continuity-grid { display: grid; gap: 7px; }
+.continuity-item { min-width: 0; padding: 9px 10px; border: 1px solid #282f38; border-radius: 7px; background: #0e1115; }
+.continuity-now, .continuity-next { border-color: #343c47; background: #12161c; }
+.continuity-blocked { border-color: rgba(223,111,106,.32); background: rgba(223,111,106,.06); }
+.continuity-guardrail { border-color: rgba(193,138,94,.28); background: rgba(193,138,94,.05); }
+.continuity-label { display: block; margin-bottom: 4px; color: #78818d; font-size: 8px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.continuity-value { margin: 0; color: #d4d8de; font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.continuity-goal .continuity-value { color: #aeb5bf; }
+.continuity-blocked .continuity-label { color: #df8a84; }
+.continuity-guardrail .continuity-label { color: #c6a078; }
+.checkpoint-form { display: grid; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #222831; }
+.checkpoint-field { display: grid; gap: 5px; min-width: 0; }
+.checkpoint-label { color: #7f8792; font-size: 8px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.checkpoint-field textarea { width: 100%; min-width: 0; resize: vertical; min-height: 48px; }
+.checkpoint-clear { display: flex; align-items: center; gap: 6px; color: #737c88; font-size: 9px; }
+.checkpoint-clear input { width: auto; margin: 0; }
+.drawer-details { border-bottom: 1px solid var(--line); }
+.drawer-details-summary { cursor: pointer; padding: 13px 0; color: #858e99; font-size: 10px; font-weight: 700; list-style-position: inside; }
+.drawer-details[open] .drawer-details-summary { color: #b8bec7; }
+.drawer-details-content { min-width: 0; }
+.drawer-details-content .detail-section:first-child { padding-top: 4px; }
 .detail-description { margin: 0 0 11px; color: #b4bac3; line-height: 1.58; font-size: 12px; white-space: pre-wrap; }
 .section-title { margin: 0 0 10px; font-size: 11px; font-weight: 750; color: #d2d6dc; }
 .claim-card { padding: 9px 10px; border-radius: 7px; background: var(--accent-soft); border: 1px solid rgba(116,134,255,.18); color: #a8b2ff; font-size: 10px; }

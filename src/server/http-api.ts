@@ -24,6 +24,7 @@ import {
 } from "../core/errors.js";
 import type {
   CreateArtifactInput,
+  CheckpointTaskInput,
   CreateInvestigationItemInput,
   CreateInvestigationItemLinkInput,
   CreateInvestigationLinkedTaskInput,
@@ -493,6 +494,11 @@ async function handleRequest(
         projectId: requireString(body, "projectId"),
         title: requireString(body, "title"),
         ...optionalStringProperty(body, "description"),
+        ...optionalStringProperty(body, "goal"),
+        ...optionalStringProperty(body, "now"),
+        ...optionalStringProperty(body, "next"),
+        ...optionalStringProperty(body, "blocked"),
+        ...optionalStringProperty(body, "guardrail"),
         ...optionalEnumProperty(body, "status", TASK_STATUSES),
         ...optionalEnumProperty(body, "priority", TASK_PRIORITIES),
         ...optionalStringArrayProperty(body, "tags"),
@@ -537,6 +543,11 @@ async function handleRequest(
         ...optionalPositiveIntegerProperty(body, "expectedRevision"),
         ...optionalStringProperty(body, "title"),
         ...optionalStringProperty(body, "description"),
+        ...optionalStringProperty(body, "goal"),
+        ...optionalStringProperty(body, "now"),
+        ...optionalStringProperty(body, "next"),
+        ...optionalStringProperty(body, "blocked"),
+        ...optionalStringProperty(body, "guardrail"),
         ...optionalEnumProperty(body, "status", TASK_STATUSES),
         ...optionalEnumProperty(body, "priority", TASK_PRIORITIES),
         ...optionalStringArrayProperty(body, "tags"),
@@ -546,11 +557,34 @@ async function handleRequest(
     }
   }
 
-  const taskActionMatch = pathname.match(/^\/tasks\/([^/]+)\/(claim|release|activity)$/);
+  const taskActionMatch = pathname.match(/^\/tasks\/([^/]+)\/(resume|checkpoint|claim|release|activity)$/);
   if (taskActionMatch) {
     const taskId = decodePathPart(taskActionMatch[1]);
     const action = taskActionMatch[2];
 
+    if (method === "GET" && action === "resume") {
+      sendJson(response, 200, { resume: service.resumeTask(taskId) });
+      return;
+    }
+    if (method === "POST" && action === "checkpoint") {
+      const actor = requireActor(request);
+      const body = await readJsonObject(request);
+      const input: CheckpointTaskInput = {
+        now: requireString(body, "now"),
+        next: requireString(body, "next"),
+      };
+      if ("blocked" in body) input.blocked = body.blocked === null ? null : requireString(body, "blocked");
+      if ("guardrail" in body) input.guardrail = body.guardrail === null ? null : requireString(body, "guardrail");
+      if ("activity" in body) {
+        const activity = requireObjectValue(body.activity, "activity");
+        input.activity = {
+          type: requireEnum(activity, "type", CLIENT_ACTIVITY_TYPES),
+          summary: requireString(activity, "summary"),
+        };
+      }
+      sendJson(response, 200, { resume: service.checkpointTask(taskId, input, actor, mutationOptions(request)) });
+      return;
+    }
     if (method === "POST" && action === "claim") {
       sendJson(response, 200, { claim: service.claimTask(taskId, requireActor(request), mutationOptions(request)) });
       return;

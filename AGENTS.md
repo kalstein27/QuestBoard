@@ -1,6 +1,6 @@
 # Agent Rules
 
-QuestBoard is a local-first shared work board for humans and multiple AI agents. Keep the core vendor-neutral and make changes in a way that remains usable from ChatGPT/C2CT, Codex, Claude, Antigravity, CLI, HTTP, MCP, and future adapters.
+QuestBoard is a local-first work-continuity board for a human working with AI agents. Its primary job is to keep the goal, current position, next action, and minimum supporting context recoverable across chat/session/agent boundaries. Keep the core vendor-neutral and make changes in a way that remains usable from ChatGPT/C2CT, Codex, Claude, Antigravity, CLI, HTTP, MCP, and future adapters.
 
 ## Project independence
 
@@ -57,13 +57,17 @@ npm run mcp
 
 A normal agent workflow is:
 
-1. list Projects/Tasks;
-2. read the Task, current Claim, Activity, Artifacts, and Relations;
-3. Claim when useful to advertise ownership of the work;
-4. update the Task;
-5. attach evidence and notes as work progresses;
-6. add an `agent_handoff` Activity before transferring work;
+1. list Projects/Tasks and find the active work;
+2. read the Task's current goal/state/next action first;
+3. expand into Activity, Artifacts, Relations, Investigation, or Code Map only when the next action actually needs that context;
+4. Claim when useful to advertise ownership of the work;
+5. perform the work and update only meaningful state changes, checkpoints, blockers, and evidence;
+6. before a session/agent handoff, leave a concise resume state that makes the next action obvious;
 7. release the Claim using the observed `claimId` when available.
+
+Do not require every new agent to reread the full history before acting. The desired workflow is **minimum reads, minimum tokens, correct resume**.
+
+Before implementing an older planned/backlog item, re-evaluate it against the current product-direction document. A planned card is not a reason to expand QuestBoard into Git, Jira, Confluence, bug-tracker, IDE, transcript-recorder, or agent-runtime territory; trim or reinterpret the task when that lowers resume cost and avoids duplicate sources of truth.
 
 ### Concurrency
 

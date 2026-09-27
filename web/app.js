@@ -78,7 +78,7 @@ function collectElements() {
     "workspace-title", "workspace-context", "workspace-nav",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
     "drawer-scrim", "task-dialog", "task-form", "task-dialog-title", "task-id", "task-title",
-    "task-description", "task-status", "task-priority", "task-tags", "project-dialog",
+    "task-description", "task-goal", "task-status", "task-priority", "task-tags", "project-dialog",
     "project-form", "project-name", "project-description", "toast", "connection-label",
   ].forEach((id) => { el[id] = document.getElementById(id); });
 }
@@ -1767,6 +1767,91 @@ function renderDrawer(task, claim, artifacts, relations) {
   el["drawer-title"].textContent = task.title;
   const body = document.createDocumentFragment();
 
+  const continuitySection = node("section", "detail-section continuity-section");
+  continuitySection.append(node("h3", "section-title continuity-title", "Current"));
+  const continuityGrid = node("div", "continuity-grid");
+  const currentItem = (label, value, className = "") => {
+    const item = node("div", `continuity-item ${className}`.trim());
+    item.append(node("span", "continuity-label", label), node("p", "continuity-value", value));
+    return item;
+  };
+  continuityGrid.append(
+    currentItem("Goal", task.goal, "continuity-goal"),
+    currentItem("Now", task.now, "continuity-now"),
+    currentItem("Next", task.next, "continuity-next"),
+  );
+  if (task.blocked) continuityGrid.append(currentItem("Blocked", task.blocked, "continuity-blocked"));
+  if (task.guardrail) continuityGrid.append(currentItem("Guardrail", task.guardrail, "continuity-guardrail"));
+  continuitySection.append(continuityGrid);
+
+  const checkpointForm = node("form", "checkpoint-form");
+  checkpointForm.append(node("h4", "subsection-title", "Leave checkpoint"));
+  const checkpointField = (label, value, placeholder) => {
+    const wrapper = node("label", "checkpoint-field");
+    wrapper.append(node("span", "checkpoint-label", label));
+    const input = document.createElement("textarea");
+    input.rows = 2;
+    input.value = value ?? "";
+    input.placeholder = placeholder;
+    wrapper.append(input);
+    return { wrapper, input };
+  };
+  const nowField = checkpointField("Now", task.now, "What is true right now?");
+  const nextField = checkpointField("Next", task.next, "What should the next session do?");
+  nowField.input.required = true;
+  nextField.input.required = true;
+  checkpointForm.append(nowField.wrapper, nextField.wrapper);
+
+  let blockedField = null;
+  let clearBlocked = null;
+  if (task.status === "blocked") {
+    blockedField = checkpointField("Blocked (optional)", task.blocked ?? "", "Describe the current blocker");
+    checkpointForm.append(blockedField.wrapper);
+    if (task.blocked) {
+      const clearLabel = node("label", "checkpoint-clear");
+      clearBlocked = document.createElement("input");
+      clearBlocked.type = "checkbox";
+      clearLabel.append(clearBlocked, text(" Clear existing blocker detail"));
+      checkpointForm.append(clearLabel);
+    }
+  }
+
+  const guardrailField = checkpointField("Guardrail (optional)", task.guardrail ?? "", "Constraint worth carrying forward");
+  checkpointForm.append(guardrailField.wrapper);
+  let clearGuardrail = null;
+  if (task.guardrail) {
+    const clearLabel = node("label", "checkpoint-clear");
+    clearGuardrail = document.createElement("input");
+    clearGuardrail.type = "checkbox";
+    clearLabel.append(clearGuardrail, text(" Clear existing guardrail"));
+    checkpointForm.append(clearLabel);
+  }
+
+  const noteField = checkpointField("Checkpoint note (optional)", "", "Only a meaningful decision, verification, blocker change, or handoff");
+  checkpointForm.append(noteField.wrapper);
+  const checkpointButton = node("button", "button primary full", "Save checkpoint");
+  checkpointButton.type = "submit";
+  checkpointForm.append(checkpointButton);
+  checkpointForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const payload = {
+      now: nowField.input.value.trim(),
+      next: nextField.input.value.trim(),
+    };
+    if (blockedField) {
+      const blockedValue = blockedField.input.value.trim();
+      if (clearBlocked?.checked) payload.blocked = null;
+      else if (blockedValue && blockedValue !== (task.blocked ?? "")) payload.blocked = blockedValue;
+    }
+    const guardrailValue = guardrailField.input.value.trim();
+    if (clearGuardrail?.checked) payload.guardrail = null;
+    else if (guardrailValue && guardrailValue !== (task.guardrail ?? "")) payload.guardrail = guardrailValue;
+    const checkpointNote = noteField.input.value.trim();
+    if (checkpointNote) payload.activity = { type: "note_added", summary: checkpointNote };
+    void saveCheckpoint(task.id, payload);
+  });
+  continuitySection.append(checkpointForm);
+
   const summary = node("section", "detail-section");
   summary.append(node("p", "detail-description", task.description || "No description yet."));
   const tagRow = node("div", "tag-row");
@@ -1918,7 +2003,13 @@ function renderDrawer(task, claim, artifacts, relations) {
   });
   activitySection.append(noteForm);
 
-  body.append(summary, claimSection, evidenceSection, activitySection);
+  const details = document.createElement("details");
+  details.className = "drawer-details";
+  details.append(node("summary", "drawer-details-summary", "Task details & history"));
+  const detailsContent = node("div", "drawer-details-content");
+  detailsContent.append(summary, claimSection, evidenceSection, activitySection);
+  details.append(detailsContent);
+  body.append(continuitySection, details);
   el["drawer-body"].replaceChildren(body);
 }
 
@@ -1961,6 +2052,33 @@ async function mutateClaim(taskId, action) {
     fail(error);
   }
 }
+
+async function saveCheckpoint(taskId, payload) {
+  try {
+    const { resume } = await api(`/tasks/${encodeURIComponent(taskId)}/checkpoint`, {
+      method: "POST",
+      actor: true,
+      body: payload,
+    });
+    await loadBoard();
+    await openTask(taskId);
+    const current = state.tasks.find((task) => task.id === taskId);
+    const refreshedMatchesResume = Boolean(current
+      && current.status === resume.status
+      && current.goal === resume.goal
+      && current.now === resume.now
+      && current.next === resume.next
+      && (current.blocked ?? null) === (resume.blocked ?? null)
+      && (current.guardrail ?? null) === (resume.guardrail ?? null));
+    if (!refreshedMatchesResume) {
+      throw new Error("Checkpoint UI did not refresh to the saved Resume Capsule");
+    }
+    toast("Checkpoint saved");
+  } catch (error) {
+    fail(error);
+  }
+}
+
 
 async function addNote(taskId, summary) {
   const trimmed = summary.trim();
@@ -2042,6 +2160,7 @@ function openTaskDialog(task = null) {
   el["task-id"].value = task?.id ?? "";
   el["task-title"].value = task?.title ?? "";
   el["task-description"].value = task?.description ?? "";
+  el["task-goal"].value = task?.goal ?? "";
   el["task-status"].value = task?.status ?? "inbox";
   el["task-priority"].value = task?.priority ?? "normal";
   el["task-tags"].value = task?.tags?.join(", ") ?? "";
@@ -2055,6 +2174,7 @@ async function saveTask(event) {
   const body = {
     title: el["task-title"].value,
     description: el["task-description"].value,
+    goal: el["task-goal"].value.trim() || undefined,
     status: el["task-status"].value,
     priority: el["task-priority"].value,
     tags: el["task-tags"].value.split(",").map((tag) => tag.trim()).filter(Boolean),

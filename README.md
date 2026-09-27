@@ -1,8 +1,10 @@
 # QuestBoard
 
-A local-first shared work board for humans and multiple AI agents.
+A local-first work-continuity board for humans working with AI agents.
 
-QuestBoard combines a guild-style quest board with an investigation/evidence board. Humans and agents can share Task status, Claims, Activity, Artifacts, Relations, and handoffs without putting any one agent vendor into the core domain.
+QuestBoard keeps a shared goal, current work position, next action, and minimum supporting context so work can resume cheaply after a chat, context, model, or agent boundary. The visible UI stays deliberately simple; deeper Activity, Evidence, Flow, and Code context is available only when it helps the next action. The core remains agent/vendor-neutral.
+
+QuestBoard deliberately does **not** replace Git/version control, Jira-style planning, Confluence-style long-form documentation, bug trackers, or an IDE. It links only the minimum references needed to keep human-AI implementation work moving.
 
 ## Project status
 
@@ -10,15 +12,15 @@ QuestBoard is a **pre-release MVP**. The current repository includes:
 
 - an agent-neutral TypeScript domain and application service;
 - SQLite persistence using Node's built-in `node:sqlite`;
-- a localhost HTTP API and dependency-free Web UI;
-- Quest/Kanban and Investigation Board views;
+- a local/private-network HTTP API and dependency-free Web UI;
+- Quest, Investigation/Flow, and contextual Code Map views;
 - a JSON-oriented CLI;
-- a dependency-free MCP stdio adapter;
+- a lightweight dependency-free MCP stdio proxy;
 - Task, Claim, Activity, Artifact, Relation, and board-position persistence;
 - internal optimistic concurrency, idempotent mutation receipts, stale-Claim release protection, and concurrency diagnostics;
 - multi-worker race tests.
 
-The main remaining product work includes external cross-agent E2E and richer search/filter/Investigation tooling. Agent onboarding guidance is now documented in [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md). See [`docs/QUESTBOARD-PROJECT-PLAN.ko.md`](docs/QUESTBOARD-PROJECT-PLAN.ko.md) for the wider roadmap.
+The main remaining product work is to reduce resume cost: make current goal/state/next action clearer, simplify Flow/Investigation into meaningful checkpoints, keep Code Map contextual rather than IDE-like, and prove cross-session/cross-agent resume with low token/action cost. Agent onboarding guidance is documented in [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md). See [`docs/QUESTBOARD-PROJECT-PLAN.ko.md`](docs/QUESTBOARD-PROJECT-PLAN.ko.md) for the product direction and scope boundaries.
 
 ## Requirements
 
@@ -27,7 +29,7 @@ The main remaining product work includes external cross-agent E2E and richer sea
 - macOS, Linux, or another platform supported by Node 24 and `node:sqlite`
 - Tailscale only if you want Tailnet-only access from another device
 
-QuestBoard currently has **zero runtime npm dependencies**. TypeScript and Node type definitions are development dependencies.
+QuestBoard's foundation uses Node built-ins; Code Map adds the pinned `@sourcegraph/scip-typescript` runtime dependency behind the code-intelligence adapter boundary. TypeScript and Node type definitions remain development dependencies.
 
 ## Install
 
@@ -225,13 +227,15 @@ See [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md) for the recommended c
 
 ## Recommended agent workflow
 
-1. List Projects and Ready/Planned Tasks.
-2. Read the Task, current Claim, Activity, Artifacts, and Relations before editing.
-3. Claim the Task when useful as a coordination signal.
-4. Update status/content without carrying revision plumbing unless strict CAS is intentionally needed.
-5. Add notes, evidence, and Relations as work progresses.
-6. Write an `agent_handoff` Activity before handing work to another agent.
+1. List Projects and active/Ready/Planned Tasks.
+2. Read the Task's current goal/state/next action first.
+3. Read Activity, Artifacts, Relations, Investigation, or Code Map only when the next action needs more context.
+4. Claim the Task when useful as a coordination signal.
+5. Work and record only meaningful checkpoint/blocker/evidence changes.
+6. Before handing work to another session/agent, leave a concise resume state with the next action.
 7. Release using the observed `claimId` when available.
+
+The target is not maximum history capture. It is the smallest shared state that lets a human understand progress and lets an AI resume correctly.
 
 ## Diagnostics
 

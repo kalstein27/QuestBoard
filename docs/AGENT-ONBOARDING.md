@@ -98,14 +98,17 @@ Those values are attribution only. They do not authenticate the caller.
 ## 3. Recommended work loop
 
 1. **Discover**: list Projects and Tasks. Prefer `ready`, `planned`, or explicitly assigned work.
-2. **Read context**: fetch the Task, current Claim, Activity, Artifacts, and Relations before changing it.
-3. **Coordinate**: Claim the Task when it is useful to tell other participants who is working on it.
-4. **Work**: update Task fields/status. Normal updates do not need a revision token.
-5. **Leave evidence**: add notes, Artifacts, and Relations for outputs another agent may need.
-6. **Handoff**: add an `agent_handoff` Activity with a concise state/result/next-step summary.
-7. **Release**: release the Claim using the observed `claimId` when available.
+2. **Resume cheaply**: read the Task's current goal/state/next action first. Do not fetch the entire history by default.
+3. **Drill down only as needed**: read Claim, Activity, Artifacts, Relations, Investigation, or Code Map only when they are needed to perform or verify the next action.
+4. **Coordinate**: Claim the Task when it is useful to tell other participants who is working on it.
+5. **Work**: update Task fields/status. Normal updates do not need a revision token.
+6. **Checkpoint**: record only meaningful state changes, blockers, decisions, and evidence another session may need.
+7. **Handoff**: leave a concise resume state that makes the next action obvious.
+8. **Release**: release the Claim using the observed `claimId` when available.
 
 A Claim is a social/coordination signal. It is not a hard lock and does not grant project permissions.
+
+The optimization target is **minimum reads, minimum tokens, correct resume** rather than exhaustive history reconstruction.
 
 ## 4. Concurrency contract
 
@@ -142,15 +145,19 @@ Never generate a new request ID merely because the response to an already-sent m
 
 Each Claim has an opaque `claimId`. If a Task is released and re-Claimed, the new Claim gets a different identity. A release carrying the older `claimId` fails rather than releasing the newer Claim.
 
-## 5. Handoff format
+## 5. Resume / handoff format
 
-Keep handoffs short and operational. A useful `agent_handoff` summary should answer:
+Keep handoffs short and operational. Conceptually, a useful resume capsule answers:
 
-- what was completed;
-- what evidence/artifacts were produced;
-- what remains;
-- any blocker or decision needed;
-- the most useful next action.
+- **Goal**: what this work is trying to achieve;
+- **Now**: the current verified state or last meaningful checkpoint;
+- **Next**: the most useful next action;
+- **Blocked**: only when something currently prevents progress;
+- **Code**: only the relevant file/symbol/component anchors when code context is needed;
+- **Evidence**: only the tests/logs/screenshots/operations needed to trust the current state;
+- **Guardrail**: only when a constraint or "do not repeat" fact must survive the handoff.
+
+Do not fill every field mechanically. Leave the smallest capsule that lets the next session act correctly. Activity, Artifacts, Relations, Investigation, and Code Map are drill-down context, not a mandatory pre-read bundle.
 
 Do not put secrets into Activity text or Artifact locators.
 

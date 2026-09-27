@@ -24,6 +24,25 @@ test("responsive layout protects iPad and narrow-screen scrolling", () => {
   assert.match(css, /\.drawer-body[\s\S]*-webkit-overflow-scrolling: touch/);
 });
 
+test("Task drawer puts Goal, Now, and Next first with an explicit checkpoint control", () => {
+  assert.match(app, /continuitySection\.append\(node\("h3", "section-title continuity-title", "Current"\)\)/);
+  assert.match(app, /currentItem\("Goal", task\.goal/);
+  assert.match(app, /currentItem\("Now", task\.now/);
+  assert.match(app, /currentItem\("Next", task\.next/);
+  assert.match(app, /"Save checkpoint"/);
+  assert.match(app, /clearGuardrail\?\.checked\) payload\.guardrail = null/);
+  assert.match(app, /clearBlocked\?\.checked\) payload\.blocked = null/);
+  assert.match(html, /id="task-goal"/);
+});
+
+test("Task drawer keeps history and evidence out of default chrome without adding a new dashboard", () => {
+  assert.match(app, /document\.createElement\("details"\)/);
+  assert.match(app, /"Task details & history"/);
+  assert.match(app, /body\.append\(continuitySection, details\)/);
+  assert.match(css, /\.checkpoint-field textarea \{ width: 100%; min-width: 0/);
+  assert.match(css, /\.drawer-details-content \{ min-width: 0; \}/);
+});
+
 test("coarse pointer devices keep Investigation actions discoverable", () => {
   assert.match(css, /@media \(pointer: coarse\)/);
   assert.match(css, /\.investigation-item-actions[\s\S]*opacity: 1/);

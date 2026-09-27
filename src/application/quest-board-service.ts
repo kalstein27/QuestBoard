@@ -20,6 +20,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../core/domain.js";
+import { defaultTaskGoal, defaultTaskNext, defaultTaskNow } from "../core/domain.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
@@ -53,6 +54,11 @@ export interface CreateTaskInput {
   projectId: string;
   title: string;
   description?: string;
+  goal?: string;
+  now?: string;
+  next?: string;
+  blocked?: string;
+  guardrail?: string;
   status?: TaskStatus;
   priority?: TaskPriority;
   tags?: string[];
@@ -62,6 +68,11 @@ export interface UpdateTaskInput {
   expectedRevision?: number;
   title?: string;
   description?: string;
+  goal?: string;
+  now?: string;
+  next?: string;
+  blocked?: string;
+  guardrail?: string;
   status?: TaskStatus;
   priority?: TaskPriority;
   tags?: string[];
@@ -77,6 +88,32 @@ export interface DeleteRevisionOptions extends MutationOptions {
 
 export interface ReleaseTaskOptions extends MutationOptions {
   claimId?: string;
+}
+
+export interface TaskResumeCapsule {
+  taskId: string;
+  projectId: string;
+  status: TaskStatus;
+  goal: string;
+  now: string;
+  next: string;
+  blocked?: string;
+  guardrail?: string;
+}
+
+export type CheckpointActivityType = "note_added" | "agent_handoff";
+
+export interface CheckpointActivityInput {
+  type: CheckpointActivityType;
+  summary: string;
+}
+
+export interface CheckpointTaskInput {
+  now: string;
+  next: string;
+  blocked?: string | null;
+  guardrail?: string | null;
+  activity?: CheckpointActivityInput;
 }
 
 export interface CreateArtifactInput {
@@ -248,12 +285,25 @@ export class QuestBoardService {
       }
 
       const timestamp = this.now();
+      const title = requiredText(input.title, "Task title");
+      const description = input.description?.trim() ?? "";
+      const status = input.status ?? "inbox";
+      const blocked = optionalText(input.blocked);
+      const guardrail = optionalText(input.guardrail);
+      if (blocked && status !== "blocked") {
+        throw new TypeError("Task blocked details require status blocked");
+      }
       const task: Task = {
         id: this.newId(),
         projectId: input.projectId,
-        title: requiredText(input.title, "Task title"),
-        description: input.description?.trim() ?? "",
-        status: input.status ?? "inbox",
+        title,
+        description,
+        goal: input.goal !== undefined ? requiredText(input.goal, "Task goal") : defaultTaskGoal(title, description),
+        now: input.now !== undefined ? requiredText(input.now, "Task now") : defaultTaskNow(status),
+        next: input.next !== undefined ? requiredText(input.next, "Task next") : defaultTaskNext(status),
+        ...(blocked ? { blocked } : {}),
+        ...(guardrail ? { guardrail } : {}),
+        status,
         priority: input.priority ?? "normal",
         tags: normalizeTags(input.tags ?? []),
         createdBy: actor.id,
@@ -274,6 +324,109 @@ export class QuestBoardService {
     const task = this.repository.getTask(taskId);
     if (!task) throw new EntityNotFoundError("Task", taskId);
     return task;
+  }
+
+  resumeTask(taskId: string): TaskResumeCapsule {
+    const task = this.getTask(taskId);
+    return {
+      taskId: task.id,
+      projectId: task.projectId,
+      status: task.status,
+      goal: task.goal,
+      now: task.now,
+      next: task.next,
+      ...(task.blocked ? { blocked: task.blocked } : {}),
+      ...(task.guardrail ? { guardrail: task.guardrail } : {}),
+    };
+  }
+
+  checkpointTask(
+    taskId: string,
+    input: CheckpointTaskInput,
+    actor: ActorRef,
+    options: MutationOptions = {},
+  ): TaskResumeCapsule {
+    return this.runMutation("task.checkpoint", actor, options, { taskId, input }, taskId, () => {
+      for (let attempt = 1; attempt <= MAX_INTERNAL_UPDATE_ATTEMPTS; attempt += 1) {
+        const current = this.getTask(taskId);
+        const timestamp = this.now();
+        const blocked = checkpointOptionalText(current.blocked, input.blocked, "Task blocked details");
+        if (blocked && current.status !== "blocked") {
+          throw new TypeError("Task blocked details require status blocked");
+        }
+        const guardrail = checkpointOptionalText(current.guardrail, input.guardrail, "Task guardrail");
+        const updated: Task = {
+          id: current.id,
+          projectId: current.projectId,
+          title: current.title,
+          description: current.description,
+          goal: current.goal,
+          now: requiredText(input.now, "Task now"),
+          next: requiredText(input.next, "Task next"),
+          ...(blocked ? { blocked } : {}),
+          ...(guardrail ? { guardrail } : {}),
+          status: current.status,
+          priority: current.priority,
+          tags: current.tags,
+          createdBy: current.createdBy,
+          createdAt: current.createdAt,
+          updatedAt: timestamp,
+          revision: current.revision + 1,
+        };
+        const activity = input.activity
+          ? this.activityFor(
+              updated,
+              actor,
+              checkpointActivityType(input.activity.type),
+              requiredText(input.activity.summary, "Checkpoint activity summary"),
+              current.revision,
+              updated.revision,
+              timestamp,
+            )
+          : undefined;
+
+        try {
+          this.repository.updateTask(updated, activity, current.revision);
+          this.log({
+            event: "task.checkpoint.applied",
+            operation: "task.checkpoint",
+            actorId: actor.id,
+            actorProvider: actor.provider,
+            taskId,
+            requestId: options.requestId,
+            expectedRevision: current.revision,
+            actualRevision: updated.revision,
+            attempt,
+          });
+          return {
+            taskId: updated.id,
+            projectId: updated.projectId,
+            status: updated.status,
+            goal: updated.goal,
+            now: updated.now,
+            next: updated.next,
+            ...(updated.blocked ? { blocked: updated.blocked } : {}),
+            ...(updated.guardrail ? { guardrail: updated.guardrail } : {}),
+          };
+        } catch (error) {
+          if (!(error instanceof RevisionConflictError) || attempt === MAX_INTERNAL_UPDATE_ATTEMPTS) {
+            throw error;
+          }
+          this.log({
+            event: "task.checkpoint.retry",
+            operation: "task.checkpoint",
+            actorId: actor.id,
+            actorProvider: actor.provider,
+            taskId,
+            requestId: options.requestId,
+            expectedRevision: error.expectedRevision,
+            actualRevision: error.actualRevision,
+            attempt,
+          });
+        }
+      }
+      throw new Error("Task checkpoint retry loop exhausted");
+    });
   }
 
   getTaskClaim(taskId: string): Claim | undefined {
@@ -310,13 +463,47 @@ export class QuestBoardService {
 
         const expectedRevision = explicitExpectedRevision ?? current.revision;
         const timestamp = this.now();
+        const title = patch.title !== undefined ? requiredText(patch.title, "Task title") : current.title;
+        const description = patch.description !== undefined ? patch.description.trim() : current.description;
+        const status = patch.status ?? current.status;
+        const priority = patch.priority ?? current.priority;
+        const tags = patch.tags !== undefined ? normalizeTags(patch.tags) : current.tags;
+        const goal = patch.goal !== undefined
+          ? requiredText(patch.goal, "Task goal")
+          : current.goal === defaultTaskGoal(current.title, current.description)
+            ? defaultTaskGoal(title, description)
+            : current.goal;
+        const now = patch.now !== undefined
+          ? requiredText(patch.now, "Task now")
+          : current.now === defaultTaskNow(current.status)
+            ? defaultTaskNow(status)
+            : current.now;
+        const next = patch.next !== undefined
+          ? requiredText(patch.next, "Task next")
+          : current.next === defaultTaskNext(current.status)
+            ? defaultTaskNext(status)
+            : current.next;
+        const requestedBlocked = patch.blocked !== undefined ? optionalText(patch.blocked) : undefined;
+        if (requestedBlocked && status !== "blocked") {
+          throw new TypeError("Task blocked details require status blocked");
+        }
+        const blocked = status === "blocked" ? requestedBlocked ?? current.blocked : undefined;
+        const guardrail = patch.guardrail !== undefined ? optionalText(patch.guardrail) : current.guardrail;
         const updated: Task = {
-          ...current,
-          ...(patch.title !== undefined ? { title: requiredText(patch.title, "Task title") } : {}),
-          ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
-          ...(patch.status !== undefined ? { status: patch.status } : {}),
-          ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
-          ...(patch.tags !== undefined ? { tags: normalizeTags(patch.tags) } : {}),
+          id: current.id,
+          projectId: current.projectId,
+          title,
+          description,
+          goal,
+          now,
+          next,
+          ...(blocked ? { blocked } : {}),
+          ...(guardrail ? { guardrail } : {}),
+          status,
+          priority,
+          tags,
+          createdBy: current.createdBy,
+          createdAt: current.createdAt,
           updatedAt: timestamp,
           revision: current.revision + 1,
         };
@@ -1088,6 +1275,27 @@ function requiredText(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${label} must not be empty`);
   return normalized;
+}
+
+function optionalText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function checkpointOptionalText(
+  current: string | undefined,
+  value: string | null | undefined,
+  label: string,
+): string | undefined {
+  if (value === undefined) return current;
+  if (value === null) return undefined;
+  return requiredText(value, label);
+}
+
+function checkpointActivityType(value: CheckpointActivityType): CheckpointActivityType {
+  if (value === "note_added" || value === "agent_handoff") return value;
+  throw new TypeError("Checkpoint activity type must be note_added or agent_handoff");
 }
 
 function requireRevision(value: number): number {

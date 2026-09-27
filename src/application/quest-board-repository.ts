@@ -46,7 +46,7 @@ export interface QuestBoardRepository {
   createTask(task: Task, activity: Activity): void;
   getTask(taskId: string): Task | undefined;
   listTasks(filter?: TaskListFilter): Task[];
-  updateTask(task: Task, activity: Activity, expectedRevision: number): void;
+  updateTask(task: Task, activity: Activity | undefined, expectedRevision: number): void;
   deleteTask(taskId: string): void;
 
   getClaim(taskId: string): Claim | undefined;

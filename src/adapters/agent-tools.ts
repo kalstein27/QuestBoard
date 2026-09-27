@@ -19,6 +19,7 @@ import {
 } from "../core/errors.js";
 import type {
   ApplyMigrationBatchInput,
+  CheckpointTaskInput,
   AttachExistingTaskToInvestigationInput,
   MigrationBatchOperation,
   CreateArtifactInput,
@@ -178,6 +179,43 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_resume_task",
+    description: "Read the minimal Resume Capsule for one explicit task without loading Activity, Investigation, Code Map, Artifacts, or Relations.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "questboard_checkpoint_task",
+    description: "Update one Task's current Now/Next continuity in one call, optionally set or explicitly clear Blocked/Guardrail, and append one meaningful note or handoff Activity.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: { type: "string", minLength: 1 },
+        now: { type: "string", minLength: 1 },
+        next: { type: "string", minLength: 1 },
+        blocked: { oneOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+        guardrail: { oneOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+        activity: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: { type: "string", enum: CLIENT_ACTIVITY_TYPES },
+            summary: { type: "string", minLength: 1 },
+          },
+          required: ["type", "summary"],
+        },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["taskId", "now", "next", "actor"],
+    },
+  },
+  {
     name: "questboard_create_task",
     description: "Create a task and record the neutral actor that created it.",
     inputSchema: {
@@ -187,6 +225,11 @@ export const QUESTBOARD_AGENT_TOOLS = [
         projectId: { type: "string", minLength: 1 },
         title: { type: "string", minLength: 1 },
         description: { type: "string" },
+        goal: { type: "string", minLength: 1 },
+        now: { type: "string", minLength: 1 },
+        next: { type: "string", minLength: 1 },
+        blocked: { type: "string" },
+        guardrail: { type: "string" },
         status: { type: "string", enum: TASK_STATUSES },
         priority: { type: "string", enum: TASK_PRIORITIES },
         tags: { type: "array", items: { type: "string" } },
@@ -207,6 +250,11 @@ export const QUESTBOARD_AGENT_TOOLS = [
         expectedRevision: { type: "integer", minimum: 1, description: "Optional strict-CAS compatibility check. Usually omit it." },
         title: { type: "string", minLength: 1 },
         description: { type: "string" },
+        goal: { type: "string", minLength: 1 },
+        now: { type: "string", minLength: 1 },
+        next: { type: "string", minLength: 1 },
+        blocked: { type: "string" },
+        guardrail: { type: "string" },
         status: { type: "string", enum: TASK_STATUSES },
         priority: { type: "string", enum: TASK_PRIORITIES },
         tags: { type: "array", items: { type: "string" } },
@@ -693,11 +741,41 @@ export function executeQuestBoardAgentTool(
       const taskId = requireString(args, "taskId");
       return { task: service.getTask(taskId), claim: service.getTaskClaim(taskId) ?? null };
     }
+    case "questboard_resume_task":
+      return { resume: service.resumeTask(requireString(args, "taskId")) };
+    case "questboard_checkpoint_task": {
+      const inputValue: CheckpointTaskInput = {
+        now: requireString(args, "now"),
+        next: requireString(args, "next"),
+      };
+      if ("blocked" in args) inputValue.blocked = args.blocked === null ? null : requireString(args, "blocked");
+      if ("guardrail" in args) inputValue.guardrail = args.guardrail === null ? null : requireString(args, "guardrail");
+      if ("activity" in args) {
+        const activity = requireObject(args.activity, "activity");
+        inputValue.activity = {
+          type: requireEnum(activity, "type", CLIENT_ACTIVITY_TYPES),
+          summary: requireString(activity, "summary"),
+        };
+      }
+      return {
+        resume: service.checkpointTask(
+          requireString(args, "taskId"),
+          inputValue,
+          requireActor(args),
+          mutationOptions(args),
+        ),
+      };
+    }
     case "questboard_create_task": {
       const inputValue: CreateTaskInput = {
         projectId: requireString(args, "projectId"),
         title: requireString(args, "title"),
         ...optionalStringProperty(args, "description"),
+        ...optionalStringProperty(args, "goal"),
+        ...optionalStringProperty(args, "now"),
+        ...optionalStringProperty(args, "next"),
+        ...optionalStringProperty(args, "blocked"),
+        ...optionalStringProperty(args, "guardrail"),
         ...optionalEnumProperty(args, "status", TASK_STATUSES),
         ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
         ...optionalStringArrayProperty(args, "tags"),
@@ -709,6 +787,11 @@ export function executeQuestBoardAgentTool(
         ...optionalPositiveIntegerProperty(args, "expectedRevision"),
         ...optionalStringProperty(args, "title"),
         ...optionalStringProperty(args, "description"),
+        ...optionalStringProperty(args, "goal"),
+        ...optionalStringProperty(args, "now"),
+        ...optionalStringProperty(args, "next"),
+        ...optionalStringProperty(args, "blocked"),
+        ...optionalStringProperty(args, "guardrail"),
         ...optionalEnumProperty(args, "status", TASK_STATUSES),
         ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
         ...optionalStringArrayProperty(args, "tags"),

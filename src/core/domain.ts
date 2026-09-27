@@ -10,6 +10,20 @@ export const TASK_STATUSES = [
 
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
+export function defaultTaskGoal(title: string, description: string): string {
+  return description.trim() || title.trim();
+}
+
+export function defaultTaskNow(status: TaskStatus): string {
+  return `Task status: ${status}`;
+}
+
+export function defaultTaskNext(status: TaskStatus): string {
+  return status === "done"
+    ? "No next action; task is done."
+    : "Next action has not been recorded yet.";
+}
+
 export const TASK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
@@ -57,6 +71,11 @@ export interface Task {
   projectId: string;
   title: string;
   description: string;
+  goal: string;
+  now: string;
+  next: string;
+  blocked?: string;
+  guardrail?: string;
   status: TaskStatus;
   priority: TaskPriority;
   tags: string[];
