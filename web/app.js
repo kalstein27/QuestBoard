@@ -1690,8 +1690,6 @@ function applyInvestigationViewport() {
   if (!el["investigation-canvas"]) return;
   el["investigation-canvas"].style.transform = `translate3d(${state.investigationPan.x}px, ${state.investigationPan.y}px, 0) scale(${state.investigationZoom})`;
   el["investigation-canvas"].style.transformOrigin = "top left";
-  el["investigation-board"].style.backgroundSize = `${24 * state.investigationZoom}px ${24 * state.investigationZoom}px`;
-  el["investigation-board"].style.backgroundPosition = `${state.investigationPan.x}px ${state.investigationPan.y}px`;
 }
 
 function setInvestigationNodePosition(card, position) {

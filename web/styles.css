@@ -137,11 +137,14 @@ main { min-width: 0; }
 .investigation-board {
   margin: 0 14px 10px; min-height: calc(100dvh - 92px); overflow: auto;
   border: 1px solid var(--line); border-radius: 9px; background: #0c0f13;
-  background-image: radial-gradient(circle, rgba(120,130,148,.16) 1px, transparent 1px);
-  background-size: 24px 24px;
   overscroll-behavior: contain;
 }
 .investigation-canvas { position: relative; min-width: 100%; min-height: 100%; will-change: transform; }
+.investigation-canvas::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: radial-gradient(circle, rgba(120,130,148,.16) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
 .investigation-edges { position: absolute; inset: 0; z-index: 1; overflow: visible; pointer-events: none; }
 .investigation-nodes { position: absolute; inset: 0; z-index: 2; }
 .investigation-node {

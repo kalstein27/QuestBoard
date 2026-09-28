@@ -94,6 +94,14 @@ test("Flow edges route orthogonally around Node obstacles with directional arrow
   assert.match(css, /\.investigation-flow-line \{[^}]*stroke-linejoin: round/);
 });
 
+test("Flow grid shares the transformed canvas coordinate system with Nodes and edges", () => {
+  assert.match(css, /\.investigation-canvas::before \{/);
+  assert.match(css, /\.investigation-canvas::before[\s\S]*background-size: 24px 24px/);
+  assert.doesNotMatch(css, /\.investigation-board[\s\S]{0,260}background-image: radial-gradient/);
+  assert.doesNotMatch(app, /investigation-board"\]\.style\.backgroundSize/);
+  assert.doesNotMatch(app, /investigation-board"\]\.style\.backgroundPosition/);
+});
+
 test("Flow viewport performs a device-aware initial fit before reusing persisted pan and zoom", () => {
   assert.match(app, /investigationViewportMeta: loadInvestigationViewportMeta\(\)/);
   assert.match(app, /function shouldAutoFitInvestigationViewport\(\)/);
