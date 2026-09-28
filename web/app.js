@@ -1242,6 +1242,30 @@ function investigationGraphItem(item) {
   wrapper.dataset.investigationItemId = item.id;
   wrapper.tabIndex = 0;
   wrapper.setAttribute("aria-label", item.title);
+  const taskLinks = state.investigationItemTaskLinks
+    .filter((link) => link.itemId === item.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  const linkedTasks = taskLinks
+    .map((link) => state.tasks.find((candidate) => candidate.id === link.taskId))
+    .filter(Boolean);
+  const directTask = linkedTasks.length === 1 ? linkedTasks[0] : null;
+  if (directTask) {
+    wrapper.classList.add("investigation-item-single-task");
+    wrapper.setAttribute("role", "button");
+    wrapper.setAttribute("aria-label", `Open Task: ${directTask.title}`);
+    wrapper.title = `Open Task: ${directTask.title}`;
+    const openDirectTask = (event) => {
+      if (event.target?.closest?.("button")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (document.activeElement instanceof HTMLElement && wrapper.contains(document.activeElement)) document.activeElement.blur();
+      void openTask(directTask.id);
+    };
+    wrapper.addEventListener("click", openDirectTask);
+    wrapper.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && event.target === wrapper) openDirectTask(event);
+    });
+  }
   const codeMapBinding = codeMapRelationBindingForInvestigationItem(item.id);
   if (codeMapBinding) wrapper.append(codeMapBindingBadges(codeMapBinding.state));
   const head = node("div", "investigation-item-head");
@@ -1254,9 +1278,6 @@ function investigationGraphItem(item) {
   head.append(title, actions);
   wrapper.append(head);
 
-  const taskLinks = state.investigationItemTaskLinks
-    .filter((link) => link.itemId === item.id)
-    .sort((a, b) => a.sortOrder - b.sortOrder);
   if (taskLinks.length > 0) {
     const chips = node("div", "investigation-task-chips");
     taskLinks.forEach((link) => {
@@ -1270,7 +1291,11 @@ function investigationGraphItem(item) {
         node("span", "investigation-task-chip-title", linkedTask.title),
         taskStatusIcon(linkedTask.status),
       );
-      open.addEventListener("click", () => void openTask(linkedTask.id));
+      open.addEventListener("click", (event) => {
+        event.stopPropagation();
+        open.blur();
+        void openTask(linkedTask.id);
+      });
       const unlink = node("button", "investigation-link-remove", "×");
       unlink.type = "button";
       unlink.title = `Unlink Task: ${linkedTask.title}`;

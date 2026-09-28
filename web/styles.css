@@ -187,6 +187,7 @@ main { min-width: 0; }
 .investigation-item-list { display: grid; border-top: 1px solid #252c35; }
 .investigation-item { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #252c35; background: rgba(10,13,17,.32); user-select: text; }
 .investigation-item:hover { background: rgba(116,134,255,.035); }
+.investigation-item-single-task { cursor: pointer; touch-action: manipulation; }
 .investigation-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .investigation-item-title { min-width: 0; font-size: 11px; line-height: 1.4; }
 .investigation-item-actions { flex: 0 0 auto; display: flex; gap: 4px; }
@@ -835,8 +836,19 @@ main { min-height: 0; overflow: hidden; }
 }
 
 @media (pointer: coarse) {
-  .investigation-item-actions { display: none; opacity: 0; }
-  .investigation-item:focus-within .investigation-item-actions { display: flex; opacity: 1; }
+  .investigation-item-actions {
+    display: flex;
+    position: absolute; top: 50%; right: 0; z-index: 6;
+    transform: translateY(-50%);
+    opacity: 0; visibility: hidden; pointer-events: none;
+  }
+  .investigation-item:hover .investigation-item-actions {
+    display: flex; opacity: 0; visibility: hidden; pointer-events: none;
+  }
+  .investigation-item:focus-within .investigation-item-actions {
+    display: flex; opacity: 1; visibility: visible; pointer-events: auto;
+  }
+  .investigation-item:focus-within .investigation-item-title { padding-right: 106px; }
   .investigation-graph-node > .investigation-node-head .graph-icon-button,
   .graph-add-button,
   .investigation-link-remove { opacity: 1; }

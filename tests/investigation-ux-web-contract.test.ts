@@ -21,6 +21,14 @@ test("Investigation exposes node selection, inspector, and fit-to-content contro
   assert.match(app, /contentHeight/);
 });
 
+test("single-linked Flow Items open their Task directly without selecting the Node first", () => {
+  assert.match(app, /const directTask = linkedTasks\.length === 1 \? linkedTasks\[0\] : null/);
+  assert.match(app, /wrapper\.classList\.add\("investigation-item-single-task"\)/);
+  assert.match(app, /event\.stopPropagation\(\)[\s\S]*openTask\(directTask\.id\)/);
+  assert.match(app, /open\.blur\(\)[\s\S]*openTask\(linkedTask\.id\)/);
+  assert.match(css, /\.investigation-item-single-task \{[^}]*touch-action: manipulation/);
+});
+
 test("Investigation inspector preserves node data ownership and only changes viewport on focus or fit", () => {
   assert.match(app, /editInvestigationNodeFromPrompt\(graphNode\)/);
   assert.match(app, /persistInvestigationViewport\(\)/);

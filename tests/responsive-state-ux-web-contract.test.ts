@@ -70,12 +70,13 @@ test("Quest hides reviewed Done tasks locally while keeping unseen completions v
   assert.match(css, /\.quest-done-filter/);
 });
 
-test("coarse pointer Flow keeps Item titles primary and reveals row actions on focus", () => {
+test("coarse pointer Flow keeps Item titles primary and reveals actions without reflow", () => {
   assert.match(css, /@media \(pointer: coarse\)/);
   assert.match(css, /\.investigation-item-title \{[\s\S]*display: block/);
-  assert.match(css, /\.investigation-item-actions \{ display: none; pointer-events: auto; \}/);
-  assert.match(css, /\.investigation-item:focus-within \.investigation-item-actions \{ display: flex; \}/);
-  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.investigation-item:focus-within \.investigation-item-actions \{ display: flex; opacity: 1; \}/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.investigation-item-actions \{[\s\S]*position: absolute[\s\S]*visibility: hidden/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.investigation-item:hover \.investigation-item-actions \{[\s\S]*visibility: hidden/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.investigation-item:focus-within \.investigation-item-actions \{[\s\S]*visibility: visible[\s\S]*pointer-events: auto/);
+  assert.match(css, /\.investigation-item:focus-within \.investigation-item-title \{ padding-right: 106px; \}/);
   assert.match(app, /wrapper\.tabIndex = 0/);
   assert.match(css, /\.graph-add-button[\s\S]*opacity: 1/);
 });
