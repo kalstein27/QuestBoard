@@ -11,7 +11,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../core/domain.js";
-import { ARTIFACT_TYPES, BOARD_ENTITY_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
+import { ARTIFACT_TYPES, BOARD_ENTITY_TYPES, FLOW_WORK_GROUP_MEMBER_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
@@ -319,6 +319,88 @@ async function handleRequest(
   const graphMatch = pathname.match(/^\/projects\/([^/]+)\/investigation\/graph$/);
   if (graphMatch && method === "GET") {
     sendJson(response, 200, service.getInvestigationGraph(decodePathPart(graphMatch[1])));
+    return;
+  }
+
+  const flowGroupsMatch = pathname.match(/^\/projects\/([^/]+)\/flow-work-groups$/);
+  if (flowGroupsMatch) {
+    const projectId = decodePathPart(flowGroupsMatch[1]);
+    if (method === "GET") {
+      const graph = service.getInvestigationGraph(projectId);
+      sendJson(response, 200, { groups: graph.flowWorkGroups, memberships: graph.flowWorkGroupMemberships });
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJsonObject(request);
+      const input = {
+        projectId,
+        title: requireString(body, "title"),
+        ...optionalStringProperty(body, "goal"),
+        ...optionalStringProperty(body, "parentGroupId"),
+        ...optionalStringProperty(body, "linkedTaskId"),
+        ...optionalFiniteNumberProperty(body, "x"),
+        ...optionalFiniteNumberProperty(body, "y"),
+        ...optionalFiniteNumberProperty(body, "width"),
+        ...optionalFiniteNumberProperty(body, "height"),
+        ...optionalBooleanProperty(body, "collapsed"),
+      };
+      sendJson(response, 201, { group: service.createFlowWorkGroup(input, requireActor(request), mutationOptions(request)) });
+      return;
+    }
+  }
+
+  const flowGroupMatch = pathname.match(/^\/flow-work-groups\/([^/]+)$/);
+  if (flowGroupMatch) {
+    const groupId = decodePathPart(flowGroupMatch[1]);
+    if (method === "GET") {
+      sendJson(response, 200, { group: service.getFlowWorkGroup(groupId) });
+      return;
+    }
+    if (method === "PATCH") {
+      const body = await readJsonObject(request);
+      const patch = {
+        ...optionalPositiveIntegerProperty(body, "expectedRevision"),
+        ...optionalStringProperty(body, "title"),
+        ...optionalStringProperty(body, "goal"),
+        ...optionalFiniteNumberProperty(body, "x"),
+        ...optionalFiniteNumberProperty(body, "y"),
+        ...optionalFiniteNumberProperty(body, "width"),
+        ...optionalFiniteNumberProperty(body, "height"),
+        ...optionalBooleanProperty(body, "collapsed"),
+      } as Parameters<QuestBoardService["updateFlowWorkGroup"]>[1];
+      if ("parentGroupId" in body) patch.parentGroupId = body.parentGroupId === null ? null : requireString(body, "parentGroupId");
+      if ("linkedTaskId" in body) patch.linkedTaskId = body.linkedTaskId === null ? null : requireString(body, "linkedTaskId");
+      sendJson(response, 200, { group: service.updateFlowWorkGroup(groupId, patch, requireActor(request), mutationOptions(request)) });
+      return;
+    }
+    if (method === "DELETE") {
+      const expectedRevision = url.searchParams.get("expectedRevision");
+      service.deleteFlowWorkGroup(groupId, requireActor(request), {
+        ...mutationOptions(request),
+        ...(expectedRevision ? { expectedRevision: Number(expectedRevision) } : {}),
+      });
+      sendJson(response, 200, { deleted: true });
+      return;
+    }
+  }
+
+  const flowGroupMemberMatch = pathname.match(/^\/flow-work-groups\/([^/]+)\/members\/([^/]+)\/([^/]+)$/);
+  if (flowGroupMemberMatch && (method === "PUT" || method === "DELETE")) {
+    const input = {
+      groupId: decodePathPart(flowGroupMemberMatch[1]),
+      entityType: requireEnum(
+        { entityType: decodePathPart(flowGroupMemberMatch[2]) },
+        "entityType",
+        FLOW_WORK_GROUP_MEMBER_TYPES,
+      ),
+      entityId: decodePathPart(flowGroupMemberMatch[3]),
+    };
+    if (method === "PUT") {
+      sendJson(response, 200, { membership: service.setFlowWorkGroupMembership(input, requireActor(request), mutationOptions(request)) });
+    } else {
+      service.removeFlowWorkGroupMembership(input, requireActor(request), mutationOptions(request));
+      sendJson(response, 200, { removed: true });
+    }
     return;
   }
 
@@ -772,6 +854,14 @@ function requireFiniteNumber(body: Record<string, unknown>, key: string): number
     throw new TypeError(`${key} must be a finite number`);
   }
   return value;
+}
+
+function optionalFiniteNumberProperty<K extends string>(
+  body: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, number>> {
+  if (!(key in body) || body[key] === undefined) return {};
+  return { [key]: requireFiniteNumber(body, key) } as Partial<Record<K, number>>;
 }
 
 function optionalStringProperty<K extends string>(

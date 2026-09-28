@@ -32,7 +32,7 @@ The core contains only vendor-neutral concepts. `QuestBoardService` is the appli
 
 ## Current schema
 
-The SQLite database now contains twelve primary tables:
+The SQLite database now contains fourteen primary tables:
 
 - `projects`: human-readable project identity and optional local root metadata
 - `tasks`: title, description, status, priority, tags, actor, timestamps, and revision
@@ -45,6 +45,8 @@ The SQLite database now contains twelve primary tables:
 - `investigation_items`: ordered, independently described entries inside an Investigation Node
 - `investigation_item_links`: directed flow edges from a specific Item to another Investigation Node
 - `investigation_item_tasks`: many-to-many overlay from Investigation Items to canonical QuestBoard Tasks
+- `flow_work_groups`: first-class visual/spatial Flow containers with optional parent Group and optional linked canonical Task; their hierarchy is independent of Task hierarchy
+- `flow_work_group_memberships`: explicit direct membership from one canonical Task or Investigation Node to one visual Flow Work Group; membership is allowed at any Group depth rather than leaf-only
 - `board_positions`: free-layout Task/Artifact/Investigation-Node canvas coordinates, stored separately from workflow revision/history
 
 Task mutations and their Activity rows are written in one SQLite transaction. Claim/release, Artifact attachment, and Relation creation are also paired with their Activity rows transactionally. When a mutation carries a request ID, its result receipt is persisted in the same transaction as the side effect.
@@ -69,7 +71,11 @@ Mutations can carry an idempotency `requestId`. SQLite stores the operation, act
 
 The first Web adapter is deliberately framework-free HTML, CSS, and JavaScript served by the same HTTP process. It adds no runtime dependency and talks only to the public HTTP boundary rather than importing core or SQLite modules.
 
-The UI provides two views. Quest Board renders the seven planned Task states as a horizontal Kanban board. Investigation Board is a project-flow execution map: first-class Investigation Nodes contain multiple described Items, an Item can overlay multiple canonical Tasks, and a directed flow edge originates from a specific Item and targets another Node. Standalone unconnected Nodes are valid first-class state. When a project has no first-class Investigation Nodes yet, the existing Task/Artifact free-layout Relation visualization remains as a compatibility view rather than being migrated or deleted automatically. Node dragging persists coordinates through the application/repository boundary without changing Task revision or writing Activity events. The Web adapter keeps a bounded move history so node-position changes can be undone/redone through that same persistence boundary, and the canvas supports 50–150% zoom with drag deltas normalized back into logical board coordinates.
+The UI exposes three product surfaces: Quest, Flow, and Code. Quest renders the seven planned Task states as one flat horizontal Kanban board. Flow is a project-work execution map: first-class Investigation Nodes contain multiple described Items, an Item can overlay multiple canonical Tasks, and a directed flow edge originates from a specific Item and targets another Node. Standalone unconnected Nodes remain valid first-class state.
+
+Flow also owns a separate first-class **visual Work Group hierarchy**. A Work Group may contain child Work Groups plus directly assigned canonical Tasks and Investigation Nodes, and those direct members are valid at any hierarchy depth. A parent Group may therefore contain both unclassified/direct Tasks and more specific child Groups at the same time. The Flow Group hierarchy must not be inferred as the canonical Task hierarchy: `linkedTaskId` is optional context, and Task hierarchy may be used as a recommendation or migration seed without forcing visual membership. Group boundaries are presentation/spatial containers rather than graph-routing obstacles. Moving a Group moves its descendant Groups and explicitly grouped Investigation Nodes as one undoable spatial operation while preserving their relative positions; the contained Nodes remain independently movable.
+
+Node and Group dragging persists coordinates through the application/repository boundary without changing Task revision or writing Activity events. The Web adapter keeps a bounded move history so position changes can be undone/redone through that same persistence boundary, and the canvas supports 50–150% zoom with drag deltas normalized back into logical board coordinates. Code remains a distinct code-context surface rather than being folded into either Task hierarchy or Flow visual hierarchy.
 
 Only the fixed assets `/`, `/app.js`, and `/styles.css` are served. The server applies a same-origin Content Security Policy and `nosniff`; Web mutation calls still use the neutral actor id/provider headers. Actor identity in browser local storage is attribution metadata, not authentication.
 
@@ -77,7 +83,7 @@ The canonical composition mode binds the HTTP process specifically to the machin
 
 ## Shared agent-tool boundary
 
-`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project create/read, task reads/create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, Relation reads/creation, and Investigation Graph snapshot/Node/Item/Task-link/flow-link operations. MCP exposes the same definitions through `tools/list` and dispatches the same executor through `tools/call`.
+`src/adapters/agent-tools.ts` defines the neutral callable operations shared by non-HTTP agent clients. It delegates all behavior to `QuestBoardService` and contains no persistence access. The current operations cover project create/read, task reads/create/update, current Claim, Claim/Release, Activity reads, `note_added` / `agent_handoff` Activity creation, Artifact reads/attachment, Relation reads/creation, Investigation Graph snapshot/Node/Item/Task-link/flow-link operations, and visual Flow Work Group create/update/delete/membership operations. MCP exposes the same definitions through `tools/list` and dispatches the same executor through `tools/call`.
 
 Mutation inputs carry an explicit neutral actor with `id` and `provider`. These values are attribution metadata used by Claim and Activity; provider names have no privileged meaning in the core. Claims are coordination signals rather than mutation locks, and a Claim does not prevent another client from updating the Task.
 

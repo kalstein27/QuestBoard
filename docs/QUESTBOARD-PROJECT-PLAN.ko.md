@@ -120,6 +120,20 @@ QuestBoard의 핵심 카드.
 - Review
 - Done
 
+### Flow Work Group
+
+Flow에서 사람이 작업 덩어리를 공간적으로 이해하기 위한 **시각적 Work Context**. canonical Task hierarchy와는 별도의 hierarchy이며 둘을 동일 source of truth로 취급하지 않는다.
+
+- Work Group은 child Work Group을 포함할 수 있다.
+- Task와 Investigation Node는 어느 깊이의 Work Group에도 직접 속할 수 있으며 leaf Group까지 내려갈 필요가 없다.
+- 따라서 상위 `Code Map` Group에 직접 속한 Task와 `Code Map > SCIP` 같은 하위 Group의 Task가 동시에 존재할 수 있다.
+- Group은 title / goal / visual bounds / collapse state를 가지며 canonical Task 연결은 optional이다.
+- optional linked Task 또는 Task hierarchy는 Goal/progress/context 추천에 활용할 수 있지만 visual membership을 강제하지 않는다.
+- 상위 Group 이동은 descendant Group과 명시적으로 포함된 Investigation Node의 상대 배치를 보존한다. 내부 Node/child Group의 개별 이동도 허용한다.
+- Group 경계는 Flow edge routing obstacle이 아니다.
+
+즉 Quest의 Task hierarchy, Flow의 visual Work Group hierarchy, Code의 code hierarchy는 서로 다른 topology이며 필요한 binding을 통해 연결한다.
+
 ### Agent
 
 Task를 읽거나 Claim할 수 있는 주체.
@@ -201,6 +215,8 @@ Task / Artifact / Note 사이의 연결.
 - 의미 있는 단계, 결정, 분기, blocker, 완료 checkpoint만 표현한다.
 - 사람이 현재 위치와 다음 흐름을 빠르게 파악하는 것이 목적이다.
 - Node/Item/edge의 존재가 목적이 아니라 **현재 작업의 지도**가 되는 것이 목적이다.
+- 관련 Task/Node를 nested Work Group으로 공간적으로 묶을 수 있으며, 세부 Group이 아직 정해지지 않은 Task/Node는 상위 Group에 직접 둘 수 있다.
+- visual Work Group 배치는 Task parent/child 관계를 복제하는 화면이 아니다. 사람이 현재 일을 이해하기 좋은 공간 구조를 우선한다.
 
 ### Code — 어디를 보고 있는가
 
@@ -249,7 +265,7 @@ claims
 activities
 ```
 
-Artifact/Relation 후속 migration은 구현되었다. Artifact는 Task에 연결되고, Relation은 현재 Task/Artifact endpoint 사이의 방향성 edge를 저장한다. Investigation Board 좌표는 별도 `board_positions` 테이블에 저장한다. Note는 아직 별도 graph entity가 아니라 Activity의 `note_added`로 유지한다.
+Artifact/Relation 후속 migration은 구현되었다. Artifact는 Task에 연결되고, Relation은 현재 Task/Artifact endpoint 사이의 방향성 edge를 저장한다. Flow Node 좌표는 별도 `board_positions` 테이블에 저장한다. visual Work Group은 `flow_work_groups`, Task/Investigation Node의 직접 visual membership은 `flow_work_group_memberships`에 저장한다. 이 membership은 canonical Task hierarchy와 독립적이다. Note는 아직 별도 graph entity가 아니라 Activity의 `note_added`로 유지한다.
 
 SQLite DB는 기본적으로 `.questboard/questboard.sqlite`에 두며 Git에는 포함하지 않는다.
 

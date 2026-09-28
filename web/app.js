@@ -31,6 +31,8 @@ const state = {
   investigationGraphItems: [],
   investigationItemLinks: [],
   investigationItemTaskLinks: [],
+  flowWorkGroups: [],
+  flowWorkGroupMemberships: [],
   boardPositions: new Map(),
   displayPositions: new Map(),
   investigationZoom: loadInvestigationZoom(),
@@ -74,7 +76,7 @@ function collectElements() {
     "project-empty", "quest-board", "kanban-board", "empty-new-task-button", "empty-new-project-button",
     "investigation-board", "investigation-canvas", "investigation-groups", "investigation-edges", "investigation-nodes",
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
-    "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node",
+    "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node", "investigation-add-group",
     "investigation-inspector", "investigation-inspector-title", "investigation-inspector-body", "investigation-inspector-close",
     "code-map-board", "code-map-status", "code-map-refresh", "code-map-sync", "code-map-content",
     "code-map-inspector", "code-map-inspector-kicker", "code-map-inspector-title", "code-map-inspector-body", "code-map-inspector-close",
@@ -129,6 +131,7 @@ function bindEvents() {
   el["investigation-fit"].addEventListener("click", fitInvestigationContent);
   el["investigation-inspector-close"].addEventListener("click", clearInvestigationSelection);
   el["investigation-add-node"].addEventListener("click", () => void createInvestigationNodeFromPrompt());
+  el["investigation-add-group"].addEventListener("click", () => void createFlowWorkGroupFromPrompt());
   bindInvestigationViewportGestures();
   el["save-actor-button"].addEventListener("click", saveActor);
   el["task-form"].addEventListener("submit", (event) => void saveTask(event));
@@ -217,6 +220,8 @@ async function loadBoard() {
     state.investigationGraphItems = [];
     state.investigationItemLinks = [];
     state.investigationItemTaskLinks = [];
+    state.flowWorkGroups = [];
+    state.flowWorkGroupMemberships = [];
     state.boardPositions.clear();
     state.displayPositions.clear();
     state.codeMap = { available: false, indexed: false, projection: null, mode: null };
@@ -235,7 +240,7 @@ async function loadBoard() {
       api(`/projects/${encodeURIComponent(state.projectId)}/investigation/graph`),
       api(`/projects/${encodeURIComponent(state.projectId)}/task-hierarchy`),
     ]);
-    const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = graph;
+    const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks, flowWorkGroups, flowWorkGroupMemberships } = graph;
     state.tasks = tasks;
     state.taskHierarchy = hierarchyResponse.hierarchy;
     syncSeenDoneTasks();
@@ -245,6 +250,8 @@ async function loadBoard() {
     state.investigationGraphItems = items;
     state.investigationItemLinks = itemLinks;
     state.investigationItemTaskLinks = itemTaskLinks;
+    state.flowWorkGroups = flowWorkGroups || [];
+    state.flowWorkGroupMemberships = flowWorkGroupMemberships || [];
     state.boardPositions = new Map(positions.map((position) => [boardNodeKey(position.entityType, position.entityId), position]));
     resetInvestigationHistory();
     state.claims = new Map(claims.map((claim) => [claim.taskId, claim]));
@@ -475,6 +482,7 @@ function renderViewSwitch() {
   el["new-task-button"].classList.toggle("hidden", !quest);
   el["hide-completed-control"].classList.toggle("hidden", !quest);
   el["investigation-add-node"].classList.toggle("hidden", !investigation);
+  el["investigation-add-group"].classList.toggle("hidden", !investigation);
   el["code-map-refresh"].classList.toggle("hidden", !codeMap);
   if (!codeMap) el["code-map-sync"].classList.add("hidden");
   const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
@@ -989,25 +997,69 @@ function renderInvestigationBoard() {
   });
 }
 
-function investigationGroupTaskForNode(nodeId) {
-  const itemIds = new Set(
-    state.investigationGraphItems.filter((item) => item.nodeId === nodeId).map((item) => item.id),
-  );
-  const linkedTaskIds = state.investigationItemTaskLinks
-    .filter((link) => itemIds.has(link.itemId))
-    .map((link) => link.taskId);
-  if (linkedTaskIds.length === 0) return null;
+function flowWorkGroupById(groupId) {
+  return state.flowWorkGroups.find((group) => group.id === groupId) || null;
+}
 
-  const groupPaths = linkedTaskIds.map((taskId) => {
-    const ancestry = state.taskHierarchy?.ancestryByTask?.[taskId] ?? [];
-    return [...ancestry, taskId].filter((candidate) => isGroupTask(candidate));
-  });
-  const firstPath = groupPaths[0] ?? [];
-  for (let index = firstPath.length - 1; index >= 0; index -= 1) {
-    const candidate = firstPath[index];
-    if (groupPaths.every((path) => path.includes(candidate))) return taskById(candidate);
+function flowWorkGroupDepth(group) {
+  let depth = 0;
+  const visited = new Set([group.id]);
+  let parentId = group.parentGroupId;
+  while (parentId) {
+    if (visited.has(parentId)) break;
+    visited.add(parentId);
+    depth += 1;
+    parentId = flowWorkGroupById(parentId)?.parentGroupId;
   }
-  return null;
+  return depth;
+}
+
+function flowWorkGroupDescendantIds(groupId) {
+  const descendants = new Set();
+  const queue = [groupId];
+  while (queue.length > 0) {
+    const parentId = queue.shift();
+    state.flowWorkGroups.forEach((group) => {
+      if (group.parentGroupId !== parentId || descendants.has(group.id)) return;
+      descendants.add(group.id);
+      queue.push(group.id);
+    });
+  }
+  return descendants;
+}
+
+function flowWorkGroupSubtreeIds(groupId) {
+  return new Set([groupId, ...flowWorkGroupDescendantIds(groupId)]);
+}
+
+function flowWorkGroupDirectMemberships(groupId) {
+  return state.flowWorkGroupMemberships.filter((membership) => membership.groupId === groupId);
+}
+
+function flowWorkGroupProgress(groupId) {
+  const subtree = flowWorkGroupSubtreeIds(groupId);
+  const taskIds = new Set(
+    state.flowWorkGroupMemberships
+      .filter((membership) => subtree.has(membership.groupId) && membership.entityType === "task")
+      .map((membership) => membership.entityId),
+  );
+  const tasks = [...taskIds].map(taskById).filter(Boolean);
+  return { total: tasks.length, done: tasks.filter((task) => task.status === "done").length };
+}
+
+function flowWorkGroupPathLabel(group) {
+  const parts = [group.title];
+  const visited = new Set([group.id]);
+  let parentId = group.parentGroupId;
+  while (parentId) {
+    if (visited.has(parentId)) break;
+    visited.add(parentId);
+    const parent = flowWorkGroupById(parentId);
+    if (!parent) break;
+    parts.unshift(parent.title);
+    parentId = parent.parentGroupId;
+  }
+  return parts.join(" › ");
 }
 
 function investigationNodeCard(nodeId) {
@@ -1015,89 +1067,120 @@ function investigationNodeCard(nodeId) {
     .find((card) => card.dataset.entityType === "investigation_node" && card.dataset.entityId === nodeId) || null;
 }
 
+function flowWorkGroupShell(groupId) {
+  return [...el["investigation-groups"].children]
+    .find((shell) => shell.dataset.flowWorkGroupId === groupId) || null;
+}
+
 function renderInvestigationGroups() {
   const layer = el["investigation-groups"];
   if (!layer) return;
-  const memberships = new Map();
-  state.investigationGraphNodes.forEach((graphNode) => {
-    const group = investigationGroupTaskForNode(graphNode.id);
-    if (!group) return;
-    const membership = memberships.get(group.id) ?? { group, nodeIds: [] };
-    membership.nodeIds.push(graphNode.id);
-    memberships.set(group.id, membership);
+  const groups = [...state.flowWorkGroups].sort((left, right) => {
+    const depthDelta = flowWorkGroupDepth(left) - flowWorkGroupDepth(right);
+    return depthDelta || left.createdAt.localeCompare(right.createdAt);
   });
-
-  const shells = [];
-  memberships.forEach(({ group, nodeIds }) => {
-    const memberCards = nodeIds.map(investigationNodeCard).filter(Boolean);
-    if (memberCards.length === 0) return;
-    const bounds = memberCards.reduce((acc, card) => {
-      const position = state.displayPositions.get(boardNodeKey("investigation_node", card.dataset.entityId));
-      if (!position) return acc;
-      acc.minX = Math.min(acc.minX, position.x);
-      acc.minY = Math.min(acc.minY, position.y);
-      acc.maxX = Math.max(acc.maxX, position.x + card.offsetWidth);
-      acc.maxY = Math.max(acc.maxY, position.y + card.offsetHeight);
-      return acc;
-    }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-    if (!Number.isFinite(bounds.minX)) return;
-
-    const horizontalPadding = 22;
-    const headerSpace = 58;
-    const bottomPadding = 22;
-    const shell = node("section", "investigation-group");
-    shell.dataset.groupTaskId = group.id;
-    shell.style.left = `${bounds.minX - horizontalPadding}px`;
-    shell.style.top = `${bounds.minY - headerSpace}px`;
-    shell.style.width = `${bounds.maxX - bounds.minX + horizontalPadding * 2}px`;
-    shell.style.height = `${bounds.maxY - bounds.minY + headerSpace + bottomPadding}px`;
+  const shells = groups.map((group) => {
+    const depth = flowWorkGroupDepth(group);
+    const shell = node("section", `investigation-group flow-work-group depth-${Math.min(depth, 4)}`);
+    shell.dataset.flowWorkGroupId = group.id;
+    shell.style.left = `${group.x}px`;
+    shell.style.top = `${group.y}px`;
+    shell.style.width = `${group.width}px`;
+    shell.style.height = `${group.collapsed ? 56 : group.height}px`;
+    shell.style.zIndex = String(depth + 1);
+    shell.classList.toggle("collapsed", Boolean(group.collapsed));
 
     const head = node("button", "investigation-group-head");
     head.type = "button";
+    head.title = group.linkedTaskId ? "Open linked Task" : "Drag visual work group";
     const summary = node("span", "investigation-group-summary");
     summary.append(
-      node("span", "investigation-group-kicker", "Group"),
+      node("span", "investigation-group-kicker", depth ? `Group · L${depth + 1}` : "Group"),
       node("strong", "investigation-group-title", group.title),
     );
-    const progress = state.taskHierarchy?.progressByTask?.[group.id];
-    if (progress?.total) {
-      summary.append(node("span", "investigation-group-progress", `${progress.done}/${progress.total} done`));
-    }
+    const progress = flowWorkGroupProgress(group.id);
+    if (progress.total) summary.append(node("span", "investigation-group-progress", `${progress.done}/${progress.total} done`));
+    const childCount = state.flowWorkGroups.filter((candidate) => candidate.parentGroupId === group.id).length;
+    if (childCount) summary.append(node("span", "investigation-group-progress", `${childCount} sub`));
     head.append(summary);
-    const goal = (group.goal || "").trim();
-    if (goal) head.append(node("span", "investigation-group-goal", goal));
-    attachInvestigationGroupDrag(head, shell, nodeIds);
+    if (group.goal) head.append(node("span", "investigation-group-goal", group.goal));
+    attachInvestigationGroupDrag(head, shell, group);
     head.addEventListener("click", () => {
       if (head._suppressClick) {
         head._suppressClick = false;
         return;
       }
-      void openTask(group.id);
+      if (group.linkedTaskId) void openTask(group.linkedTaskId);
     });
     shell.append(head);
-    shells.push(shell);
+
+    const actions = node("div", "flow-work-group-actions");
+    const addChild = node("button", "graph-icon-button", "+");
+    addChild.type = "button";
+    addChild.title = "Add subgroup";
+    addChild.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void createFlowWorkGroupFromPrompt(group.id);
+    });
+    const edit = node("button", "graph-icon-button", "✎");
+    edit.type = "button";
+    edit.title = "Edit visual group";
+    edit.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void editFlowWorkGroupFromPrompt(group);
+    });
+    actions.append(addChild, edit);
+    shell.append(actions);
+
+    if (!group.collapsed) {
+      const taskMemberships = flowWorkGroupDirectMemberships(group.id).filter((membership) => membership.entityType === "task");
+      if (taskMemberships.length > 0) {
+        const taskRail = node("div", "flow-work-group-task-rail");
+        taskMemberships.forEach((membership) => {
+          const task = taskById(membership.entityId);
+          if (!task) return;
+          const chip = node("button", "flow-work-group-task");
+          chip.type = "button";
+          chip.append(taskStatusIcon(task.status), node("span", "flow-work-group-task-title", task.title));
+          chip.addEventListener("click", (event) => {
+            event.stopPropagation();
+            void openTask(task.id);
+          });
+          taskRail.append(chip);
+        });
+        shell.append(taskRail);
+      }
+    }
+    return shell;
   });
   layer.replaceChildren(...shells);
 }
 
-function attachInvestigationGroupDrag(head, shell, nodeIds) {
+function attachInvestigationGroupDrag(head, shell, group) {
   head.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || state.investigationHistoryBusy) return;
-    const starts = nodeIds.map((nodeId) => {
+    const subtreeIds = flowWorkGroupSubtreeIds(group.id);
+    const groupStarts = [...subtreeIds].map((groupId) => {
+      const memberGroup = flowWorkGroupById(groupId);
+      return memberGroup ? { groupId, position: { x: memberGroup.x, y: memberGroup.y } } : null;
+    }).filter(Boolean);
+    const nodeIds = new Set(
+      state.flowWorkGroupMemberships
+        .filter((membership) => subtreeIds.has(membership.groupId) && membership.entityType === "investigation_node")
+        .map((membership) => membership.entityId),
+    );
+    const nodeStarts = [...nodeIds].map((nodeId) => {
       const position = state.displayPositions.get(boardNodeKey("investigation_node", nodeId));
       return position ? { nodeId, position: { ...position } } : null;
     }).filter(Boolean);
-    if (starts.length === 0) return;
+    if (groupStarts.length === 0) return;
 
     head.setPointerCapture(event.pointerId);
     head.classList.add("dragging-group");
     const startClientX = event.clientX;
     const startClientY = event.clientY;
-    const maxNodeY = Math.max(820, el["investigation-canvas"].clientHeight - 150);
-    const minDx = Math.max(...starts.map((entry) => 16 - entry.position.x));
-    const maxDx = Math.min(...starts.map((entry) => 1540 - entry.position.x));
-    const minDy = Math.max(...starts.map((entry) => 16 - entry.position.y));
-    const maxDy = Math.min(...starts.map((entry) => maxNodeY - entry.position.y));
+    const minDx = Math.max(...groupStarts.map((entry) => 8 - entry.position.x));
+    const minDy = Math.max(...groupStarts.map((entry) => 8 - entry.position.y));
     let latestDx = 0;
     let latestDy = 0;
     let moved = false;
@@ -1107,15 +1190,18 @@ function attachInvestigationGroupDrag(head, shell, nodeIds) {
       const rawDx = (moveEvent.clientX - startClientX) / state.investigationZoom;
       const rawDy = (moveEvent.clientY - startClientY) / state.investigationZoom;
       if (Math.abs(rawDx) + Math.abs(rawDy) > 3) moved = true;
-      latestDx = clamp(rawDx, minDx, maxDx);
-      latestDy = clamp(rawDy, minDy, maxDy);
-      starts.forEach((entry) => {
+      latestDx = Math.max(minDx, rawDx);
+      latestDy = Math.max(minDy, rawDy);
+      groupStarts.forEach((entry) => {
+        const memberShell = flowWorkGroupShell(entry.groupId);
+        if (memberShell) memberShell.style.transform = `translate(${latestDx}px, ${latestDy}px)`;
+      });
+      nodeStarts.forEach((entry) => {
         const next = { x: entry.position.x + latestDx, y: entry.position.y + latestDy };
         state.displayPositions.set(boardNodeKey("investigation_node", entry.nodeId), next);
         const card = investigationNodeCard(entry.nodeId);
         if (card) setInvestigationNodePosition(card, next);
       });
-      shell.style.transform = `translate(${latestDx}px, ${latestDy}px)`;
       drawInvestigationEdges();
     };
 
@@ -1127,13 +1213,19 @@ function attachInvestigationGroupDrag(head, shell, nodeIds) {
       head.classList.remove("dragging-group");
       if (!moved) return;
       head._suppressClick = true;
-      const moves = starts.map((entry) => ({
+      const groupMoves = groupStarts.map((entry) => ({
+        entityType: "flow_work_group",
+        entityId: entry.groupId,
+        from: entry.position,
+        to: { x: entry.position.x + latestDx, y: entry.position.y + latestDy },
+      }));
+      const nodeMoves = nodeStarts.map((entry) => ({
         entityType: "investigation_node",
         entityId: entry.nodeId,
         from: entry.position,
         to: { x: entry.position.x + latestDx, y: entry.position.y + latestDy },
       }));
-      void commitInvestigationGroupMove(moves);
+      void commitInvestigationGroupMove([...groupMoves, ...nodeMoves]);
     };
 
     head.addEventListener("pointermove", onMove);
@@ -1142,12 +1234,29 @@ function attachInvestigationGroupDrag(head, shell, nodeIds) {
   });
 }
 
+async function persistFlowWorkGroupPosition(groupId, position) {
+  const group = flowWorkGroupById(groupId);
+  if (!group) return null;
+  const { group: updated } = await api(`/flow-work-groups/${encodeURIComponent(groupId)}`, {
+    method: "PATCH", actor: true,
+    body: { x: position.x, y: position.y, expectedRevision: group.revision },
+  });
+  const index = state.flowWorkGroups.findIndex((candidate) => candidate.id === groupId);
+  if (index >= 0) state.flowWorkGroups[index] = updated;
+  return { x: updated.x, y: updated.y };
+}
+
+async function persistFlowHistoryMove(move) {
+  if (move.entityType === "flow_work_group") return persistFlowWorkGroupPosition(move.entityId, move.to);
+  return persistInvestigationPosition(move.entityType, move.entityId, move.to);
+}
+
 async function commitInvestigationGroupMove(moves) {
   state.investigationHistoryBusy = true;
   renderInvestigationControls();
   const historyEntries = [];
   for (const move of moves) {
-    const saved = await persistInvestigationPosition(move.entityType, move.entityId, move.to);
+    const saved = await persistFlowHistoryMove(move);
     if (!saved) continue;
     historyEntries.push({
       entityType: move.entityType,
@@ -1224,6 +1333,10 @@ function syncInvestigationCanvasBounds() {
     if (!position) return;
     maxX = Math.max(maxX, position.x + card.offsetWidth);
     maxY = Math.max(maxY, position.y + card.offsetHeight);
+  });
+  state.flowWorkGroups.forEach((group) => {
+    maxX = Math.max(maxX, group.x + group.width);
+    maxY = Math.max(maxY, group.y + (group.collapsed ? 56 : group.height));
   });
   el["investigation-canvas"].style.width = `${Math.max(1000, boardWidth, Math.ceil(maxX + 80))}px`;
   el["investigation-canvas"].style.height = `${Math.max(1000, Math.ceil(maxY + 80))}px`;
@@ -1392,6 +1505,7 @@ function renderInvestigationInspector() {
 
   body.replaceChildren(summary, description, actions);
   if (binding) body.append(codeMapBindingBadges(binding.state));
+  body.append(renderFlowWorkGroupMembershipSection("investigation_node", graphNode.id));
   body.append(itemSection);
 }
 
@@ -1420,7 +1534,7 @@ function focusInvestigationNode(nodeId) {
 
 function fitInvestigationContent() {
   const cards = [...el["investigation-nodes"].children].filter((card) => card.dataset.entityId);
-  if (cards.length === 0) return;
+  if (cards.length === 0 && state.flowWorkGroups.length === 0) return;
   const bounds = cards.reduce((acc, card) => {
     const key = boardNodeKey(card.dataset.entityType, card.dataset.entityId);
     const position = state.displayPositions.get(key);
@@ -1431,6 +1545,12 @@ function fitInvestigationContent() {
     acc.maxY = Math.max(acc.maxY, position.y + card.offsetHeight);
     return acc;
   }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  state.flowWorkGroups.forEach((group) => {
+    bounds.minX = Math.min(bounds.minX, group.x);
+    bounds.minY = Math.min(bounds.minY, group.y);
+    bounds.maxX = Math.max(bounds.maxX, group.x + group.width);
+    bounds.maxY = Math.max(bounds.maxY, group.y + (group.collapsed ? 56 : group.height));
+  });
   if (!Number.isFinite(bounds.minX)) return;
   const board = el["investigation-board"];
   const inspectorReserve = board.clientWidth > 720 && !el["investigation-inspector"].classList.contains("hidden") ? 300 : 0;
@@ -1602,6 +1722,93 @@ function graphActionButton(label, title, onClick) {
   button.addEventListener("click", onClick);
   return button;
 }
+
+async function createFlowWorkGroupFromPrompt(parentGroupId = null) {
+  if (!state.projectId) return;
+  const parent = parentGroupId ? flowWorkGroupById(parentGroupId) : null;
+  const title = window.prompt(parent ? `Subgroup title inside ${parent.title}` : "Flow group title");
+  if (!title?.trim()) return;
+  const goal = window.prompt("Group goal (optional)", "") ?? "";
+  const board = el["investigation-board"];
+  const centerX = (board.clientWidth / 2 - state.investigationPan.x) / state.investigationZoom;
+  const centerY = (board.clientHeight / 2 - state.investigationPan.y) / state.investigationZoom;
+  const width = parent ? Math.max(220, Math.min(520, parent.width - 56)) : 760;
+  const height = parent ? Math.max(140, Math.min(300, parent.height - 118)) : 460;
+  const x = parent ? parent.x + 28 : Math.max(16, centerX - width / 2);
+  const y = parent ? parent.y + 92 : Math.max(16, centerY - 72);
+  try {
+    await api(`/projects/${encodeURIComponent(state.projectId)}/flow-work-groups`, {
+      method: "POST", actor: true,
+      body: { title, goal, x, y, width, height, ...(parent ? { parentGroupId: parent.id } : {}) },
+    });
+    await loadBoard();
+    toast(parent ? `Subgroup created in ${parent.title}` : "Flow group created");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function editFlowWorkGroupFromPrompt(group) {
+  const title = window.prompt("Flow group title", group.title);
+  if (!title?.trim()) return;
+  const goal = window.prompt("Group goal", group.goal || "") ?? group.goal;
+  try {
+    await api(`/flow-work-groups/${encodeURIComponent(group.id)}`, {
+      method: "PATCH", actor: true,
+      body: { title, goal, expectedRevision: group.revision },
+    });
+    await loadBoard();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function currentFlowWorkGroupMembership(entityType, entityId) {
+  return state.flowWorkGroupMemberships.find((membership) => (
+    membership.entityType === entityType && membership.entityId === entityId
+  )) || null;
+}
+
+async function changeFlowWorkGroupMembership(entityType, entityId, nextGroupId) {
+  const current = currentFlowWorkGroupMembership(entityType, entityId);
+  if (current?.groupId === nextGroupId || (!current && !nextGroupId)) return;
+  try {
+    if (!nextGroupId) {
+      await api(`/flow-work-groups/${encodeURIComponent(current.groupId)}/members/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, {
+        method: "DELETE", actor: true,
+      });
+    } else {
+      await api(`/flow-work-groups/${encodeURIComponent(nextGroupId)}/members/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, {
+        method: "PUT", actor: true,
+      });
+    }
+    await loadBoard();
+    if (entityType === "investigation_node") selectInvestigationNode(entityId);
+    else if (entityType === "task") await openTask(entityId);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function renderFlowWorkGroupMembershipSection(entityType, entityId) {
+  const section = node("section", "detail-section flow-group-membership-section");
+  section.append(node("h3", "section-title", "Flow group"));
+  const current = currentFlowWorkGroupMembership(entityType, entityId);
+  const select = document.createElement("select");
+  select.className = "flow-group-membership-select";
+  select.append(option("", "Ungrouped"));
+  [...state.flowWorkGroups]
+    .sort((left, right) => flowWorkGroupPathLabel(left).localeCompare(flowWorkGroupPathLabel(right)))
+    .forEach((group) => select.append(option(group.id, flowWorkGroupPathLabel(group))));
+  select.value = current?.groupId || "";
+  select.addEventListener("change", () => void changeFlowWorkGroupMembership(entityType, entityId, select.value));
+  const hint = node("span", "muted", current
+    ? "Visual Flow membership. This does not change the canonical Task hierarchy."
+    : "Assign this item to any visual Group depth, or leave it ungrouped.");
+  section.append(select, hint);
+  return section;
+}
+
 
 async function createInvestigationNodeFromPrompt() {
   if (!state.projectId) return;
@@ -1948,13 +2155,18 @@ async function applyInvestigationHistoryAction(entry, direction) {
       allSaved = false;
       break;
     }
-    const key = boardNodeKey(move.entityType, move.entityId);
-    state.displayPositions.set(key, { ...position });
-    const card = [...el["investigation-nodes"].children].find((candidate) => (
-      candidate.dataset.entityType === move.entityType && candidate.dataset.entityId === move.entityId
-    ));
-    if (card) setInvestigationNodePosition(card, position);
-    const saved = await persistInvestigationPosition(move.entityType, move.entityId, position);
+    let saved;
+    if (move.entityType === "flow_work_group") {
+      saved = await persistFlowWorkGroupPosition(move.entityId, position);
+    } else {
+      const key = boardNodeKey(move.entityType, move.entityId);
+      state.displayPositions.set(key, { ...position });
+      const card = [...el["investigation-nodes"].children].find((candidate) => (
+        candidate.dataset.entityType === move.entityType && candidate.dataset.entityId === move.entityId
+      ));
+      if (card) setInvestigationNodePosition(card, position);
+      saved = await persistInvestigationPosition(move.entityType, move.entityId, position);
+    }
     if (!saved) {
       allSaved = false;
       break;
@@ -2636,7 +2848,7 @@ function renderDrawer(task, claim, artifacts, relations) {
   const detailsContent = node("div", "drawer-details-content");
   detailsContent.append(summary, claimSection, evidenceSection, activitySection);
   details.append(detailsContent);
-  body.append(continuitySection, renderWorkGroupSection(task), details);
+  body.append(continuitySection, renderFlowWorkGroupMembershipSection("task", task.id), renderWorkGroupSection(task), details);
   el["drawer-body"].replaceChildren(body);
 }
 
@@ -2665,7 +2877,7 @@ function groupParentCandidates(taskId) {
 
 function renderWorkGroupSection(task) {
   const section = node("section", "detail-section work-group-section");
-  section.append(node("h3", "section-title", "Work group"));
+  section.append(node("h3", "section-title", "Task hierarchy"));
   const directChildren = hierarchyChildren(task.id);
   const parentBinding = hierarchyRelationForChild(task.id);
 

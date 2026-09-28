@@ -9,6 +9,8 @@ import type {
   BoardNodePosition,
   Claim,
   ClaimState,
+  FlowWorkGroup,
+  FlowWorkGroupMembership,
   InvestigationItem,
   InvestigationItemLink,
   InvestigationItemTaskLink,
@@ -172,6 +174,33 @@ type InvestigationItemTaskLinkRow = {
   item_id: string;
   task_id: string;
   sort_order: number;
+  created_at: string;
+};
+
+type FlowWorkGroupRow = {
+  id: string;
+  project_id: string;
+  parent_group_id: string | null;
+  linked_task_id: string | null;
+  title: string;
+  goal: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  collapsed: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+};
+
+type FlowWorkGroupMembershipRow = {
+  project_id: string;
+  group_id: string;
+  entity_type: FlowWorkGroupMembership["entityType"];
+  entity_id: string;
+  created_by: string;
   created_at: string;
 };
 
@@ -395,6 +424,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
            OR (to_type = 'artifact' AND to_id IN (SELECT id FROM artifacts WHERE task_id = ?))
       `).run(taskId, taskId, taskId, taskId);
       this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'task' AND entity_id = ?").run(taskId);
+      this.db.prepare("DELETE FROM flow_work_group_memberships WHERE entity_type = 'task' AND entity_id = ?").run(taskId);
       for (const artifactId of artifactIds) {
         this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'artifact' AND entity_id = ?").run(artifactId);
       }
@@ -621,6 +651,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
   deleteInvestigationNode(nodeId: string): void {
     this.transaction(() => {
       this.db.prepare("DELETE FROM board_positions WHERE entity_type = 'investigation_node' AND entity_id = ?").run(nodeId);
+      this.db.prepare("DELETE FROM flow_work_group_memberships WHERE entity_type = 'investigation_node' AND entity_id = ?").run(nodeId);
       const result = this.db.prepare("DELETE FROM investigation_nodes WHERE id = ?").run(nodeId);
       if (Number(result.changes) !== 1) throw new EntityNotFoundError("InvestigationNode", nodeId);
     });
@@ -709,6 +740,83 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
 
   deleteInvestigationItemTaskLink(itemId: string, taskId: string): void {
     this.db.prepare("DELETE FROM investigation_item_tasks WHERE item_id = ? AND task_id = ?").run(itemId, taskId);
+  }
+
+  createFlowWorkGroup(group: FlowWorkGroup): FlowWorkGroup {
+    this.db.prepare(`
+      INSERT INTO flow_work_groups (
+        id, project_id, parent_group_id, linked_task_id, title, goal,
+        x, y, width, height, collapsed, created_by, created_at, updated_at, revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      group.id, group.projectId, group.parentGroupId ?? null, group.linkedTaskId ?? null,
+      group.title, group.goal, group.x, group.y, group.width, group.height,
+      group.collapsed ? 1 : 0, group.createdBy, group.createdAt, group.updatedAt, group.revision,
+    );
+    return group;
+  }
+
+  getFlowWorkGroup(groupId: string): FlowWorkGroup | undefined {
+    const row = this.db.prepare("SELECT * FROM flow_work_groups WHERE id = ?").get(groupId) as FlowWorkGroupRow | undefined;
+    return row ? mapFlowWorkGroup(row) : undefined;
+  }
+
+  listFlowWorkGroups(projectId: string): FlowWorkGroup[] {
+    return (this.db.prepare("SELECT * FROM flow_work_groups WHERE project_id = ? ORDER BY created_at ASC, id ASC").all(projectId) as FlowWorkGroupRow[])
+      .map(mapFlowWorkGroup);
+  }
+
+  updateFlowWorkGroup(group: FlowWorkGroup, expectedRevision: number): void {
+    const result = this.db.prepare(`
+      UPDATE flow_work_groups
+      SET parent_group_id = ?, linked_task_id = ?, title = ?, goal = ?, x = ?, y = ?, width = ?, height = ?, collapsed = ?, updated_at = ?, revision = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      group.parentGroupId ?? null, group.linkedTaskId ?? null, group.title, group.goal,
+      group.x, group.y, group.width, group.height, group.collapsed ? 1 : 0,
+      group.updatedAt, group.revision, group.id, expectedRevision,
+    );
+    if (Number(result.changes) !== 1) {
+      const current = this.getFlowWorkGroup(group.id);
+      if (!current) throw new EntityNotFoundError("FlowWorkGroup", group.id);
+      throw new EntityRevisionConflictError("FlowWorkGroup", group.id, expectedRevision, current.revision);
+    }
+  }
+
+  deleteFlowWorkGroup(groupId: string): void {
+    const result = this.db.prepare("DELETE FROM flow_work_groups WHERE id = ?").run(groupId);
+    if (Number(result.changes) !== 1) throw new EntityNotFoundError("FlowWorkGroup", groupId);
+  }
+
+  setFlowWorkGroupMembership(membership: FlowWorkGroupMembership): FlowWorkGroupMembership {
+    this.transaction(() => {
+      this.db.prepare(`
+        DELETE FROM flow_work_group_memberships
+        WHERE project_id = ? AND entity_type = ? AND entity_id = ?
+      `).run(membership.projectId, membership.entityType, membership.entityId);
+      this.db.prepare(`
+        INSERT INTO flow_work_group_memberships (project_id, group_id, entity_type, entity_id, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        membership.projectId, membership.groupId, membership.entityType, membership.entityId,
+        membership.createdBy, membership.createdAt,
+      );
+    });
+    return membership;
+  }
+
+  listFlowWorkGroupMemberships(projectId: string): FlowWorkGroupMembership[] {
+    return (this.db.prepare(`
+      SELECT * FROM flow_work_group_memberships
+      WHERE project_id = ? ORDER BY created_at ASC, group_id ASC, entity_type ASC, entity_id ASC
+    `).all(projectId) as FlowWorkGroupMembershipRow[]).map(mapFlowWorkGroupMembership);
+  }
+
+  deleteFlowWorkGroupMembership(groupId: string, entityType: FlowWorkGroupMembership["entityType"], entityId: string): void {
+    this.db.prepare(`
+      DELETE FROM flow_work_group_memberships
+      WHERE group_id = ? AND entity_type = ? AND entity_id = ?
+    `).run(groupId, entityType, entityId);
   }
 
   getCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): CodeMapInvestigationNodeBinding | undefined {
@@ -999,6 +1107,44 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       );
 
       CREATE INDEX IF NOT EXISTS investigation_item_tasks_task_idx ON investigation_item_tasks(task_id);
+
+      CREATE TABLE IF NOT EXISTS flow_work_groups (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        parent_group_id TEXT REFERENCES flow_work_groups(id) ON DELETE SET NULL,
+        linked_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        goal TEXT NOT NULL DEFAULT '',
+        x REAL NOT NULL,
+        y REAL NOT NULL,
+        width REAL NOT NULL CHECK (width >= 220),
+        height REAL NOT NULL CHECK (height >= 140),
+        collapsed INTEGER NOT NULL DEFAULT 0 CHECK (collapsed IN (0, 1)),
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        CHECK (parent_group_id IS NULL OR parent_group_id <> id)
+      );
+
+      CREATE INDEX IF NOT EXISTS flow_work_groups_project_parent_idx
+        ON flow_work_groups(project_id, parent_group_id, created_at);
+      CREATE INDEX IF NOT EXISTS flow_work_groups_linked_task_idx
+        ON flow_work_groups(linked_task_id);
+
+      CREATE TABLE IF NOT EXISTS flow_work_group_memberships (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL REFERENCES flow_work_groups(id) ON DELETE CASCADE,
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('task', 'investigation_node')),
+        entity_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (group_id, entity_type, entity_id),
+        UNIQUE (project_id, entity_type, entity_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS flow_work_group_memberships_project_group_idx
+        ON flow_work_group_memberships(project_id, group_id, created_at);
 
       CREATE TABLE IF NOT EXISTS board_positions (
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1337,6 +1483,37 @@ function mapInvestigationItemLink(row: InvestigationItemLinkRow): InvestigationI
 
 function mapInvestigationItemTaskLink(row: InvestigationItemTaskLinkRow): InvestigationItemTaskLink {
   return { itemId: row.item_id, taskId: row.task_id, sortOrder: row.sort_order, createdAt: row.created_at };
+}
+
+function mapFlowWorkGroup(row: FlowWorkGroupRow): FlowWorkGroup {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    goal: row.goal,
+    x: row.x,
+    y: row.y,
+    width: row.width,
+    height: row.height,
+    collapsed: row.collapsed === 1,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+    ...(row.parent_group_id ? { parentGroupId: row.parent_group_id } : {}),
+    ...(row.linked_task_id ? { linkedTaskId: row.linked_task_id } : {}),
+  };
+}
+
+function mapFlowWorkGroupMembership(row: FlowWorkGroupMembershipRow): FlowWorkGroupMembership {
+  return {
+    projectId: row.project_id,
+    groupId: row.group_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
 }
 
 function mapCodeMapInvestigationNodeBinding(row: CodeMapInvestigationNodeBindingRow): CodeMapInvestigationNodeBinding {

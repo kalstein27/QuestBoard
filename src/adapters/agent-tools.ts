@@ -6,7 +6,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../core/domain.js";
-import { ARTIFACT_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
+import { ARTIFACT_TYPES, FLOW_WORK_GROUP_MEMBER_TYPES, RELATION_ENTITY_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../core/domain.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
@@ -437,12 +437,97 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_investigation_graph",
-    description: "Read the project flow graph: Investigation Nodes, Items, Item-to-Node flow links, Item-to-Task links, canonical Tasks, and positions.",
+    description: "Read the project flow graph: visual Work Groups/memberships, Investigation Nodes, Items, flow/task links, canonical Tasks, and positions.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: { projectId: { type: "string", minLength: 1 } },
       required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_create_flow_work_group",
+    description: "Create a first-class visual/spatial Flow Work Group. Groups may be nested independently of canonical Task hierarchy.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        goal: { type: "string" },
+        parentGroupId: { type: "string", minLength: 1 },
+        linkedTaskId: { type: "string", minLength: 1 },
+        x: { type: "number" }, y: { type: "number" },
+        width: { type: "number", minimum: 220 }, height: { type: "number", minimum: 140 },
+        collapsed: { type: "boolean" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_update_flow_work_group",
+    description: "Update a visual Flow Work Group, including nesting, optional linked Task, bounds, and collapse state.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        title: { type: "string", minLength: 1 }, goal: { type: "string" },
+        parentGroupId: { oneOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+        linkedTaskId: { oneOf: [{ type: "string", minLength: 1 }, { type: "null" }] },
+        x: { type: "number" }, y: { type: "number" },
+        width: { type: "number", minimum: 220 }, height: { type: "number", minimum: 140 },
+        collapsed: { type: "boolean" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["groupId", "actor"],
+    },
+  },
+  {
+    name: "questboard_delete_flow_work_group",
+    description: "Delete one visual Flow Work Group without deleting canonical Tasks or Investigation Nodes; child groups become top-level.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", minLength: 1 }, expectedRevision: { type: "integer", minimum: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 }, actor: actorSchema,
+      },
+      required: ["groupId", "actor"],
+    },
+  },
+  {
+    name: "questboard_set_flow_work_group_member",
+    description: "Assign one canonical Task or Investigation Node directly to a visual Flow Work Group. Reassignment replaces its previous visual Group membership.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", minLength: 1 },
+        entityType: { type: "string", enum: FLOW_WORK_GROUP_MEMBER_TYPES },
+        entityId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 }, actor: actorSchema,
+      },
+      required: ["groupId", "entityType", "entityId", "actor"],
+    },
+  },
+  {
+    name: "questboard_remove_flow_work_group_member",
+    description: "Remove one Task or Investigation Node from its specified visual Flow Work Group without deleting the entity.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", minLength: 1 },
+        entityType: { type: "string", enum: FLOW_WORK_GROUP_MEMBER_TYPES },
+        entityId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 }, actor: actorSchema,
+      },
+      required: ["groupId", "entityType", "entityId", "actor"],
     },
   },
   {
@@ -864,6 +949,56 @@ export function executeQuestBoardAgentTool(
       return { deleted: true };
     case "questboard_get_investigation_graph":
       return service.getInvestigationGraph(requireString(args, "projectId"));
+    case "questboard_create_flow_work_group": {
+      const inputValue = {
+        projectId: requireString(args, "projectId"),
+        title: requireString(args, "title"),
+        ...optionalStringProperty(args, "goal"),
+        ...optionalStringProperty(args, "parentGroupId"),
+        ...optionalStringProperty(args, "linkedTaskId"),
+        ...optionalFiniteNumberProperty(args, "x"),
+        ...optionalFiniteNumberProperty(args, "y"),
+        ...optionalFiniteNumberProperty(args, "width"),
+        ...optionalFiniteNumberProperty(args, "height"),
+        ...optionalBooleanProperty(args, "collapsed"),
+      };
+      return { group: service.createFlowWorkGroup(inputValue, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_update_flow_work_group": {
+      const patch = {
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        ...optionalStringProperty(args, "title"),
+        ...optionalStringProperty(args, "goal"),
+        ...optionalFiniteNumberProperty(args, "x"),
+        ...optionalFiniteNumberProperty(args, "y"),
+        ...optionalFiniteNumberProperty(args, "width"),
+        ...optionalFiniteNumberProperty(args, "height"),
+        ...optionalBooleanProperty(args, "collapsed"),
+      } as Parameters<QuestBoardService["updateFlowWorkGroup"]>[1];
+      if ("parentGroupId" in args) patch.parentGroupId = args.parentGroupId === null ? null : requireString(args, "parentGroupId");
+      if ("linkedTaskId" in args) patch.linkedTaskId = args.linkedTaskId === null ? null : requireString(args, "linkedTaskId");
+      return { group: service.updateFlowWorkGroup(requireString(args, "groupId"), patch, requireActor(args), mutationOptions(args)) };
+    }
+    case "questboard_delete_flow_work_group":
+      service.deleteFlowWorkGroup(requireString(args, "groupId"), requireActor(args), {
+        ...mutationOptions(args), ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+      });
+      return { deleted: true };
+    case "questboard_set_flow_work_group_member":
+      return {
+        membership: service.setFlowWorkGroupMembership({
+          groupId: requireString(args, "groupId"),
+          entityType: requireEnum(args, "entityType", FLOW_WORK_GROUP_MEMBER_TYPES),
+          entityId: requireString(args, "entityId"),
+        }, requireActor(args), mutationOptions(args)),
+      };
+    case "questboard_remove_flow_work_group_member":
+      service.removeFlowWorkGroupMembership({
+        groupId: requireString(args, "groupId"),
+        entityType: requireEnum(args, "entityType", FLOW_WORK_GROUP_MEMBER_TYPES),
+        entityId: requireString(args, "entityId"),
+      }, requireActor(args), mutationOptions(args));
+      return { removed: true };
     case "questboard_create_investigation_node": {
       const inputValue: CreateInvestigationNodeInput = {
         projectId: requireString(args, "projectId"),
@@ -1122,6 +1257,16 @@ function optionalPositiveIntegerProperty<K extends string>(
 ): Partial<Record<K, number>> {
   if (!(key in value) || value[key] === undefined) return {};
   return { [key]: requirePositiveInteger(value, key) } as Partial<Record<K, number>>;
+}
+
+function optionalFiniteNumberProperty<K extends string>(
+  value: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, number>> {
+  if (!(key in value) || value[key] === undefined) return {};
+  const item = value[key];
+  if (typeof item !== "number" || !Number.isFinite(item)) throw new TypeError(`${key} must be a finite number`);
+  return { [key]: item } as Partial<Record<K, number>>;
 }
 
 function mutationOptions(args: Record<string, unknown>): { requestId?: string } {

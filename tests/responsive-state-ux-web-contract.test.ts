@@ -39,7 +39,7 @@ test("Task drawer puts Goal, Now, and Next first with an explicit checkpoint con
 test("Task drawer keeps history and evidence out of default chrome without adding a new dashboard", () => {
   assert.match(app, /document\.createElement\("details"\)/);
   assert.match(app, /"Details & tools"/);
-  assert.match(app, /body\.append\(continuitySection, renderWorkGroupSection\(task\), details\)/);
+  assert.match(app, /body\.append\(continuitySection, renderFlowWorkGroupMembershipSection\("task", task\.id\), renderWorkGroupSection\(task\), details\)/);
   assert.match(css, /\.checkpoint-field textarea \{ width: 100%; min-width: 0/);
   assert.match(css, /\.drawer-details-content \{ min-width: 0; \}/);
 });

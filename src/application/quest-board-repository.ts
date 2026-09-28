@@ -3,6 +3,8 @@ import type {
   Artifact,
   BoardNodePosition,
   Claim,
+  FlowWorkGroup,
+  FlowWorkGroupMembership,
   InvestigationItem,
   InvestigationItemLink,
   InvestigationItemTaskLink,
@@ -88,6 +90,15 @@ export interface QuestBoardRepository {
   createInvestigationItemTaskLink(link: InvestigationItemTaskLink): InvestigationItemTaskLink;
   listInvestigationItemTaskLinks(projectId: string): InvestigationItemTaskLink[];
   deleteInvestigationItemTaskLink(itemId: string, taskId: string): void;
+
+  createFlowWorkGroup(group: FlowWorkGroup): FlowWorkGroup;
+  getFlowWorkGroup(groupId: string): FlowWorkGroup | undefined;
+  listFlowWorkGroups(projectId: string): FlowWorkGroup[];
+  updateFlowWorkGroup(group: FlowWorkGroup, expectedRevision: number): void;
+  deleteFlowWorkGroup(groupId: string): void;
+  setFlowWorkGroupMembership(membership: FlowWorkGroupMembership): FlowWorkGroupMembership;
+  listFlowWorkGroupMemberships(projectId: string): FlowWorkGroupMembership[];
+  deleteFlowWorkGroupMembership(groupId: string, entityType: FlowWorkGroupMembership["entityType"], entityId: string): void;
 
   getCodeMapInvestigationNodeBinding(projectId: string, codeNodeId: string): CodeMapInvestigationNodeBinding | undefined;
   listCodeMapInvestigationNodeBindings(projectId: string): CodeMapInvestigationNodeBinding[];

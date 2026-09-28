@@ -8,6 +8,9 @@ import type {
   BoardEntityType,
   BoardNodePosition,
   Claim,
+  FlowWorkGroup,
+  FlowWorkGroupMembership,
+  FlowWorkGroupMemberType,
   InvestigationItem,
   InvestigationItemLink,
   InvestigationItemTaskLink,
@@ -162,6 +165,38 @@ export interface UpdateInvestigationNodeInput {
   kind?: string;
 }
 
+export interface CreateFlowWorkGroupInput {
+  projectId: string;
+  title: string;
+  goal?: string;
+  parentGroupId?: string;
+  linkedTaskId?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  collapsed?: boolean;
+}
+
+export interface UpdateFlowWorkGroupInput {
+  expectedRevision?: number;
+  title?: string;
+  goal?: string;
+  parentGroupId?: string | null;
+  linkedTaskId?: string | null;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  collapsed?: boolean;
+}
+
+export interface SetFlowWorkGroupMembershipInput {
+  groupId: string;
+  entityType: FlowWorkGroupMemberType;
+  entityId: string;
+}
+
 export interface CreateInvestigationItemInput {
   nodeId: string;
   title: string;
@@ -219,6 +254,8 @@ export interface InvestigationGraphSnapshot {
   items: InvestigationItem[];
   itemLinks: InvestigationItemLink[];
   itemTaskLinks: InvestigationItemTaskLink[];
+  flowWorkGroups: FlowWorkGroup[];
+  flowWorkGroupMemberships: FlowWorkGroupMembership[];
   tasks: Task[];
   claims: Claim[];
   artifacts: Artifact[];
@@ -835,6 +872,121 @@ export class QuestBoardService {
     });
   }
 
+  createFlowWorkGroup(input: CreateFlowWorkGroupInput, actor: ActorRef, options: MutationOptions = {}): FlowWorkGroup {
+    return this.runMutation("flow.work-group.create", actor, options, input, undefined, () => {
+      this.getProject(input.projectId);
+      if (input.parentGroupId) this.assertFlowWorkGroupParent(input.projectId, undefined, input.parentGroupId);
+      if (input.linkedTaskId) this.assertTaskBelongsToProject(input.linkedTaskId, input.projectId);
+      const timestamp = this.now();
+      const group: FlowWorkGroup = {
+        id: this.newId(),
+        projectId: input.projectId,
+        title: requiredText(input.title, "Flow work group title"),
+        goal: input.goal?.trim() ?? "",
+        x: requireFiniteCoordinate(input.x ?? 60, "x"),
+        y: requireFiniteCoordinate(input.y ?? 70, "y"),
+        width: requireFlowWorkGroupDimension(input.width ?? 760, "width", 220),
+        height: requireFlowWorkGroupDimension(input.height ?? 460, "height", 140),
+        collapsed: input.collapsed ?? false,
+        createdBy: actor.id,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 1,
+        ...(input.parentGroupId ? { parentGroupId: input.parentGroupId } : {}),
+        ...(input.linkedTaskId ? { linkedTaskId: input.linkedTaskId } : {}),
+      };
+      return this.repository.createFlowWorkGroup(group);
+    });
+  }
+
+  getFlowWorkGroup(groupId: string): FlowWorkGroup {
+    const group = this.repository.getFlowWorkGroup(groupId);
+    if (!group) throw new EntityNotFoundError("FlowWorkGroup", groupId);
+    return group;
+  }
+
+  listFlowWorkGroups(projectId: string): FlowWorkGroup[] {
+    this.getProject(projectId);
+    return this.repository.listFlowWorkGroups(projectId);
+  }
+
+  updateFlowWorkGroup(groupId: string, patch: UpdateFlowWorkGroupInput, actor: ActorRef, options: MutationOptions = {}): FlowWorkGroup {
+    const explicitRevision = patch.expectedRevision === undefined ? undefined : requireRevision(patch.expectedRevision);
+    return this.runMutation("flow.work-group.update", actor, options, { groupId, patch }, undefined, () => {
+      for (let attempt = 1; attempt <= MAX_INTERNAL_UPDATE_ATTEMPTS; attempt += 1) {
+        const current = this.getFlowWorkGroup(groupId);
+        if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+          throw new EntityRevisionConflictError("FlowWorkGroup", groupId, explicitRevision, current.revision);
+        }
+        const parentGroupId = patch.parentGroupId === undefined ? current.parentGroupId : patch.parentGroupId || undefined;
+        const linkedTaskId = patch.linkedTaskId === undefined ? current.linkedTaskId : patch.linkedTaskId || undefined;
+        if (parentGroupId) this.assertFlowWorkGroupParent(current.projectId, current.id, parentGroupId);
+        if (linkedTaskId) this.assertTaskBelongsToProject(linkedTaskId, current.projectId);
+        const updated: FlowWorkGroup = {
+          ...current,
+          title: patch.title === undefined ? current.title : requiredText(patch.title, "Flow work group title"),
+          goal: patch.goal === undefined ? current.goal : patch.goal.trim(),
+          x: patch.x === undefined ? current.x : requireFiniteCoordinate(patch.x, "x"),
+          y: patch.y === undefined ? current.y : requireFiniteCoordinate(patch.y, "y"),
+          width: patch.width === undefined ? current.width : requireFlowWorkGroupDimension(patch.width, "width", 220),
+          height: patch.height === undefined ? current.height : requireFlowWorkGroupDimension(patch.height, "height", 140),
+          collapsed: patch.collapsed ?? current.collapsed,
+          updatedAt: this.now(),
+          revision: current.revision + 1,
+        };
+        if (parentGroupId) updated.parentGroupId = parentGroupId;
+        else delete updated.parentGroupId;
+        if (linkedTaskId) updated.linkedTaskId = linkedTaskId;
+        else delete updated.linkedTaskId;
+        try {
+          this.repository.updateFlowWorkGroup(updated, explicitRevision ?? current.revision);
+          return updated;
+        } catch (error) {
+          if (!(error instanceof EntityRevisionConflictError) || explicitRevision !== undefined || attempt === MAX_INTERNAL_UPDATE_ATTEMPTS) throw error;
+        }
+      }
+      throw new Error("Flow work group update retry loop exhausted");
+    });
+  }
+
+  deleteFlowWorkGroup(groupId: string, actor: ActorRef, options: DeleteRevisionOptions = {}): void {
+    const explicitRevision = options.expectedRevision === undefined ? undefined : requireRevision(options.expectedRevision);
+    this.runMutation("flow.work-group.delete", actor, options, { groupId, expectedRevision: explicitRevision }, undefined, () => {
+      const current = this.getFlowWorkGroup(groupId);
+      if (explicitRevision !== undefined && current.revision !== explicitRevision) {
+        throw new EntityRevisionConflictError("FlowWorkGroup", groupId, explicitRevision, current.revision);
+      }
+      this.repository.deleteFlowWorkGroup(groupId);
+      return null;
+    });
+  }
+
+  setFlowWorkGroupMembership(input: SetFlowWorkGroupMembershipInput, actor: ActorRef, options: MutationOptions = {}): FlowWorkGroupMembership {
+    return this.runMutation("flow.work-group.member.set", actor, options, input, undefined, () => {
+      const group = this.getFlowWorkGroup(input.groupId);
+      const entityProjectId = this.resolveFlowWorkGroupMemberProject(input.entityType, input.entityId);
+      if (entityProjectId !== group.projectId) throw new TypeError("Flow work group member must belong to the same project");
+      return this.repository.setFlowWorkGroupMembership({
+        projectId: group.projectId,
+        groupId: group.id,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        createdBy: actor.id,
+        createdAt: this.now(),
+      });
+    });
+  }
+
+  removeFlowWorkGroupMembership(input: SetFlowWorkGroupMembershipInput, actor: ActorRef, options: MutationOptions = {}): void {
+    this.runMutation("flow.work-group.member.remove", actor, options, input, undefined, () => {
+      const group = this.getFlowWorkGroup(input.groupId);
+      const entityProjectId = this.resolveFlowWorkGroupMemberProject(input.entityType, input.entityId);
+      if (entityProjectId !== group.projectId) throw new TypeError("Flow work group member must belong to the same project");
+      this.repository.deleteFlowWorkGroupMembership(group.id, input.entityType, input.entityId);
+      return null;
+    });
+  }
+
   createInvestigationNode(input: CreateInvestigationNodeInput, actor: ActorRef, options: MutationOptions = {}): InvestigationNode {
     return this.runMutation("investigation.node.create", actor, options, input, undefined, () => {
       this.getProject(input.projectId);
@@ -1178,6 +1330,8 @@ export class QuestBoardService {
       items: this.repository.listInvestigationItems(projectId),
       itemLinks: this.repository.listInvestigationItemLinks(projectId),
       itemTaskLinks: this.repository.listInvestigationItemTaskLinks(projectId),
+      flowWorkGroups: this.repository.listFlowWorkGroups(projectId),
+      flowWorkGroupMemberships: this.repository.listFlowWorkGroupMemberships(projectId),
       tasks: this.repository.listTasks({ projectId }),
       claims: this.repository.listProjectClaims(projectId),
       artifacts: this.repository.listProjectArtifacts(projectId),
@@ -1308,6 +1462,30 @@ export class QuestBoardService {
     return this.resolveRelationEndpoint(type, id).projectId;
   }
 
+  private assertTaskBelongsToProject(taskId: string, projectId: string): void {
+    if (this.getTask(taskId).projectId !== projectId) throw new TypeError("Task must belong to the same project");
+  }
+
+  private assertFlowWorkGroupParent(projectId: string, groupId: string | undefined, parentGroupId: string): void {
+    const parent = this.getFlowWorkGroup(parentGroupId);
+    if (parent.projectId !== projectId) throw new TypeError("Flow work group parent must belong to the same project");
+    if (groupId === undefined) return;
+    if (parent.id === groupId) throw new TypeError("Flow work group cannot contain itself");
+    const visited = new Set<string>();
+    let cursor: FlowWorkGroup | undefined = parent;
+    while (cursor) {
+      if (cursor.id === groupId) throw new TypeError("Flow work group hierarchy cannot contain a cycle");
+      if (visited.has(cursor.id)) throw new TypeError("Flow work group hierarchy contains an existing cycle");
+      visited.add(cursor.id);
+      cursor = cursor.parentGroupId ? this.repository.getFlowWorkGroup(cursor.parentGroupId) : undefined;
+    }
+  }
+
+  private resolveFlowWorkGroupMemberProject(type: FlowWorkGroupMemberType, id: string): string {
+    if (type === "task") return this.getTask(id).projectId;
+    return this.getInvestigationNode(id).projectId;
+  }
+
   private activityFor(
     task: Task,
     actor: ActorRef,
@@ -1390,6 +1568,13 @@ function mutationFingerprint(value: unknown): string {
 
 function requireFiniteCoordinate(value: number, label: string): number {
   if (!Number.isFinite(value)) throw new TypeError(`${label} must be a finite number`);
+  return value;
+}
+
+function requireFlowWorkGroupDimension(value: number, label: string, minimum: number): number {
+  if (!Number.isFinite(value) || value < minimum) {
+    throw new TypeError(`${label} must be a finite number >= ${minimum}`);
+  }
   return value;
 }
 

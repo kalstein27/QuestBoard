@@ -36,6 +36,9 @@ export type RelationEntityType = (typeof RELATION_ENTITY_TYPES)[number];
 export const BOARD_ENTITY_TYPES = ["task", "artifact", "investigation_node"] as const;
 export type BoardEntityType = (typeof BOARD_ENTITY_TYPES)[number];
 
+export const FLOW_WORK_GROUP_MEMBER_TYPES = ["task", "investigation_node"] as const;
+export type FlowWorkGroupMemberType = (typeof FLOW_WORK_GROUP_MEMBER_TYPES)[number];
+
 export type ProjectStatus = "active" | "archived";
 export type ClaimState = "active" | "released";
 
@@ -156,6 +159,33 @@ export interface InvestigationItemTaskLink {
   itemId: string;
   taskId: string;
   sortOrder: number;
+  createdAt: string;
+}
+
+export interface FlowWorkGroup {
+  id: string;
+  projectId: string;
+  parentGroupId?: string;
+  linkedTaskId?: string;
+  title: string;
+  goal: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  collapsed: boolean;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}
+
+export interface FlowWorkGroupMembership {
+  projectId: string;
+  groupId: string;
+  entityType: FlowWorkGroupMemberType;
+  entityId: string;
+  createdBy: string;
   createdAt: string;
 }
 
