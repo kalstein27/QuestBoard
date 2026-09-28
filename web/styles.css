@@ -130,6 +130,22 @@ textarea { line-height: 1.5; }
 
 main { min-width: 0; }
 .board-shell { min-height: calc(100dvh - 58px); padding: 14px 0 20px; }
+.quest-board { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.quest-scope-bar {
+  margin: 0 14px 10px; padding: 9px 11px; display: grid; gap: 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: #101318;
+}
+.quest-breadcrumb { min-width: 0; display: flex; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: none; }
+.quest-breadcrumb::-webkit-scrollbar { display: none; }
+.quest-crumb { flex: 0 0 auto; max-width: 220px; padding: 0; border: 0; background: transparent; color: #7f8997; font-size: 9px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quest-crumb:hover { color: #cbd1da; }
+.quest-crumb[aria-current="page"] { color: #eef1f5; font-weight: 750; cursor: default; }
+.quest-crumb-separator { color: #424a55; font-size: 9px; }
+.quest-scope-summary { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.quest-scope-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.quest-scope-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.quest-scope-goal { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #737d89; font-size: 9px; }
+.quest-scope-meta, .quest-scope-detail { flex: 0 0 auto; }
 .kanban-board {
   display: grid; grid-auto-flow: column; grid-auto-columns: minmax(245px, 1fr);
   gap: 8px; padding: 0 14px 10px; overflow-x: auto; overscroll-behavior-x: contain;
@@ -318,6 +334,14 @@ main { min-width: 0; }
 .drawer-details[open] .drawer-details-summary { color: #b8bec7; }
 .drawer-details-content { min-width: 0; }
 .drawer-details-content .detail-section:first-child { padding-top: 4px; }
+.work-group-section { display: grid; gap: 8px; }
+.work-group-current { min-width: 0; padding: 9px 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; border: 1px solid #282f38; border-radius: 7px; background: #0e1115; }
+.work-group-label { grid-column: 1; color: #707a87; font-size: 8px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; }
+.work-group-name { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7cdd5; font-size: 10px; }
+.work-group-current > .button, .work-group-actions { grid-column: 2; grid-row: 1 / span 2; }
+.work-group-actions { display: flex; align-items: center; gap: 5px; }
+.work-group-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.work-group-form select, .work-group-form input { min-width: 0; }
 .detail-description { margin: 0 0 11px; color: #b4bac3; line-height: 1.58; font-size: 12px; white-space: pre-wrap; }
 .section-title { margin: 0 0 10px; font-size: 11px; font-weight: 750; color: #d2d6dc; }
 .claim-card { padding: 9px 10px; border-radius: 7px; background: var(--accent-soft); border: 1px solid rgba(116,134,255,.18); color: #a8b2ff; font-size: 10px; }
@@ -500,6 +524,7 @@ html, body { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
 .topbar { position: relative; top: auto; }
 main { min-height: 0; overflow: hidden; }
 .board-shell { height: 100%; min-height: 0; padding: 10px 0; overflow: hidden; }
+.quest-board { height: 100%; }
 .kanban-board { height: 100%; min-height: 0; overflow-x: auto; overflow-y: auto; align-items: start; }
 .kanban-column { min-height: 100%; }
 .card-list { min-height: 0; }
@@ -683,6 +708,23 @@ main { min-height: 0; overflow: hidden; }
 .task-status-icon-done { color: #6eb883; }
 .task-card-unseen-done { border-color: rgba(99,183,124,.32); background: rgba(99,183,124,.055); }
 .task-new-done { flex: 0 0 auto; padding: 2px 5px; border-radius: 999px; background: rgba(99,183,124,.12); color: #82c795; font-size: 7px; font-weight: 850; text-transform: uppercase; }
+.quest-group-card { display: grid; align-items: stretch; gap: 7px; border-color: #2b3340; background: #141820; }
+.quest-group-card:hover, .quest-group-card:focus { border-color: #465267; background: #171c25; }
+.quest-group-head { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.quest-group-identity { min-width: 0; display: grid; gap: 2px; }
+.quest-group-kicker { color: #8e99e7; font-size: 7px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.quest-group-title { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; }
+.quest-group-detail { flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #697482; cursor: pointer; }
+.quest-group-detail:hover, .quest-group-detail:focus-visible { background: #202631; color: #d4d9e0; outline: none; }
+.quest-group-goal { margin: 0; color: #7f8996; font-size: 9px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.quest-group-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.quest-group-progress, .quest-group-signal { padding: 2px 5px; border-radius: 999px; background: #0f1318; color: #7e8996; font-size: 7px; font-weight: 750; }
+.quest-group-signal.blocked { background: rgba(223,111,106,.1); color: #df8782; }
+.quest-group-signal.review { background: rgba(185,120,189,.1); color: #c68bca; }
+.quest-group-signal.new { background: rgba(99,183,124,.12); color: #82c795; }
+.quest-group-focus { min-width: 0; display: flex; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid #252c35; }
+.quest-group-focus-label { flex: 0 0 auto; color: #697483; font-size: 7px; font-weight: 800; text-transform: uppercase; }
+.quest-group-focus-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #aeb6c1; font-size: 9px; }
 @keyframes task-status-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .task-status-icon-in_progress { animation: none; }
@@ -829,6 +871,12 @@ main { min-height: 0; overflow: hidden; }
   .toolbar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
   .toolbar::-webkit-scrollbar { display: none; }
   .kanban-board { overflow-x: auto; overflow-y: auto; overscroll-behavior: contain; }
+  .quest-scope-bar { margin: 0 8px 8px; padding: 8px 9px; }
+  .quest-scope-summary { align-items: flex-start; flex-wrap: wrap; }
+  .quest-scope-copy { flex-basis: calc(100% - 84px); }
+  .quest-scope-meta { margin-left: auto; }
+  .work-group-form { grid-template-columns: 1fr; }
+  .work-group-form .button { width: 100%; }
   .code-map-content { overflow: auto; overscroll-behavior: contain; }
   .drawer-body { overflow-y: auto; overscroll-behavior-y: contain; }
   .state-card { width: min(390px, calc(100vw - 24px)); margin-top: 8vh; padding: 20px; }

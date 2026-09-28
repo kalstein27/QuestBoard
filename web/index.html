@@ -109,7 +109,10 @@
               <span>Create a project to open your first board.</span>
               <button id="empty-new-project-button" class="button primary" type="button">Create project</button>
             </div>
-            <div id="kanban-board" class="kanban-board hidden"></div>
+            <div id="quest-board" class="quest-board hidden" aria-label="Quest board">
+              <div id="quest-scope-bar" class="quest-scope-bar hidden"></div>
+              <div id="kanban-board" class="kanban-board"></div>
+            </div>
             <div id="investigation-board" class="investigation-board hidden" aria-label="Flow board">
               <div id="investigation-controls" class="investigation-controls hidden" role="group" aria-label="Flow board controls">
                 <button id="investigation-undo" class="investigation-control-button" type="button" aria-label="Undo node move" title="Undo node move (⌘/Ctrl+Z)">↶</button>

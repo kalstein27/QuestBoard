@@ -508,6 +508,13 @@ async function handleRequest(
     }
   }
 
+  const taskHierarchyMatch = pathname.match(/^\/projects\/([^/]+)\/task-hierarchy$/);
+  if (taskHierarchyMatch && method === "GET") {
+    const projectId = decodePathPart(taskHierarchyMatch[1]);
+    sendJson(response, 200, { hierarchy: service.getTaskHierarchy(projectId) });
+    return;
+  }
+
   if (pathname === "/relations" && method === "POST") {
     const actor = requireActor(request);
     const body = await readJsonObject(request);
@@ -520,6 +527,17 @@ async function handleRequest(
       ...optionalStringProperty(body, "label"),
     };
     sendJson(response, 201, { relation: service.createRelation(input, actor, mutationOptions(request)) });
+    return;
+  }
+
+  const relationDeleteMatch = pathname.match(/^\/relations\/([^/]+)$/);
+  if (relationDeleteMatch && method === "DELETE") {
+    service.deleteRelation(
+      decodePathPart(relationDeleteMatch[1]),
+      requireActor(request),
+      mutationOptions(request),
+    );
+    sendJson(response, 200, { deleted: true });
     return;
   }
 

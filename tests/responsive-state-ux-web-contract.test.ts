@@ -39,7 +39,7 @@ test("Task drawer puts Goal, Now, and Next first with an explicit checkpoint con
 test("Task drawer keeps history and evidence out of default chrome without adding a new dashboard", () => {
   assert.match(app, /document\.createElement\("details"\)/);
   assert.match(app, /"Details & tools"/);
-  assert.match(app, /body\.append\(continuitySection, details\)/);
+  assert.match(app, /body\.append\(continuitySection, renderWorkGroupSection\(task\), details\)/);
   assert.match(css, /\.checkpoint-field textarea \{ width: 100%; min-width: 0/);
   assert.match(css, /\.drawer-details-content \{ min-width: 0; \}/);
 });
@@ -64,7 +64,7 @@ test("Quest hides reviewed Done tasks locally while keeping unseen completions v
   assert.match(app, /questboard\.seenDoneTasks\.\$\{projectId\}/);
   assert.match(app, /seenDoneTasksInitialized\.\$\{projectId\}/);
   assert.match(app, /state\.tasks\.filter\(\(task\) => task\.status === "done"\)\.map\(\(task\) => task\.id\)/);
-  assert.match(app, /task\.id === state\.selectedTaskId \|\| !state\.seenDoneTaskIds\.has\(task\.id\)/);
+  assert.match(app, /function shouldShowQuestTask\(task\)[\s\S]*!state\.seenDoneTaskIds\.has\(task\.id\)/);
   assert.match(app, /selectedTask\?\.status === "done"\) markDoneTaskSeen\(selectedTask\.id\)/);
   assert.match(app, /task-card-unseen-done/);
   assert.match(css, /\.quest-done-filter/);

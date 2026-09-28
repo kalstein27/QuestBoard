@@ -18,6 +18,8 @@ const state = {
   hideCompleted: loadHideCompleted(),
   seenDoneTaskIds: new Set(),
   seenDoneProjectId: null,
+  taskHierarchy: null,
+  questScopeTaskId: null,
   tasks: [],
   claims: new Map(),
   selectedTaskId: null,
@@ -70,7 +72,7 @@ function collectElements() {
   [
     "project-select", "new-project-button", "new-task-button", "refresh-button", "hide-completed-control", "hide-completed-toggle", "unseen-done-count",
     "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty", "board-error", "board-error-message", "board-error-retry",
-    "project-empty", "kanban-board", "empty-new-task-button", "empty-new-project-button",
+    "project-empty", "quest-board", "quest-scope-bar", "kanban-board", "empty-new-task-button", "empty-new-project-button",
     "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
     "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node",
@@ -95,6 +97,7 @@ function populateStaticOptions() {
 function bindEvents() {
   el["project-select"].addEventListener("change", () => {
     state.projectId = el["project-select"].value || null;
+    state.questScopeTaskId = null;
     localStorage.setItem("questboard.projectId", state.projectId ?? "");
     closeDrawer();
     void loadBoard();
@@ -207,6 +210,8 @@ function renderProjectSelect() {
 async function loadBoard() {
   if (!state.projectId) {
     state.boardError = null;
+    state.taskHierarchy = null;
+    state.questScopeTaskId = null;
     state.tasks = [];
     state.claims.clear();
     state.projectArtifacts = [];
@@ -229,10 +234,16 @@ async function loadBoard() {
   }
   showBoardLoading(true);
   try {
-    const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = await api(
-      `/projects/${encodeURIComponent(state.projectId)}/investigation/graph`,
-    );
+    const [graph, hierarchyResponse] = await Promise.all([
+      api(`/projects/${encodeURIComponent(state.projectId)}/investigation/graph`),
+      api(`/projects/${encodeURIComponent(state.projectId)}/task-hierarchy`),
+    ]);
+    const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = graph;
     state.tasks = tasks;
+    state.taskHierarchy = hierarchyResponse.hierarchy;
+    if (state.questScopeTaskId && !state.tasks.some((task) => task.id === state.questScopeTaskId)) {
+      state.questScopeTaskId = null;
+    }
     syncSeenDoneTasks();
     state.projectArtifacts = artifacts;
     state.projectRelations = relations;
@@ -265,13 +276,16 @@ function renderBoard() {
   el["board-error-message"].textContent = state.boardError || "QuestBoard could not load this project.";
   el["project-empty"].classList.toggle("hidden", hasError || !noProject);
   el["board-empty"].classList.toggle("hidden", hasError || noProject || hasCurrentContent);
-  el["kanban-board"].classList.toggle("hidden", hasError || noProject || !hasQuestContent || state.viewMode !== "quest");
+  el["quest-board"].classList.toggle("hidden", hasError || noProject || !hasQuestContent || state.viewMode !== "quest");
   el["investigation-board"].classList.toggle("hidden", hasError || noProject || state.viewMode !== "investigation");
   el["code-map-board"].classList.toggle("hidden", hasError || noProject || state.viewMode !== "code-map");
   renderViewSwitch();
   if (hasError) return;
   if (noProject || !hasCurrentContent) {
-    if (state.viewMode === "quest") el["kanban-board"].replaceChildren();
+    if (state.viewMode === "quest") {
+      el["quest-scope-bar"].replaceChildren();
+      el["kanban-board"].replaceChildren();
+    }
     else if (state.viewMode === "investigation") clearInvestigationBoard();
     else el["code-map-content"].replaceChildren();
     return;
@@ -287,13 +301,13 @@ function renderBoard() {
     return;
   }
 
+  renderQuestScopeBar();
+  const directTaskIds = new Set(questDirectTaskIds());
   const columns = STATUSES.flatMap(([status, label]) => {
     const column = node("section", "kanban-column");
     column.dataset.status = status;
-    const statusTasks = state.tasks.filter((task) => task.status === status);
-    const tasks = status === "done" && state.hideCompleted
-      ? statusTasks.filter((task) => task.id === state.selectedTaskId || !state.seenDoneTaskIds.has(task.id))
-      : statusTasks;
+    const statusTasks = state.tasks.filter((task) => directTaskIds.has(task.id) && task.status === status);
+    const tasks = statusTasks.filter(shouldShowQuestTask);
     if (status === "done" && state.hideCompleted && tasks.length === 0) return [];
     const heading = node("header", "column-header");
     const title = node("div", "column-title");
@@ -313,7 +327,7 @@ function renderBoard() {
       const taskId = event.dataTransfer?.getData("text/questboard-task");
       if (taskId) void moveTask(taskId, status);
     });
-    tasks.forEach((task) => list.append(renderTaskCard(task)));
+    tasks.forEach((task) => list.append(renderQuestCard(task)));
     column.append(heading, list);
     return [column];
   });
@@ -391,6 +405,117 @@ function markDoneTaskSeen(taskId) {
   persistSeenDoneTasks();
 }
 
+function taskById(taskId) {
+  return taskId ? state.tasks.find((task) => task.id === taskId) ?? null : null;
+}
+
+function hierarchyChildren(taskId) {
+  return state.taskHierarchy?.childrenByParent?.[taskId] ?? [];
+}
+
+function isGroupTask(taskId) {
+  return hierarchyChildren(taskId).length > 0;
+}
+
+function questDirectTaskIds() {
+  if (state.questScopeTaskId) return hierarchyChildren(state.questScopeTaskId);
+  return state.taskHierarchy?.rootTaskIds ?? state.tasks.map((task) => task.id);
+}
+
+function descendantTaskIds(taskId) {
+  const descendants = [];
+  const pending = [...hierarchyChildren(taskId)];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+    descendants.push(current);
+    pending.push(...hierarchyChildren(current));
+  }
+  return descendants;
+}
+
+function unseenDoneDescendantCount(taskId) {
+  return descendantTaskIds(taskId)
+    .map(taskById)
+    .filter((task) => task?.status === "done" && !state.seenDoneTaskIds.has(task.id))
+    .length;
+}
+
+function shouldShowQuestTask(task) {
+  if (!state.hideCompleted || task.id === state.selectedTaskId) return true;
+  if (task.status !== "done") return true;
+  if (!state.seenDoneTaskIds.has(task.id)) return true;
+  if (!isGroupTask(task.id)) return false;
+  const progress = state.taskHierarchy?.progressByTask?.[task.id];
+  const hasOpenDescendant = Boolean(progress && (progress.active > 0 || progress.review > 0 || progress.blocked > 0));
+  return hasOpenDescendant || unseenDoneDescendantCount(task.id) > 0;
+}
+
+function groupFocusChild(groupTaskId) {
+  const directIds = hierarchyChildren(groupTaskId);
+  const explicit = state.projectRelations.find((relation) =>
+    relation.fromType === "task"
+    && relation.toType === "task"
+    && relation.kind === "next-task"
+    && relation.fromId === groupTaskId
+    && directIds.includes(relation.toId));
+  if (explicit) return taskById(explicit.toId);
+  const rank = { in_progress: 0, blocked: 1, review: 2, ready: 3, planned: 4, inbox: 5, done: 6 };
+  return directIds
+    .map(taskById)
+    .filter(Boolean)
+    .sort((left, right) => (rank[left.status] ?? 99) - (rank[right.status] ?? 99))[0] ?? null;
+}
+
+function setQuestScope(taskId) {
+  if (taskId && !taskById(taskId)) return;
+  state.questScopeTaskId = taskId || null;
+  closeDrawer();
+  renderBoard();
+}
+
+function renderQuestScopeBar() {
+  const bar = el["quest-scope-bar"];
+  const scopeTask = taskById(state.questScopeTaskId);
+  bar.classList.toggle("hidden", !scopeTask);
+  if (!scopeTask) {
+    bar.replaceChildren();
+    return;
+  }
+
+  const ancestry = state.taskHierarchy?.ancestryByTask?.[scopeTask.id] ?? [];
+  const breadcrumb = node("nav", "quest-breadcrumb");
+  breadcrumb.setAttribute("aria-label", "Quest group breadcrumb");
+  const root = node("button", "quest-crumb", "Quest");
+  root.type = "button";
+  root.addEventListener("click", () => setQuestScope(null));
+  breadcrumb.append(root);
+  [...ancestry, scopeTask.id].forEach((taskId, index, path) => {
+    breadcrumb.append(node("span", "quest-crumb-separator", "/"));
+    const task = taskById(taskId);
+    const crumb = node("button", "quest-crumb", task?.title ?? shortId(taskId));
+    crumb.type = "button";
+    if (index === path.length - 1) crumb.setAttribute("aria-current", "page");
+    else crumb.addEventListener("click", () => setQuestScope(taskId));
+    breadcrumb.append(crumb);
+  });
+
+  const summary = node("div", "quest-scope-summary");
+  const copy = node("div", "quest-scope-copy");
+  copy.append(node("strong", "quest-scope-title", scopeTask.title));
+  if (scopeTask.goal) copy.append(node("span", "quest-scope-goal", scopeTask.goal));
+  const progress = state.taskHierarchy?.progressByTask?.[scopeTask.id];
+  const meta = node("div", "quest-scope-meta");
+  if (progress?.total) meta.append(node("span", "quest-group-progress", `${progress.done}/${progress.total} done`));
+  const detail = node("button", "button ghost compact quest-scope-detail", "Group details");
+  detail.type = "button";
+  detail.addEventListener("click", () => void openTask(scopeTask.id));
+  summary.append(copy, meta, detail);
+  bar.replaceChildren(breadcrumb, summary);
+}
+
 function renderDoneFilterControl() {
   if (!el["hide-completed-toggle"]) return;
   el["hide-completed-toggle"].checked = state.hideCompleted;
@@ -443,8 +568,11 @@ function renderViewSwitch() {
   const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
   const role = codeMap ? "Code context" : investigation ? "Work map" : "Work queue";
   const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
+  const scopeTitle = quest ? taskById(state.questScopeTaskId)?.title : null;
   el["workspace-title"].textContent = title;
-  el["workspace-context"].textContent = projectName ? `${projectName} · ${role}` : role;
+  el["workspace-context"].textContent = projectName
+    ? `${projectName} · ${scopeTitle ? `${scopeTitle} · ` : ""}${role}`
+    : role;
   renderDoneFilterControl();
   renderInvestigationControls();
 }
@@ -2109,6 +2237,66 @@ function renderTaskCard(task) {
   return card;
 }
 
+function renderQuestCard(task) {
+  return isGroupTask(task.id) ? renderGroupCard(task) : renderTaskCard(task);
+}
+
+function renderGroupCard(task) {
+  const card = node("article", "task-card quest-group-card");
+  card.tabIndex = 0;
+  card.draggable = true;
+  card.dataset.taskId = task.id;
+
+  const head = node("div", "quest-group-head");
+  const identity = node("div", "quest-group-identity");
+  identity.append(node("span", "quest-group-kicker", "Group"), node("h3", "quest-group-title", task.title));
+  const detail = node("button", "quest-group-detail", "•••");
+  detail.type = "button";
+  detail.setAttribute("aria-label", `Open ${task.title} details`);
+  detail.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void openTask(task.id);
+  });
+  head.append(identity, detail);
+  card.append(head);
+  if (task.goal) card.append(node("p", "quest-group-goal", task.goal));
+
+  const progress = state.taskHierarchy?.progressByTask?.[task.id] ?? { total: 0, done: 0, active: 0, review: 0, blocked: 0 };
+  const stats = node("div", "quest-group-stats");
+  stats.append(node("span", "quest-group-progress", `${progress.done}/${progress.total} done`));
+  if (progress.blocked > 0) stats.append(node("span", "quest-group-signal blocked", `${progress.blocked} blocked`));
+  if (progress.review > 0) stats.append(node("span", "quest-group-signal review", `${progress.review} review`));
+  const unseen = unseenDoneDescendantCount(task.id);
+  if (unseen > 0) stats.append(node("span", "quest-group-signal new", `${unseen} New`));
+  card.append(stats);
+
+  const focus = groupFocusChild(task.id);
+  if (focus && focus.status !== "done") {
+    const focusRow = node("div", "quest-group-focus");
+    focusRow.append(node("span", "quest-group-focus-label", "Next"), node("span", "quest-group-focus-title", focus.title));
+    card.append(focusRow);
+  }
+  if (task.status === "done" && !state.seenDoneTaskIds.has(task.id)) {
+    card.classList.add("task-card-unseen-done");
+    card.append(node("span", "task-new-done", "New"));
+  }
+
+  card.addEventListener("click", () => setQuestScope(task.id));
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setQuestScope(task.id);
+    }
+  });
+  card.addEventListener("dragstart", (event) => {
+    event.dataTransfer?.setData("text/questboard-task", task.id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+  });
+  card.addEventListener("dragend", () => card.classList.remove("dragging"));
+  return card;
+}
+
 async function moveTask(taskId, status) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task || task.status === status) return;
@@ -2399,8 +2587,106 @@ function renderDrawer(task, claim, artifacts, relations) {
   const detailsContent = node("div", "drawer-details-content");
   detailsContent.append(summary, claimSection, evidenceSection, activitySection);
   details.append(detailsContent);
-  body.append(continuitySection, details);
+  body.append(continuitySection, renderWorkGroupSection(task), details);
   el["drawer-body"].replaceChildren(body);
+}
+
+function hierarchyRelationForChild(taskId) {
+  for (const relation of state.projectRelations) {
+    if (relation.fromType !== "task" || relation.toType !== "task") continue;
+    if (relation.kind === "contains" && relation.toId === taskId) {
+      return { relation, parentTaskId: relation.fromId };
+    }
+    if ((relation.kind === "part-of" || relation.kind === "part_of") && relation.fromId === taskId) {
+      return { relation, parentTaskId: relation.toId };
+    }
+  }
+  return null;
+}
+
+function groupParentCandidates(taskId) {
+  const excluded = new Set([taskId, ...descendantTaskIds(taskId)]);
+  return state.tasks
+    .filter((task) => !excluded.has(task.id))
+    .sort((left, right) => {
+      const groupDelta = Number(isGroupTask(right.id)) - Number(isGroupTask(left.id));
+      return groupDelta || left.title.localeCompare(right.title);
+    });
+}
+
+function renderWorkGroupSection(task) {
+  const section = node("section", "detail-section work-group-section");
+  section.append(node("h3", "section-title", "Work group"));
+  const directChildren = hierarchyChildren(task.id);
+  const parentBinding = hierarchyRelationForChild(task.id);
+
+  if (directChildren.length > 0) {
+    const groupSummary = node("div", "work-group-current");
+    const progress = state.taskHierarchy?.progressByTask?.[task.id];
+    const copy = progress?.total
+      ? `${directChildren.length} direct · ${progress.done}/${progress.total} done`
+      : `${directChildren.length} direct task${directChildren.length === 1 ? "" : "s"}`;
+    groupSummary.append(node("span", "work-group-label", "This task is a group"), node("strong", "work-group-name", copy));
+    const open = node("button", "button ghost compact", "Open group");
+    open.type = "button";
+    open.addEventListener("click", () => setQuestScope(task.id));
+    groupSummary.append(open);
+    section.append(groupSummary);
+  }
+
+  if (parentBinding) {
+    const parent = taskById(parentBinding.parentTaskId);
+    const parentRow = node("div", "work-group-current");
+    parentRow.append(
+      node("span", "work-group-label", "In group"),
+      node("strong", "work-group-name", parent?.title ?? shortId(parentBinding.parentTaskId)),
+    );
+    const actions = node("div", "work-group-actions");
+    const openParent = node("button", "button ghost compact", "Open");
+    openParent.type = "button";
+    openParent.addEventListener("click", () => setQuestScope(parentBinding.parentTaskId));
+    const remove = node("button", "button ghost compact", "Remove");
+    remove.type = "button";
+    remove.addEventListener("click", () => void removeTaskFromGroup(task.id, parentBinding.relation.id));
+    actions.append(openParent, remove);
+    parentRow.append(actions);
+    section.append(parentRow);
+    return section;
+  }
+
+  const candidates = groupParentCandidates(task.id);
+  if (candidates.length > 0) {
+    const addForm = node("form", "work-group-form");
+    const select = document.createElement("select");
+    select.required = true;
+    select.append(option("", "Choose parent group…"));
+    candidates.forEach((candidate) => {
+      const suffix = isGroupTask(candidate.id) ? " · Group" : "";
+      select.append(option(candidate.id, `${candidate.title}${suffix}`));
+    });
+    const add = node("button", "button compact", "Add to group");
+    add.type = "submit";
+    addForm.append(select, add);
+    addForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (select.value) void addTaskToGroup(task.id, select.value);
+    });
+    section.append(addForm);
+  }
+
+  const createForm = node("form", "work-group-form create-group-form");
+  const title = document.createElement("input");
+  title.placeholder = "New group title";
+  title.required = true;
+  const create = node("button", "button compact", "Create group");
+  create.type = "submit";
+  createForm.append(title, create);
+  createForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void createGroupAroundTask(task.id, title.value);
+  });
+  section.append(createForm);
+  return section;
 }
 
 function artifactLocatorNode(locator) {
@@ -2534,6 +2820,77 @@ async function addRelation(taskId, input) {
   }
 }
 
+async function addTaskToGroup(taskId, parentTaskId) {
+  if (!taskId || !parentTaskId) return;
+  try {
+    await api("/relations", {
+      method: "POST",
+      actor: true,
+      body: {
+        fromType: "task",
+        fromId: parentTaskId,
+        toType: "task",
+        toId: taskId,
+        kind: "contains",
+        label: "Work group membership",
+      },
+    });
+    await loadBoard();
+    await openTask(taskId);
+    toast("Added to group");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function removeTaskFromGroup(taskId, relationId) {
+  if (!relationId) return;
+  try {
+    await api(`/relations/${encodeURIComponent(relationId)}`, { method: "DELETE", actor: true });
+    await loadBoard();
+    await openTask(taskId);
+    toast("Removed from group");
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function createGroupAroundTask(taskId, title) {
+  const trimmed = title.trim();
+  if (!trimmed || !state.projectId) return;
+  try {
+    const { task: group } = await api("/tasks", {
+      method: "POST",
+      actor: true,
+      body: {
+        projectId: state.projectId,
+        title: trimmed,
+        goal: trimmed,
+        status: "planned",
+        priority: "normal",
+        tags: ["group"],
+      },
+    });
+    await api("/relations", {
+      method: "POST",
+      actor: true,
+      body: {
+        fromType: "task",
+        fromId: group.id,
+        toType: "task",
+        toId: taskId,
+        kind: "contains",
+        label: "Work group membership",
+      },
+    });
+    await loadBoard();
+    setQuestScope(group.id);
+    toast("Group created");
+  } catch (error) {
+    fail(error);
+  }
+}
+
 function closeDrawer() {
   const selectedTask = state.tasks.find((task) => task.id === state.selectedTaskId);
   if (selectedTask?.status === "done") markDoneTaskSeen(selectedTask.id);
@@ -2549,7 +2906,8 @@ function openTaskDialog(task = null) {
     toast("Create a project first", true);
     return;
   }
-  el["task-dialog-title"].textContent = task ? "Edit task" : "New task";
+  const scope = task ? null : taskById(state.questScopeTaskId);
+  el["task-dialog-title"].textContent = task ? "Edit task" : scope ? `New task · ${scope.title}` : "New task";
   el["task-id"].value = task?.id ?? "";
   el["task-title"].value = task?.title ?? "";
   el["task-description"].value = task?.description ?? "";
@@ -2574,6 +2932,7 @@ async function saveTask(event) {
     tags: el["task-tags"].value.split(",").map((tag) => tag.trim()).filter(Boolean),
   };
   try {
+    let createdTask = null;
     if (taskId) {
       await api(`/tasks/${encodeURIComponent(taskId)}`, {
         method: "PATCH",
@@ -2581,12 +2940,27 @@ async function saveTask(event) {
         body,
       });
     } else {
-      await api("/tasks", { method: "POST", actor: true, body: { ...body, projectId: state.projectId } });
+      const created = await api("/tasks", { method: "POST", actor: true, body: { ...body, projectId: state.projectId } });
+      createdTask = created.task;
+      if (state.questScopeTaskId) {
+        await api("/relations", {
+          method: "POST",
+          actor: true,
+          body: {
+            fromType: "task",
+            fromId: state.questScopeTaskId,
+            toType: "task",
+            toId: createdTask.id,
+            kind: "contains",
+            label: "Created inside scoped Quest group",
+          },
+        });
+      }
     }
     el["task-dialog"].close();
     await loadBoard();
     if (taskId && state.selectedTaskId === taskId) await openTask(taskId);
-    toast(taskId ? "Task updated" : "Task created");
+    toast(taskId ? "Task updated" : state.questScopeTaskId ? "Task created in group" : "Task created");
   } catch (error) {
     fail(error);
   }
@@ -2698,7 +3072,7 @@ function showBoardLoading(show) {
     el["board-error"].classList.add("hidden");
     el["project-empty"].classList.add("hidden");
     el["board-empty"].classList.add("hidden");
-    el["kanban-board"].classList.add("hidden");
+    el["quest-board"].classList.add("hidden");
     el["investigation-board"].classList.add("hidden");
     el["code-map-board"].classList.add("hidden");
   }
