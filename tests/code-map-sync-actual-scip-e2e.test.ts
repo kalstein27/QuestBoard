@@ -21,10 +21,16 @@ import { createConfiguredCodeMapRuntime } from "../src/server/code-map-config.js
 
 const actor: ActorRef = { id: "agent:actual-scip-sync-e2e", provider: "test" };
 const chromeCandidates = [
+  process.env.QUESTBOARD_CHROME_EXECUTABLE,
+  process.env.CHROME_BIN,
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
   "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-];
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+].filter((candidate): candidate is string => Boolean(candidate));
 
 test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", { timeout: 120_000 }, async (t) => {
   const tempRoot = mkdtempSync(join(tmpdir(), "questboard-actual-scip-sync-"));

@@ -25,5 +25,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Locate Chrome for browser E2E
+        run: |
+          chrome="$(command -v google-chrome || command -v chromium || true)"
+          test -n "$chrome"
+          echo "QUESTBOARD_CHROME_EXECUTABLE=$chrome" >> "$GITHUB_ENV"
+
       - name: Verify
         run: npm run verify
