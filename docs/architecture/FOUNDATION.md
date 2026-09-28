@@ -12,6 +12,12 @@ This document records the smallest implementation decisions needed to begin the 
 
 The foundation/core runtime continues to use Node built-ins for SQLite, HTTP, streams, readline, and tests. Code Map is an optional adapter capability behind the code-intelligence boundary. Managed installation pins `@sourcegraph/scip-typescript` for the TypeScript SCIP indexer and `google-protobuf` 4.0.3 for secure binary decoding; the adapter installs a narrow compatibility shim for the v3-generated SCIP decoder methods removed by protobuf v4. This keeps the managed-MCP install self-contained without moving provider-specific concepts into the core domain.
 
+The provider-neutral `CodeGraphSnapshot` is the canonical Code Map read model. Human architecture projection remains a derived compatibility lens only: a project is considered indexed when a valid raw graph snapshot exists, even when that lens contains zero nodes. Refresh results therefore report raw `changedCodeNodeIds` independently from compatibility `changedArchitectureNodeIds`, so source changes outside the fixed architecture classifier remain observable.
+
+Code Map also merges a provider-independent repository file inventory into each semantic provider snapshot. Every regular project file outside bounded dependency/generated directories receives a stable `file:<relative-path>` node even when no installed parser understands its language. Provider-native symbol containment is preserved; otherwise only top-level located symbols are attached to their owning file, while SCIP `enclosingSymbol` or conservative enclosing-range evidence supplies symbol-to-symbol `contains` edges. Missing semantic support therefore reduces relation fidelity instead of making source files disappear.
+
+Agents consume the raw graph through one bounded application query contract rather than preloading the project graph. `questboard_query_code_map` and `POST /projects/:projectId/code-map/query` share the same cached `CodeMapService` semantics for node search/exact lookup, containment traversal, relation views (`callers`, `callees`, `references`, `referenced_by`), and bounded neighborhoods. Every query has a hard result limit and traversal depth cap; ambiguous searches return candidates while exact ambiguous identities fail explicitly. The query envelope identifies the current semantic index provider and preserves raw relation confidence/evidence. Per-fact provenance remains a separate graph-fidelity concern rather than being inferred by the query layer.
+
 ## Dependency direction
 
 ```text

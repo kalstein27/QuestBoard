@@ -425,6 +425,35 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
 
   const relations = new Map<string, CodeRelation>();
 
+  // SCIP carries explicit lexical ownership on SymbolInformation. Preserve it
+  // as real code containment before adding usage relationships. When an
+  // indexer omits enclosingSymbol, use the narrowest enclosing definition
+  // range in the same document as conservative structural evidence.
+  const directlyContained = new Set<string>();
+  for (const [symbol, info] of infoBySymbol) {
+    if (!info.enclosingSymbol) continue;
+    const child = nodeBySymbol.get(symbol)?.id;
+    const parent = nodeBySymbol.get(info.enclosingSymbol)?.id;
+    if (!child || !parent) continue;
+    addRelation(relations, parent, child, "contains");
+    directlyContained.add(child);
+  }
+
+  for (const definition of definitions) {
+    if (directlyContained.has(definition.nodeId) || !definition.occurrence.range) continue;
+    const candidates = (definitionsByDocument.get(definition.document) ?? [])
+      .filter((candidate) =>
+        candidate.nodeId !== definition.nodeId
+        && candidate.occurrence.enclosingRange
+        && rangeContains(candidate.occurrence.enclosingRange, definition.occurrence.range!),
+      )
+      .sort((left, right) =>
+        rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!),
+      );
+    const parent = candidates[0];
+    if (parent) addRelation(relations, parent.nodeId, definition.nodeId, "contains");
+  }
+
   for (const [symbol, info] of infoBySymbol) {
     const from = nodeBySymbol.get(symbol)?.id;
     if (!from) continue;

@@ -228,3 +228,65 @@ test("SCIP infers stable kinds and names from scip print documentation when kind
     ["sample.ts", "Service", "value", "run", "input", "T", "constructor"],
   );
 });
+
+test("SCIP preserves enclosingSymbol as symbol containment", () => {
+  const SERVICE = "scip-typescript npm questboard 0.0.0 src/sample.ts/Service#";
+  const METHOD = `${SERVICE}run().`;
+  const graph = normalizeScipGraph({
+    projectId: "questboard",
+    rootPath: "/workspace/questboard",
+    indexedAt: "2026-09-23T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/sample.ts",
+        language: "typescript",
+        symbols: [
+          { symbol: SERVICE, displayName: "Service", kind: "Class" },
+          { symbol: METHOD, displayName: "run", kind: "Method", enclosingSymbol: SERVICE },
+        ],
+        occurrences: [
+          { symbol: SERVICE, symbolRoles: 1, range: [0, 6, 13], enclosingRange: [0, 0, 4, 1] },
+          { symbol: METHOD, symbolRoles: 1, range: [1, 2, 5], enclosingRange: [1, 2, 3, 3] },
+        ],
+      }],
+    }),
+  });
+  const byIdentity = new Map(graph.nodes.map((node) => [node.canonicalIdentity, node]));
+  const service = byIdentity.get(`scip:${SERVICE}`)!;
+  const method = byIdentity.get(`scip:${METHOD}`)!;
+
+  assert.ok(graph.relations.some((relation) =>
+    relation.kind === "contains" && relation.from === service.id && relation.to === method.id,
+  ));
+});
+
+test("SCIP falls back to narrow enclosing definition ranges when explicit symbol ownership is absent", () => {
+  const OUTER = "scip-typescript npm questboard 0.0.0 src/sample.ts/outer().";
+  const INNER = "scip-typescript npm questboard 0.0.0 src/sample.ts/outer().inner().";
+  const graph = normalizeScipGraph({
+    projectId: "questboard",
+    rootPath: "/workspace/questboard",
+    indexedAt: "2026-09-23T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/sample.ts",
+        language: "typescript",
+        symbols: [
+          { symbol: OUTER, displayName: "outer", kind: "Function" },
+          { symbol: INNER, displayName: "inner", kind: "Function" },
+        ],
+        occurrences: [
+          { symbol: OUTER, symbolRoles: 1, range: [0, 9, 14], enclosingRange: [0, 0, 5, 1] },
+          { symbol: INNER, symbolRoles: 1, range: [1, 11, 16], enclosingRange: [1, 2, 3, 3] },
+        ],
+      }],
+    }),
+  });
+  const byIdentity = new Map(graph.nodes.map((node) => [node.canonicalIdentity, node]));
+
+  assert.ok(graph.relations.some((relation) =>
+    relation.kind === "contains"
+      && relation.from === byIdentity.get(`scip:${OUTER}`)?.id
+      && relation.to === byIdentity.get(`scip:${INNER}`)?.id,
+  ));
+});

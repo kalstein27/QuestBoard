@@ -39,6 +39,7 @@ import type {
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
 import type { CodeMapService } from "../application/code-map-service.js";
+import { CodeMapQueryError } from "../application/code-map-query.js";
 import {
   CodeMapInvestigationSyncError,
   type CodeMapInvestigationSyncSelection,
@@ -104,9 +105,13 @@ async function handleRequest(
     try {
       sendJson(response, 200, {
         result: executeQuestBoardAgentTool(
-          options.codeMapInvestigationSyncService
-            ? { service, codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
-            : service,
+          {
+            service,
+            ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+            ...(options.codeMapInvestigationSyncService
+              ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+              : {}),
+          },
           name,
           args,
         ),
@@ -122,9 +127,13 @@ async function handleRequest(
     const body = await readJsonObject(request);
     const sessionId = requireString(body, "sessionId");
     const mcpResponse = createQuestBoardMcpHandler(
-      options.codeMapInvestigationSyncService
-        ? { service, codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
-        : service,
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+        ...(options.codeMapInvestigationSyncService
+          ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+          : {}),
+      },
       sessionId,
     ).handle(body.message);
     if (mcpResponse === null) {
@@ -218,6 +227,34 @@ async function handleRequest(
     return;
   }
 
+  const codeMapQueryMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/query$/);
+  if (codeMapQueryMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapQueryMatch[1]);
+    service.getProject(projectId);
+    if (!options.codeMapService) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_query_unavailable",
+          message: "Code Map queries are not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+    const body = await readJsonObject(request);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      {
+        service,
+        codeMapService: options.codeMapService,
+        ...(options.codeMapInvestigationSyncService
+          ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+          : {}),
+      },
+      "questboard_query_code_map",
+      { ...body, projectId },
+    ));
+    return;
+  }
+
   const codeMapMatch = pathname.match(/^\/projects\/([^/]+)\/code-map$/);
   if (codeMapMatch) {
     const projectId = decodePathPart(codeMapMatch[1]);
@@ -226,7 +263,7 @@ async function handleRequest(
     const availability = options.codeMapAvailability;
     const enabled = availability?.enabled ?? Boolean(codeMapService);
     const available = availability?.available ?? Boolean(codeMapService);
-    const provider = availability?.provider ?? codeMapService?.providerId;
+    const provider = codeMapService?.providerId ?? availability?.provider;
 
     if (method === "GET") {
       const cached = codeMapService?.getCached(projectId);
@@ -295,6 +332,7 @@ async function handleRequest(
         provider: codeMapService.providerId,
         capabilities: codeMapService.capabilities,
         mode: refreshed.mode,
+        changedCodeNodeIds: refreshed.changedCodeNodeIds,
         changedArchitectureNodeIds: refreshed.changedArchitectureNodeIds,
         graph: refreshed.graph,
         projection: refreshed.projection,
@@ -953,6 +991,15 @@ function sendNoContent(response: ServerResponse): void {
 }
 
 function sendError(response: ServerResponse, error: unknown): void {
+  if (error instanceof CodeMapQueryError) {
+    const statusCode = error.code === "code_map_not_indexed"
+      ? 409
+      : error.code === "code_node_not_found"
+        ? 404
+        : 400;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
   if (error instanceof CodeMapInvestigationSyncError) {
     const statusCode = error.code === "code_map_sync_invalid_selection" ? 400 : 409;
     sendJson(response, statusCode, { error: { code: error.code, message: error.message } });

@@ -99,7 +99,7 @@ Those values are attribution only. They do not authenticate the caller.
 
 1. **Discover**: list Projects and Tasks. Prefer `ready`, `planned`, or explicitly assigned work.
 2. **Resume cheaply**: read the Task's current goal/state/next action first. Do not fetch the entire history by default.
-3. **Drill down only as needed**: read Claim, Activity, Artifacts, Relations, Investigation, or Code Map only when they are needed to perform or verify the next action.
+3. **Drill down only as needed**: read Claim, Activity, Artifacts, Relations, Investigation, or Code Map only when they are needed to perform or verify the next action. For source navigation, prefer bounded `questboard_query_code_map` calls: find a node first, then follow containment, callers/callees, references, or a small neighborhood. Do not fetch the full raw graph merely to answer one source question.
 4. **Coordinate**: Claim the Task when it is useful to tell other participants who is working on it.
 5. **Work**: update Task fields/status. Normal updates do not need a revision token.
 6. **Checkpoint**: record only meaningful state changes, blockers, decisions, and evidence another session may need.

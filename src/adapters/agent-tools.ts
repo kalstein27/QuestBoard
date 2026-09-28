@@ -40,6 +40,20 @@ import {
   type CodeMapInvestigationSyncSelection,
   type CodeMapInvestigationSyncService,
 } from "../application/code-map-investigation-sync.js";
+import { CODE_NODE_KINDS, CODE_RELATION_KINDS } from "../application/code-intelligence.js";
+import type { CodeMapService } from "../application/code-map-service.js";
+import {
+  CODE_MAP_HIERARCHY_DIRECTIONS,
+  CODE_MAP_QUERY_DIRECTIONS,
+  CODE_MAP_QUERY_MAX_DEPTH,
+  CODE_MAP_QUERY_MAX_LIMIT,
+  CODE_MAP_QUERY_MAX_SEEDS,
+  CODE_MAP_QUERY_OPERATIONS,
+  CODE_MAP_RELATION_SEMANTICS,
+  CodeMapQueryError,
+  type CodeMapQueryInput,
+} from "../application/code-map-query.js";
+
 
 const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
 
@@ -51,6 +65,7 @@ export interface QuestBoardAgentToolDefinition {
 
 export interface QuestBoardAgentToolContext {
   service: QuestBoardService;
+  codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
 }
 
@@ -741,6 +756,31 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_query_code_map",
+    description: "Query the indexed raw Code Map through a bounded read surface. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        operation: { type: "string", enum: [...CODE_MAP_QUERY_OPERATIONS] },
+        query: { type: "string" },
+        path: { type: "string" },
+        kinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_NODE_KINDS] } },
+        language: { type: "string" },
+        nodeId: { type: "string", minLength: 1 },
+        canonicalIdentity: { type: "string", minLength: 1 },
+        direction: { type: "string", enum: ["incoming", "outgoing", "both", "parents", "children"] },
+        relationKinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_RELATION_KINDS] } },
+        semantic: { type: "string", enum: [...CODE_MAP_RELATION_SEMANTICS] },
+        nodeIds: { type: "array", minItems: 1, maxItems: CODE_MAP_QUERY_MAX_SEEDS, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        depth: { type: "integer", minimum: 1, maximum: CODE_MAP_QUERY_MAX_DEPTH },
+        limit: { type: "integer", minimum: 1, maximum: CODE_MAP_QUERY_MAX_LIMIT },
+      },
+      required: ["projectId", "operation"],
+    },
+  },
+  {
     name: "questboard_preview_code_map_investigation_sync",
     description: "Preview extraction/synchronization of Code Map architecture nodes and relations into the Investigation graph without mutating it.",
     inputSchema: {
@@ -1093,6 +1133,13 @@ export function executeQuestBoardAgentTool(
           requireString(args, "nodeId"), requireStringArray(args, "orderedItemIds"), requireActor(args), mutationOptions(args),
         ),
       };
+    case "questboard_query_code_map":
+      return {
+        query: requireCodeMapService(context).query(
+          requireString(args, "projectId"),
+          codeMapQueryInput(args),
+        ),
+      };
     case "questboard_preview_code_map_investigation_sync": {
       const sync = requireCodeMapInvestigationSyncService(context);
       return {
@@ -1127,6 +1174,7 @@ export function executeQuestBoardAgentTool(
 
 export function describeQuestBoardError(error: unknown): { code: string; message: string } {
   if (error instanceof QuestBoardRemoteToolError) return { code: error.code, message: error.message };
+  if (error instanceof CodeMapQueryError) return { code: error.code, message: error.message };
   if (error instanceof CodeMapInvestigationSyncError) return { code: error.code, message: error.message };
   if (error instanceof EntityNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof ClaimConflictError) return { code: "claim_conflict", message: error.message };
@@ -1143,6 +1191,45 @@ export function describeQuestBoardError(error: unknown): { code: string; message
 function normalizeAgentToolRuntime(runtime: QuestBoardAgentToolRuntime): QuestBoardAgentToolContext {
   if ("service" in runtime) return runtime;
   return { service: runtime };
+}
+
+function requireCodeMapService(context: QuestBoardAgentToolContext): CodeMapService {
+  if (!context.codeMapService) {
+    throw new QuestBoardRemoteToolError(
+      "code_map_query_unavailable",
+      "Code Map queries are not available in this QuestBoard runtime",
+    );
+  }
+  return context.codeMapService;
+}
+
+const CODE_MAP_QUERY_INPUT_DIRECTIONS = [
+  "incoming",
+  "outgoing",
+  "both",
+  "parents",
+  "children",
+] as const;
+
+function codeMapQueryInput(args: Record<string, unknown>): CodeMapQueryInput {
+  const kinds = optionalEnumArray(args, "kinds", CODE_NODE_KINDS);
+  const relationKinds = optionalEnumArray(args, "relationKinds", CODE_RELATION_KINDS);
+  const nodeIds = "nodeIds" in args ? requireStringArray(args, "nodeIds") : undefined;
+  return {
+    operation: requireEnum(args, "operation", CODE_MAP_QUERY_OPERATIONS),
+    ...optionalStringProperty(args, "query"),
+    ...optionalStringProperty(args, "path"),
+    ...(kinds ? { kinds } : {}),
+    ...optionalStringProperty(args, "language"),
+    ...optionalStringProperty(args, "nodeId"),
+    ...optionalStringProperty(args, "canonicalIdentity"),
+    ...optionalEnumProperty(args, "direction", CODE_MAP_QUERY_INPUT_DIRECTIONS),
+    ...(relationKinds ? { relationKinds } : {}),
+    ...optionalEnumProperty(args, "semantic", CODE_MAP_RELATION_SEMANTICS),
+    ...(nodeIds ? { nodeIds } : {}),
+    ...optionalPositiveIntegerProperty(args, "depth"),
+    ...optionalPositiveIntegerProperty(args, "limit"),
+  };
 }
 
 function requireCodeMapInvestigationSyncService(context: QuestBoardAgentToolContext): CodeMapInvestigationSyncService {
@@ -1302,6 +1389,19 @@ function optionalStringArrayProperty<K extends string>(
     throw new TypeError(`${key} must be an array of strings`);
   }
   return { [key]: item as string[] } as Partial<Record<K, string[]>>;
+}
+
+function optionalEnumArray<const T extends readonly string[]>(
+  value: Record<string, unknown>,
+  key: string,
+  values: T,
+): T[number][] | undefined {
+  if (!(key in value)) return undefined;
+  const item = value[key];
+  if (!Array.isArray(item) || !item.every((entry) => typeof entry === "string")) {
+    throw new TypeError(`${key} must be an array of strings`);
+  }
+  return item.map((entry) => parseEnum(entry as string, key, values));
 }
 
 function optionalBooleanProperty<K extends string>(

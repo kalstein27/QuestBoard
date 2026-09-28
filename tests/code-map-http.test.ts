@@ -25,6 +25,8 @@ class HttpCodeMapProvider implements CodeIntelligenceProvider {
   readonly calls: CodeIndexRequest[] = [];
   fail = false;
 
+  constructor(private readonly sourcePath = "src/application/quest-board-service.ts") {}
+
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
     this.calls.push(request);
     if (this.fail) throw new Error("simulated provider failure");
@@ -39,7 +41,7 @@ class HttpCodeMapProvider implements CodeIntelligenceProvider {
           kind: "method",
           name: "createTask",
           canonicalIdentity: "QuestBoardService.createTask",
-          location: { path: "src/application/quest-board-service.ts", startLine: 1 },
+          location: { path: this.sourcePath, startLine: 1 },
         },
       ],
       relations: [],
@@ -75,6 +77,7 @@ test("Code Map HTTP endpoint exposes availability, indexes on POST, and serves c
     assert.equal(indexed.response.status, 200);
     assert.equal(indexed.body.indexed, true);
     assert.equal(indexed.body.mode, "full");
+    assert.deepEqual(indexed.body.changedCodeNodeIds, ["service-node"]);
     assert.equal(indexed.body.projection.nodes[0]?.title, "Application Service");
     assert.equal(indexed.body.graph.nodes[0]?.name, "createTask");
     assert.equal(indexed.body.graph.nodes[0]?.location.path, "src/application/quest-board-service.ts");
@@ -85,6 +88,41 @@ test("Code Map HTTP endpoint exposes availability, indexes on POST, and serves c
     assert.equal(cached.body.projection.projectId, project.id);
     assert.equal(cached.body.graph.nodes[0]?.canonicalIdentity, "QuestBoardService.createTask");
     assert.equal(provider.calls.length, 1);
+  } finally {
+    await closeServer(server);
+    repository.close();
+  }
+});
+
+test("Code Map HTTP remains indexed and serves raw graph when architecture lens has no nodes", async () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  const project = service.createProject(
+    { name: "Runtime project", rootPath: "/workspace/runtime-project" },
+    human,
+  );
+  const codeMapService = new CodeMapService(
+    new HttpCodeMapProvider("src/runtime/background-operations.ts"),
+  );
+  const server = createQuestBoardHttpServer(service, { codeMapService });
+
+  try {
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const path = `http://127.0.0.1:${address.port}/projects/${encodeURIComponent(project.id)}/code-map`;
+
+    const indexed = await json(path, { method: "POST" });
+    assert.equal(indexed.response.status, 200);
+    assert.equal(indexed.body.indexed, true);
+    assert.equal(indexed.body.graph.nodes[0]?.name, "createTask");
+    assert.equal(indexed.body.graph.nodes[0]?.location.path, "src/runtime/background-operations.ts");
+    assert.deepEqual(indexed.body.changedCodeNodeIds, ["service-node"]);
+    assert.deepEqual(indexed.body.projection.nodes, []);
+
+    const cached = await json(path);
+    assert.equal(cached.body.indexed, true);
+    assert.equal(cached.body.graph.nodes.length, 1);
+    assert.deepEqual(cached.body.projection.nodes, []);
   } finally {
     await closeServer(server);
     repository.close();

@@ -33,18 +33,57 @@ test("Code Map config uses SCIP TypeScript as the default provider", () => {
   assert.equal(config?.storageRoot, "/tmp/qb-code-map");
 });
 
-test("Code Map runtime fails closed when the bundled SCIP TypeScript indexer is missing", () => {
+test("Code Map config composes an ordered zero-or-more semantic provider set", () => {
+  const env = {
+    QUESTBOARD_CODE_MAP: "1",
+    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,gitnexus",
+    QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-composite",
+    QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: "/opt/tools/scip-typescript",
+    QUESTBOARD_GITNEXUS_EXECUTABLE: "/opt/tools/gitnexus",
+  };
+  const config = resolveQuestBoardCodeMapConfig(env);
+
+  assert.deepEqual(config, {
+    provider: "scip-typescript",
+    executable: "/opt/tools/scip-typescript",
+    providers: ["scip-typescript", "gitnexus"],
+    storageRoot: "/tmp/qb-composite",
+  });
+  const service = createConfiguredCodeMapService(env);
+  assert.equal(service?.providerId, "composite");
+});
+
+test("Code Map runtime keeps healthy semantic providers when another configured provider is missing", () => {
+  const runtime = createConfiguredCodeMapRuntime({
+    QUESTBOARD_CODE_MAP: "1",
+    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,gitnexus",
+    QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-composite-partial",
+    QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: process.execPath,
+    QUESTBOARD_GITNEXUS_EXECUTABLE: "/definitely/missing/gitnexus",
+  });
+
+  assert.ok(runtime.service);
+  assert.equal(runtime.service.providerId, "scip-typescript");
+  assert.equal(runtime.availability.available, true);
+  assert.equal(runtime.availability.reason, "missing_executable");
+  assert.deepEqual(runtime.availability.missingExecutables, ["/definitely/missing/gitnexus"]);
+});
+
+
+test("Code Map runtime degrades to file-only when the configured semantic indexer is missing", () => {
   const runtime = createConfiguredCodeMapRuntime({
     QUESTBOARD_CODE_MAP: "1",
     QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-code-map-missing",
     QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: "/definitely/missing/scip-typescript",
   });
 
-  assert.equal(runtime.service, undefined);
+  assert.ok(runtime.service);
+  assert.equal(runtime.service.providerId, "file-inventory");
   assert.equal(runtime.availability.enabled, true);
-  assert.equal(runtime.availability.available, false);
+  assert.equal(runtime.availability.available, true);
   assert.equal(runtime.availability.provider, "scip-typescript");
   assert.equal(runtime.availability.reason, "missing_executable");
+  assert.match(runtime.availability.message ?? "", /file-only fidelity/);
   assert.deepEqual(runtime.availability.missingExecutables, ["/definitely/missing/scip-typescript"]);
 });
 

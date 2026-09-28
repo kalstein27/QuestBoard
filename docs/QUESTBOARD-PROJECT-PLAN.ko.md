@@ -218,15 +218,16 @@ Task / Artifact / Note 사이의 연결.
 - 관련 Task/Node를 nested Work Group으로 공간적으로 묶을 수 있으며, 세부 Group이 아직 정해지지 않은 Task/Node는 상위 Group에 직접 둘 수 있다.
 - visual Work Group 배치는 Task parent/child 관계를 복제하는 화면이 아니다. 사람이 현재 일을 이해하기 좋은 공간 구조를 우선한다.
 
-### Code — 어디를 보고 있는가
+### Code — 실제 코드가 어떻게 생겼고 연결되는가
 
-현재 Code Map을 범용 코드 탐색기가 아니라 **작업 컨텍스트 복구 장치**로 제한한다.
+Code Map의 정본은 사람에게 설명하기 위한 macro architecture 그림이 아니라 **provider-neutral raw code graph**다. 사용자와 AI agent가 같은 실제 source identity를 기준으로 `어디에 정의됐는가 / 어디에 속하는가 / 누가 사용하는가 / 무엇을 호출·참조하는가`를 직접 따라가는 작업지도다.
 
-- 관련 architecture 영역과 핵심 symbol/file 위치를 찾는다.
-- Task/Flow에서 관련 코드로 이동하고 다시 돌아올 수 있게 한다.
-- relation의 근거가 필요할 때 source evidence를 보여준다.
-- Git이 담당하는 코드 snapshot/diff/version history는 중복 구현하지 않는다.
-- IDE가 담당하는 전체 symbol browser/call graph 기능을 목표로 하지 않는다.
+- file/symbol identity, language, source path/range, signature와 실제 containment/relation evidence를 보존한다.
+- architecture projection은 필요할 때 사용하는 optional compatibility lens이며 Code Map 성공 여부나 canonical identity를 결정하지 않는다.
+- agent는 전체 graph를 선로딩하지 않고 bounded query로 symbol, parent/children, callers/callees, references를 단계적으로 조회한다.
+- 혼합언어 repository에서 provider가 없는 언어도 최소 file node는 보존하며 해석 부족은 coverage gap으로 명시한다.
+- 부족한 parser/indexer/provider는 명시적 승인 경계에서 추가할 수 있고, 자동 해석이 놓친 실제 관계는 provenance가 분리된 manual wiring으로 보완할 수 있다.
+- Git이 담당하는 코드 snapshot/diff/version history와 IDE의 source editing 기능은 중복 구현하지 않는다.
 
 화면은 기본적으로 현재 작업에 필요한 정보만 보여준다. 고급 구조와 근거는 drill-down으로 숨긴다. **백조처럼 표면은 조용하고, 내부 연결은 빠르고 정교하게** 유지한다.
 
