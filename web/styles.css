@@ -87,6 +87,13 @@ button { color: inherit; }
 .workspace-heading h1 { flex: 0 0 auto; margin: 0; font-size: 15px; font-weight: 720; letter-spacing: -.01em; }
 .workspace-heading span { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--subtle); font-size: 11px; white-space: nowrap; }
 .toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
+.quest-done-filter {
+  height: 30px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line-strong); border-radius: 7px; background: rgba(18,21,26,.72);
+  color: #9da5b0; font-size: 10px; font-weight: 650; cursor: pointer; white-space: nowrap;
+}
+.quest-done-filter input { width: auto; margin: 0; accent-color: var(--accent); }
+.quest-done-new { padding: 2px 5px; border-radius: 999px; background: rgba(99,183,124,.12); color: #82c795; font-size: 8px; font-weight: 800; }
 .investigation-controls { position: sticky; top: 8px; left: 8px; z-index: 12; width: max-content; display: flex; align-items: center; height: 28px; margin: 8px 0 -36px 8px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(12,15,19,.94); box-shadow: 0 5px 18px rgba(0,0,0,.28); backdrop-filter: blur(10px); }
 .investigation-control-button, .investigation-zoom-label, .investigation-fit-button { height: 22px; border: 0; border-radius: 5px; background: transparent; color: #a0a8b3; cursor: pointer; }
 .investigation-control-button { width: 24px; padding: 0; font-size: 14px; line-height: 1; }
@@ -673,6 +680,8 @@ main { min-height: 0; overflow: hidden; }
 .task-status-icon-blocked { color: #df7470; }
 .task-status-icon-review { color: #c284c5; }
 .task-status-icon-done { color: #6eb883; }
+.task-card-unseen-done { border-color: rgba(99,183,124,.32); background: rgba(99,183,124,.055); }
+.task-new-done { flex: 0 0 auto; padding: 2px 5px; border-radius: 999px; background: rgba(99,183,124,.12); color: #82c795; font-size: 7px; font-weight: 850; text-transform: uppercase; }
 @keyframes task-status-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .task-status-icon-in_progress { animation: none; }

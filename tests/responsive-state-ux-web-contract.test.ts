@@ -58,6 +58,18 @@ test("workspace chrome uses Quest, Flow, and Code terminology", () => {
   assert.match(app, /codeMap \? "Code" : investigation \? "Flow" : "Quest"/);
 });
 
+test("Quest hides reviewed Done tasks locally while keeping unseen completions visible until reviewed", () => {
+  assert.match(html, /id="hide-completed-toggle"[\s\S]*Hide completed/);
+  assert.match(app, /questboard\.hideCompleted/);
+  assert.match(app, /questboard\.seenDoneTasks\.\$\{projectId\}/);
+  assert.match(app, /seenDoneTasksInitialized\.\$\{projectId\}/);
+  assert.match(app, /state\.tasks\.filter\(\(task\) => task\.status === "done"\)\.map\(\(task\) => task\.id\)/);
+  assert.match(app, /task\.id === state\.selectedTaskId \|\| !state\.seenDoneTaskIds\.has\(task\.id\)/);
+  assert.match(app, /selectedTask\?\.status === "done"\) markDoneTaskSeen\(selectedTask\.id\)/);
+  assert.match(app, /task-card-unseen-done/);
+  assert.match(css, /\.quest-done-filter/);
+});
+
 test("coarse pointer Flow keeps Item titles primary and reveals row actions on focus", () => {
   assert.match(css, /@media \(pointer: coarse\)/);
   assert.match(css, /\.investigation-item-title \{[\s\S]*display: block/);

@@ -15,6 +15,9 @@ const state = {
   projects: [],
   projectId: null,
   viewMode: loadViewMode(),
+  hideCompleted: loadHideCompleted(),
+  seenDoneTaskIds: new Set(),
+  seenDoneProjectId: null,
   tasks: [],
   claims: new Map(),
   selectedTaskId: null,
@@ -65,7 +68,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 function collectElements() {
   [
-    "project-select", "new-project-button", "new-task-button", "refresh-button",
+    "project-select", "new-project-button", "new-task-button", "refresh-button", "hide-completed-control", "hide-completed-toggle", "unseen-done-count",
     "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty", "board-error", "board-error-message", "board-error-retry",
     "project-empty", "kanban-board", "empty-new-task-button", "empty-new-project-button",
     "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
@@ -101,6 +104,11 @@ function bindEvents() {
   el["new-task-button"].addEventListener("click", () => openTaskDialog());
   el["empty-new-task-button"].addEventListener("click", () => openTaskDialog());
   el["refresh-button"].addEventListener("click", () => void refreshAll());
+  el["hide-completed-toggle"].addEventListener("change", () => {
+    state.hideCompleted = el["hide-completed-toggle"].checked;
+    localStorage.setItem("questboard.hideCompleted", String(state.hideCompleted));
+    renderBoard();
+  });
   el["board-error-retry"].addEventListener("click", () => void refreshAll());
   el["code-map-refresh"].addEventListener("click", () => void refreshCodeMap());
   el["code-map-sync"].addEventListener("click", () => void openCodeMapSyncPreview());
@@ -225,6 +233,7 @@ async function loadBoard() {
       `/projects/${encodeURIComponent(state.projectId)}/investigation/graph`,
     );
     state.tasks = tasks;
+    syncSeenDoneTasks();
     state.projectArtifacts = artifacts;
     state.projectRelations = relations;
     state.investigationGraphNodes = nodes;
@@ -278,10 +287,14 @@ function renderBoard() {
     return;
   }
 
-  const columns = STATUSES.map(([status, label]) => {
+  const columns = STATUSES.flatMap(([status, label]) => {
     const column = node("section", "kanban-column");
     column.dataset.status = status;
-    const tasks = state.tasks.filter((task) => task.status === status);
+    const statusTasks = state.tasks.filter((task) => task.status === status);
+    const tasks = status === "done" && state.hideCompleted
+      ? statusTasks.filter((task) => task.id === state.selectedTaskId || !state.seenDoneTaskIds.has(task.id))
+      : statusTasks;
+    if (status === "done" && state.hideCompleted && tasks.length === 0) return [];
     const heading = node("header", "column-header");
     const title = node("div", "column-title");
     title.append(node("span", `status-dot status-${status}`), text(label));
@@ -302,7 +315,7 @@ function renderBoard() {
     });
     tasks.forEach((task) => list.append(renderTaskCard(task)));
     column.append(heading, list);
-    return column;
+    return [column];
   });
   el["kanban-board"].replaceChildren(...columns);
 }
@@ -323,6 +336,67 @@ function loadViewMode() {
   if (["quest", "investigation", "code-map"].includes(requested)) return requested;
   const stored = localStorage.getItem("questboard.viewMode");
   return ["quest", "investigation", "code-map"].includes(stored) ? stored : "quest";
+}
+
+function loadHideCompleted() {
+  const stored = localStorage.getItem("questboard.hideCompleted");
+  return stored === null ? true : stored === "true";
+}
+
+function seenDoneStorageKey(projectId) {
+  return `questboard.seenDoneTasks.${projectId}`;
+}
+
+function seenDoneInitKey(projectId) {
+  return `questboard.seenDoneTasksInitialized.${projectId}`;
+}
+
+function persistSeenDoneTasks() {
+  if (!state.projectId) return;
+  localStorage.setItem(seenDoneStorageKey(state.projectId), JSON.stringify([...state.seenDoneTaskIds]));
+}
+
+function syncSeenDoneTasks() {
+  if (!state.projectId) {
+    state.seenDoneTaskIds = new Set();
+    state.seenDoneProjectId = null;
+    return;
+  }
+  if (state.seenDoneProjectId !== state.projectId) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(seenDoneStorageKey(state.projectId)) || "[]");
+      state.seenDoneTaskIds = new Set(Array.isArray(stored) ? stored.filter((id) => typeof id === "string") : []);
+    } catch {
+      state.seenDoneTaskIds = new Set();
+    }
+    state.seenDoneProjectId = state.projectId;
+  }
+  const initKey = seenDoneInitKey(state.projectId);
+  if (localStorage.getItem(initKey) !== "1") {
+    state.seenDoneTaskIds = new Set(state.tasks.filter((task) => task.status === "done").map((task) => task.id));
+    localStorage.setItem(initKey, "1");
+    persistSeenDoneTasks();
+    return;
+  }
+  let changed = false;
+  state.tasks.forEach((task) => {
+    if (task.status !== "done" && state.seenDoneTaskIds.delete(task.id)) changed = true;
+  });
+  if (changed) persistSeenDoneTasks();
+}
+
+function markDoneTaskSeen(taskId) {
+  if (!state.projectId || state.seenDoneTaskIds.has(taskId)) return;
+  state.seenDoneTaskIds.add(taskId);
+  persistSeenDoneTasks();
+}
+
+function renderDoneFilterControl() {
+  if (!el["hide-completed-toggle"]) return;
+  el["hide-completed-toggle"].checked = state.hideCompleted;
+  const unseen = state.tasks.filter((task) => task.status === "done" && !state.seenDoneTaskIds.has(task.id)).length;
+  el["unseen-done-count"].textContent = unseen > 0 ? `${unseen} new` : "";
+  el["unseen-done-count"].classList.toggle("hidden", unseen === 0);
 }
 
 function loadInvestigationZoom() {
@@ -362,6 +436,7 @@ function renderViewSwitch() {
   const codeMap = state.viewMode === "code-map";
   el["investigation-controls"].classList.toggle("hidden", !investigation);
   el["new-task-button"].classList.toggle("hidden", !quest);
+  el["hide-completed-control"].classList.toggle("hidden", !quest);
   el["investigation-add-node"].classList.toggle("hidden", !investigation);
   el["code-map-refresh"].classList.toggle("hidden", !codeMap);
   if (!codeMap) el["code-map-sync"].classList.add("hidden");
@@ -370,6 +445,7 @@ function renderViewSwitch() {
   const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
   el["workspace-title"].textContent = title;
   el["workspace-context"].textContent = projectName ? `${projectName} · ${role}` : role;
+  renderDoneFilterControl();
   renderInvestigationControls();
 }
 
@@ -1986,7 +2062,12 @@ function renderTaskCard(task) {
   card.draggable = true;
   card.dataset.taskId = task.id;
   const title = node("h3", "task-title", task.title);
-  card.append(title, taskStatusIcon(task.status));
+  card.append(title);
+  if (task.status === "done" && !state.seenDoneTaskIds.has(task.id)) {
+    card.classList.add("task-card-unseen-done");
+    card.append(node("span", "task-new-done", "New"));
+  }
+  card.append(taskStatusIcon(task.status));
   card.addEventListener("click", () => void openTask(task.id));
   card.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -2429,10 +2510,13 @@ async function addRelation(taskId, input) {
 }
 
 function closeDrawer() {
+  const selectedTask = state.tasks.find((task) => task.id === state.selectedTaskId);
+  if (selectedTask?.status === "done") markDoneTaskSeen(selectedTask.id);
   state.selectedTaskId = null;
   el["task-drawer"].classList.remove("open");
   el["task-drawer"].setAttribute("aria-hidden", "true");
   el["drawer-scrim"].classList.add("hidden");
+  if (selectedTask?.status === "done" && state.viewMode === "quest") renderBoard();
 }
 
 function openTaskDialog(task = null) {
