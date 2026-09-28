@@ -130,22 +130,7 @@ textarea { line-height: 1.5; }
 
 main { min-width: 0; }
 .board-shell { min-height: calc(100dvh - 58px); padding: 14px 0 20px; }
-.quest-board { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
-.quest-scope-bar {
-  margin: 0 14px 10px; padding: 9px 11px; display: grid; gap: 8px;
-  border: 1px solid var(--line); border-radius: 8px; background: #101318;
-}
-.quest-breadcrumb { min-width: 0; display: flex; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: none; }
-.quest-breadcrumb::-webkit-scrollbar { display: none; }
-.quest-crumb { flex: 0 0 auto; max-width: 220px; padding: 0; border: 0; background: transparent; color: #7f8997; font-size: 9px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quest-crumb:hover { color: #cbd1da; }
-.quest-crumb[aria-current="page"] { color: #eef1f5; font-weight: 750; cursor: default; }
-.quest-crumb-separator { color: #424a55; font-size: 9px; }
-.quest-scope-summary { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.quest-scope-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
-.quest-scope-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.quest-scope-goal { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #737d89; font-size: 9px; }
-.quest-scope-meta, .quest-scope-detail { flex: 0 0 auto; }
+.quest-board { min-height: 0; overflow: hidden; }
 .kanban-board {
   display: grid; grid-auto-flow: column; grid-auto-columns: minmax(245px, 1fr);
   gap: 8px; padding: 0 14px 10px; overflow-x: auto; overscroll-behavior-x: contain;
@@ -168,8 +153,19 @@ main { min-width: 0; }
   background-image: radial-gradient(circle, rgba(120,130,148,.16) 1px, transparent 1px);
   background-size: 24px 24px;
 }
-.investigation-edges { position: absolute; inset: 0; z-index: 1; overflow: visible; pointer-events: none; }
-.investigation-nodes { position: absolute; inset: 0; z-index: 2; }
+.investigation-groups { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.investigation-group { position: absolute; border: 1px solid rgba(116,134,255,.28); border-radius: 14px; background: rgba(116,134,255,.035); pointer-events: none; }
+.investigation-group-head { position: absolute; left: 12px; top: 8px; max-width: calc(100% - 24px); min-height: 38px; padding: 5px 8px; display: grid; gap: 2px; border: 1px solid rgba(116,134,255,.18); border-radius: 7px; background: rgba(15,18,24,.94); color: #cbd2ff; cursor: grab; pointer-events: auto; touch-action: none; text-align: left; user-select: none; }
+.investigation-group-head:hover { border-color: rgba(116,134,255,.42); background: rgba(20,24,32,.98); }
+.investigation-group-head.dragging-group { cursor: grabbing; border-color: rgba(116,134,255,.56); }
+.investigation-group-summary { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.investigation-group-kicker { color: #7884d9; font-size: 7px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.investigation-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.investigation-group-progress { color: #747e8d; font-size: 8px; white-space: nowrap; }
+.investigation-group-goal { min-width: 0; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8e97aa; font-size: 8px; line-height: 1.35; }
+@media (pointer: coarse) { .investigation-group-head { min-height: 44px; padding: 6px 9px; } }
+.investigation-edges { position: absolute; inset: 0; z-index: 2; overflow: visible; pointer-events: none; }
+.investigation-nodes { position: absolute; inset: 0; z-index: 3; }
 .investigation-node {
   position: absolute; width: 230px; min-height: 116px; padding: 11px 12px;
   display: grid; align-content: start; gap: 7px; user-select: none; touch-action: auto;
@@ -871,10 +867,6 @@ main { min-height: 0; overflow: hidden; }
   .toolbar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
   .toolbar::-webkit-scrollbar { display: none; }
   .kanban-board { overflow-x: auto; overflow-y: auto; overscroll-behavior: contain; }
-  .quest-scope-bar { margin: 0 8px 8px; padding: 8px 9px; }
-  .quest-scope-summary { align-items: flex-start; flex-wrap: wrap; }
-  .quest-scope-copy { flex-basis: calc(100% - 84px); }
-  .quest-scope-meta { margin-left: auto; }
   .work-group-form { grid-template-columns: 1fr; }
   .work-group-form .button { width: 100%; }
   .code-map-content { overflow: auto; overscroll-behavior: contain; }

@@ -19,7 +19,6 @@ const state = {
   seenDoneTaskIds: new Set(),
   seenDoneProjectId: null,
   taskHierarchy: null,
-  questScopeTaskId: null,
   tasks: [],
   claims: new Map(),
   selectedTaskId: null,
@@ -72,8 +71,8 @@ function collectElements() {
   [
     "project-select", "new-project-button", "new-task-button", "refresh-button", "hide-completed-control", "hide-completed-toggle", "unseen-done-count",
     "actor-id", "actor-provider", "save-actor-button", "board-loading", "board-empty", "board-error", "board-error-message", "board-error-retry",
-    "project-empty", "quest-board", "quest-scope-bar", "kanban-board", "empty-new-task-button", "empty-new-project-button",
-    "investigation-board", "investigation-canvas", "investigation-edges", "investigation-nodes",
+    "project-empty", "quest-board", "kanban-board", "empty-new-task-button", "empty-new-project-button",
+    "investigation-board", "investigation-canvas", "investigation-groups", "investigation-edges", "investigation-nodes",
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out",
     "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node",
     "investigation-inspector", "investigation-inspector-title", "investigation-inspector-body", "investigation-inspector-close",
@@ -97,7 +96,6 @@ function populateStaticOptions() {
 function bindEvents() {
   el["project-select"].addEventListener("change", () => {
     state.projectId = el["project-select"].value || null;
-    state.questScopeTaskId = null;
     localStorage.setItem("questboard.projectId", state.projectId ?? "");
     closeDrawer();
     void loadBoard();
@@ -211,7 +209,6 @@ async function loadBoard() {
   if (!state.projectId) {
     state.boardError = null;
     state.taskHierarchy = null;
-    state.questScopeTaskId = null;
     state.tasks = [];
     state.claims.clear();
     state.projectArtifacts = [];
@@ -241,9 +238,6 @@ async function loadBoard() {
     const { tasks, claims, artifacts, relations, positions, nodes, items, itemLinks, itemTaskLinks } = graph;
     state.tasks = tasks;
     state.taskHierarchy = hierarchyResponse.hierarchy;
-    if (state.questScopeTaskId && !state.tasks.some((task) => task.id === state.questScopeTaskId)) {
-      state.questScopeTaskId = null;
-    }
     syncSeenDoneTasks();
     state.projectArtifacts = artifacts;
     state.projectRelations = relations;
@@ -283,7 +277,6 @@ function renderBoard() {
   if (hasError) return;
   if (noProject || !hasCurrentContent) {
     if (state.viewMode === "quest") {
-      el["quest-scope-bar"].replaceChildren();
       el["kanban-board"].replaceChildren();
     }
     else if (state.viewMode === "investigation") clearInvestigationBoard();
@@ -301,12 +294,10 @@ function renderBoard() {
     return;
   }
 
-  renderQuestScopeBar();
-  const directTaskIds = new Set(questDirectTaskIds());
   const columns = STATUSES.flatMap(([status, label]) => {
     const column = node("section", "kanban-column");
     column.dataset.status = status;
-    const statusTasks = state.tasks.filter((task) => directTaskIds.has(task.id) && task.status === status);
+    const statusTasks = state.tasks.filter((task) => task.status === status);
     const tasks = statusTasks.filter(shouldShowQuestTask);
     if (status === "done" && state.hideCompleted && tasks.length === 0) return [];
     const heading = node("header", "column-header");
@@ -327,7 +318,7 @@ function renderBoard() {
       const taskId = event.dataTransfer?.getData("text/questboard-task");
       if (taskId) void moveTask(taskId, status);
     });
-    tasks.forEach((task) => list.append(renderQuestCard(task)));
+    tasks.forEach((task) => list.append(renderTaskCard(task)));
     column.append(heading, list);
     return [column];
   });
@@ -417,11 +408,6 @@ function isGroupTask(taskId) {
   return hierarchyChildren(taskId).length > 0;
 }
 
-function questDirectTaskIds() {
-  if (state.questScopeTaskId) return hierarchyChildren(state.questScopeTaskId);
-  return state.taskHierarchy?.rootTaskIds ?? state.tasks.map((task) => task.id);
-}
-
 function descendantTaskIds(taskId) {
   const descendants = [];
   const pending = [...hierarchyChildren(taskId)];
@@ -436,84 +422,10 @@ function descendantTaskIds(taskId) {
   return descendants;
 }
 
-function unseenDoneDescendantCount(taskId) {
-  return descendantTaskIds(taskId)
-    .map(taskById)
-    .filter((task) => task?.status === "done" && !state.seenDoneTaskIds.has(task.id))
-    .length;
-}
-
 function shouldShowQuestTask(task) {
   if (!state.hideCompleted || task.id === state.selectedTaskId) return true;
   if (task.status !== "done") return true;
-  if (!state.seenDoneTaskIds.has(task.id)) return true;
-  if (!isGroupTask(task.id)) return false;
-  const progress = state.taskHierarchy?.progressByTask?.[task.id];
-  const hasOpenDescendant = Boolean(progress && (progress.active > 0 || progress.review > 0 || progress.blocked > 0));
-  return hasOpenDescendant || unseenDoneDescendantCount(task.id) > 0;
-}
-
-function groupFocusChild(groupTaskId) {
-  const directIds = hierarchyChildren(groupTaskId);
-  const explicit = state.projectRelations.find((relation) =>
-    relation.fromType === "task"
-    && relation.toType === "task"
-    && relation.kind === "next-task"
-    && relation.fromId === groupTaskId
-    && directIds.includes(relation.toId));
-  if (explicit) return taskById(explicit.toId);
-  const rank = { in_progress: 0, blocked: 1, review: 2, ready: 3, planned: 4, inbox: 5, done: 6 };
-  return directIds
-    .map(taskById)
-    .filter(Boolean)
-    .sort((left, right) => (rank[left.status] ?? 99) - (rank[right.status] ?? 99))[0] ?? null;
-}
-
-function setQuestScope(taskId) {
-  if (taskId && !taskById(taskId)) return;
-  state.questScopeTaskId = taskId || null;
-  closeDrawer();
-  renderBoard();
-}
-
-function renderQuestScopeBar() {
-  const bar = el["quest-scope-bar"];
-  const scopeTask = taskById(state.questScopeTaskId);
-  bar.classList.toggle("hidden", !scopeTask);
-  if (!scopeTask) {
-    bar.replaceChildren();
-    return;
-  }
-
-  const ancestry = state.taskHierarchy?.ancestryByTask?.[scopeTask.id] ?? [];
-  const breadcrumb = node("nav", "quest-breadcrumb");
-  breadcrumb.setAttribute("aria-label", "Quest group breadcrumb");
-  const root = node("button", "quest-crumb", "Quest");
-  root.type = "button";
-  root.addEventListener("click", () => setQuestScope(null));
-  breadcrumb.append(root);
-  [...ancestry, scopeTask.id].forEach((taskId, index, path) => {
-    breadcrumb.append(node("span", "quest-crumb-separator", "/"));
-    const task = taskById(taskId);
-    const crumb = node("button", "quest-crumb", task?.title ?? shortId(taskId));
-    crumb.type = "button";
-    if (index === path.length - 1) crumb.setAttribute("aria-current", "page");
-    else crumb.addEventListener("click", () => setQuestScope(taskId));
-    breadcrumb.append(crumb);
-  });
-
-  const summary = node("div", "quest-scope-summary");
-  const copy = node("div", "quest-scope-copy");
-  copy.append(node("strong", "quest-scope-title", scopeTask.title));
-  if (scopeTask.goal) copy.append(node("span", "quest-scope-goal", scopeTask.goal));
-  const progress = state.taskHierarchy?.progressByTask?.[scopeTask.id];
-  const meta = node("div", "quest-scope-meta");
-  if (progress?.total) meta.append(node("span", "quest-group-progress", `${progress.done}/${progress.total} done`));
-  const detail = node("button", "button ghost compact quest-scope-detail", "Group details");
-  detail.type = "button";
-  detail.addEventListener("click", () => void openTask(scopeTask.id));
-  summary.append(copy, meta, detail);
-  bar.replaceChildren(breadcrumb, summary);
+  return !state.seenDoneTaskIds.has(task.id);
 }
 
 function renderDoneFilterControl() {
@@ -568,11 +480,8 @@ function renderViewSwitch() {
   const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
   const role = codeMap ? "Code context" : investigation ? "Work map" : "Work queue";
   const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
-  const scopeTitle = quest ? taskById(state.questScopeTaskId)?.title : null;
   el["workspace-title"].textContent = title;
-  el["workspace-context"].textContent = projectName
-    ? `${projectName} · ${scopeTitle ? `${scopeTitle} · ` : ""}${role}`
-    : role;
+  el["workspace-context"].textContent = projectName ? `${projectName} · ${role}` : role;
   renderDoneFilterControl();
   renderInvestigationControls();
 }
@@ -1024,6 +933,7 @@ function codeMapRelationBindingForInvestigationItem(itemId) {
 
 function renderInvestigationBoard() {
   const canvas = el["investigation-canvas"];
+  const groupsLayer = el["investigation-groups"];
   const nodesLayer = el["investigation-nodes"];
   const graphMode = state.investigationGraphNodes.length > 0;
   canvas.style.width = "1800px";
@@ -1047,6 +957,7 @@ function renderInvestigationBoard() {
     renderInvestigationInspector();
     requestAnimationFrame(() => {
       layoutUnsavedInvestigationGraphNodes(graphNodes);
+      renderInvestigationGroups();
       syncInvestigationCanvasBounds();
       drawInvestigationEdges();
       if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
@@ -1068,6 +979,7 @@ function renderInvestigationBoard() {
     return card;
   });
   nodesLayer.replaceChildren(...taskNodes, ...artifactNodes);
+  groupsLayer.replaceChildren();
   state.selectedInvestigationNodeId = null;
   renderInvestigationInspector();
   requestAnimationFrame(() => {
@@ -1075,6 +987,185 @@ function renderInvestigationBoard() {
     drawInvestigationEdges();
     if (shouldAutoFitInvestigationViewport()) fitInvestigationContent();
   });
+}
+
+function investigationGroupTaskForNode(nodeId) {
+  const itemIds = new Set(
+    state.investigationGraphItems.filter((item) => item.nodeId === nodeId).map((item) => item.id),
+  );
+  const linkedTaskIds = state.investigationItemTaskLinks
+    .filter((link) => itemIds.has(link.itemId))
+    .map((link) => link.taskId);
+  if (linkedTaskIds.length === 0) return null;
+
+  const groupPaths = linkedTaskIds.map((taskId) => {
+    const ancestry = state.taskHierarchy?.ancestryByTask?.[taskId] ?? [];
+    return [...ancestry, taskId].filter((candidate) => isGroupTask(candidate));
+  });
+  const firstPath = groupPaths[0] ?? [];
+  for (let index = firstPath.length - 1; index >= 0; index -= 1) {
+    const candidate = firstPath[index];
+    if (groupPaths.every((path) => path.includes(candidate))) return taskById(candidate);
+  }
+  return null;
+}
+
+function investigationNodeCard(nodeId) {
+  return [...el["investigation-nodes"].children]
+    .find((card) => card.dataset.entityType === "investigation_node" && card.dataset.entityId === nodeId) || null;
+}
+
+function renderInvestigationGroups() {
+  const layer = el["investigation-groups"];
+  if (!layer) return;
+  const memberships = new Map();
+  state.investigationGraphNodes.forEach((graphNode) => {
+    const group = investigationGroupTaskForNode(graphNode.id);
+    if (!group) return;
+    const membership = memberships.get(group.id) ?? { group, nodeIds: [] };
+    membership.nodeIds.push(graphNode.id);
+    memberships.set(group.id, membership);
+  });
+
+  const shells = [];
+  memberships.forEach(({ group, nodeIds }) => {
+    const memberCards = nodeIds.map(investigationNodeCard).filter(Boolean);
+    if (memberCards.length === 0) return;
+    const bounds = memberCards.reduce((acc, card) => {
+      const position = state.displayPositions.get(boardNodeKey("investigation_node", card.dataset.entityId));
+      if (!position) return acc;
+      acc.minX = Math.min(acc.minX, position.x);
+      acc.minY = Math.min(acc.minY, position.y);
+      acc.maxX = Math.max(acc.maxX, position.x + card.offsetWidth);
+      acc.maxY = Math.max(acc.maxY, position.y + card.offsetHeight);
+      return acc;
+    }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+    if (!Number.isFinite(bounds.minX)) return;
+
+    const horizontalPadding = 22;
+    const headerSpace = 58;
+    const bottomPadding = 22;
+    const shell = node("section", "investigation-group");
+    shell.dataset.groupTaskId = group.id;
+    shell.style.left = `${bounds.minX - horizontalPadding}px`;
+    shell.style.top = `${bounds.minY - headerSpace}px`;
+    shell.style.width = `${bounds.maxX - bounds.minX + horizontalPadding * 2}px`;
+    shell.style.height = `${bounds.maxY - bounds.minY + headerSpace + bottomPadding}px`;
+
+    const head = node("button", "investigation-group-head");
+    head.type = "button";
+    const summary = node("span", "investigation-group-summary");
+    summary.append(
+      node("span", "investigation-group-kicker", "Group"),
+      node("strong", "investigation-group-title", group.title),
+    );
+    const progress = state.taskHierarchy?.progressByTask?.[group.id];
+    if (progress?.total) {
+      summary.append(node("span", "investigation-group-progress", `${progress.done}/${progress.total} done`));
+    }
+    head.append(summary);
+    const goal = (group.goal || "").trim();
+    if (goal) head.append(node("span", "investigation-group-goal", goal));
+    attachInvestigationGroupDrag(head, shell, nodeIds);
+    head.addEventListener("click", () => {
+      if (head._suppressClick) {
+        head._suppressClick = false;
+        return;
+      }
+      void openTask(group.id);
+    });
+    shell.append(head);
+    shells.push(shell);
+  });
+  layer.replaceChildren(...shells);
+}
+
+function attachInvestigationGroupDrag(head, shell, nodeIds) {
+  head.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || state.investigationHistoryBusy) return;
+    const starts = nodeIds.map((nodeId) => {
+      const position = state.displayPositions.get(boardNodeKey("investigation_node", nodeId));
+      return position ? { nodeId, position: { ...position } } : null;
+    }).filter(Boolean);
+    if (starts.length === 0) return;
+
+    head.setPointerCapture(event.pointerId);
+    head.classList.add("dragging-group");
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    const maxNodeY = Math.max(820, el["investigation-canvas"].clientHeight - 150);
+    const minDx = Math.max(...starts.map((entry) => 16 - entry.position.x));
+    const maxDx = Math.min(...starts.map((entry) => 1540 - entry.position.x));
+    const minDy = Math.max(...starts.map((entry) => 16 - entry.position.y));
+    const maxDy = Math.min(...starts.map((entry) => maxNodeY - entry.position.y));
+    let latestDx = 0;
+    let latestDy = 0;
+    let moved = false;
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      const rawDx = (moveEvent.clientX - startClientX) / state.investigationZoom;
+      const rawDy = (moveEvent.clientY - startClientY) / state.investigationZoom;
+      if (Math.abs(rawDx) + Math.abs(rawDy) > 3) moved = true;
+      latestDx = clamp(rawDx, minDx, maxDx);
+      latestDy = clamp(rawDy, minDy, maxDy);
+      starts.forEach((entry) => {
+        const next = { x: entry.position.x + latestDx, y: entry.position.y + latestDy };
+        state.displayPositions.set(boardNodeKey("investigation_node", entry.nodeId), next);
+        const card = investigationNodeCard(entry.nodeId);
+        if (card) setInvestigationNodePosition(card, next);
+      });
+      shell.style.transform = `translate(${latestDx}px, ${latestDy}px)`;
+      drawInvestigationEdges();
+    };
+
+    const onEnd = (endEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
+      head.removeEventListener("pointermove", onMove);
+      head.removeEventListener("pointerup", onEnd);
+      head.removeEventListener("pointercancel", onEnd);
+      head.classList.remove("dragging-group");
+      if (!moved) return;
+      head._suppressClick = true;
+      const moves = starts.map((entry) => ({
+        entityType: "investigation_node",
+        entityId: entry.nodeId,
+        from: entry.position,
+        to: { x: entry.position.x + latestDx, y: entry.position.y + latestDy },
+      }));
+      void commitInvestigationGroupMove(moves);
+    };
+
+    head.addEventListener("pointermove", onMove);
+    head.addEventListener("pointerup", onEnd);
+    head.addEventListener("pointercancel", onEnd);
+  });
+}
+
+async function commitInvestigationGroupMove(moves) {
+  state.investigationHistoryBusy = true;
+  renderInvestigationControls();
+  const historyEntries = [];
+  for (const move of moves) {
+    const saved = await persistInvestigationPosition(move.entityType, move.entityId, move.to);
+    if (!saved) continue;
+    historyEntries.push({
+      entityType: move.entityType,
+      entityId: move.entityId,
+      from: { ...move.from },
+      to: { x: saved.x, y: saved.y },
+    });
+  }
+  if (historyEntries.length > 0) {
+    state.investigationUndo.push({ moves: historyEntries });
+    if (state.investigationUndo.length > 100) state.investigationUndo.shift();
+    state.investigationRedo = [];
+  }
+  state.investigationHistoryBusy = false;
+  renderInvestigationControls();
+  renderInvestigationGroups();
+  syncInvestigationCanvasBounds();
+  drawInvestigationEdges();
 }
 
 function investigationDefaultColumnCount() {
@@ -1684,6 +1775,7 @@ function attachInvestigationDrag(card, entityType, entityId, dragRegion = card) 
       };
       state.displayPositions.set(key, latest);
       setInvestigationNodePosition(card, latest);
+      if (entityType === "investigation_node") renderInvestigationGroups();
       drawInvestigationEdges();
     };
     const onEnd = (endEvent) => {
@@ -1828,7 +1920,7 @@ async function commitInvestigationMove(entityType, entityId, from, to) {
 async function undoInvestigationMove() {
   if (state.investigationHistoryBusy || state.investigationUndo.length === 0) return;
   const entry = state.investigationUndo[state.investigationUndo.length - 1];
-  if (await applyInvestigationHistoryPosition(entry, entry.from)) {
+  if (await applyInvestigationHistoryAction(entry, "from")) {
     state.investigationUndo.pop();
     state.investigationRedo.push(entry);
   }
@@ -1838,26 +1930,41 @@ async function undoInvestigationMove() {
 async function redoInvestigationMove() {
   if (state.investigationHistoryBusy || state.investigationRedo.length === 0) return;
   const entry = state.investigationRedo[state.investigationRedo.length - 1];
-  if (await applyInvestigationHistoryPosition(entry, entry.to)) {
+  if (await applyInvestigationHistoryAction(entry, "to")) {
     state.investigationRedo.pop();
     state.investigationUndo.push(entry);
   }
   renderInvestigationControls();
 }
 
-async function applyInvestigationHistoryPosition(entry, position) {
+async function applyInvestigationHistoryAction(entry, direction) {
   state.investigationHistoryBusy = true;
   renderInvestigationControls();
-  const key = boardNodeKey(entry.entityType, entry.entityId);
-  state.displayPositions.set(key, { ...position });
-  const card = [...el["investigation-nodes"].children].find((candidate) => (
-    candidate.dataset.entityType === entry.entityType && candidate.dataset.entityId === entry.entityId
-  ));
-  if (card) setInvestigationNodePosition(card, position);
+  const moves = Array.isArray(entry.moves) ? entry.moves : [entry];
+  let allSaved = true;
+  for (const move of moves) {
+    const position = move[direction];
+    if (!position) {
+      allSaved = false;
+      break;
+    }
+    const key = boardNodeKey(move.entityType, move.entityId);
+    state.displayPositions.set(key, { ...position });
+    const card = [...el["investigation-nodes"].children].find((candidate) => (
+      candidate.dataset.entityType === move.entityType && candidate.dataset.entityId === move.entityId
+    ));
+    if (card) setInvestigationNodePosition(card, position);
+    const saved = await persistInvestigationPosition(move.entityType, move.entityId, position);
+    if (!saved) {
+      allSaved = false;
+      break;
+    }
+  }
+  renderInvestigationGroups();
+  syncInvestigationCanvasBounds();
   drawInvestigationEdges();
-  const saved = await persistInvestigationPosition(entry.entityType, entry.entityId, position);
   state.investigationHistoryBusy = false;
-  return Boolean(saved);
+  return allSaved;
 }
 
 function resetInvestigationHistory() {
@@ -2174,6 +2281,7 @@ async function persistInvestigationPosition(entityType, entityId, position) {
 function clearInvestigationBoard() {
   state.selectedInvestigationNodeId = null;
   state.displayPositions.clear();
+  el["investigation-groups"].replaceChildren();
   el["investigation-nodes"].replaceChildren();
   el["investigation-edges"].replaceChildren();
   renderInvestigationInspector();
@@ -2237,65 +2345,6 @@ function renderTaskCard(task) {
   return card;
 }
 
-function renderQuestCard(task) {
-  return isGroupTask(task.id) ? renderGroupCard(task) : renderTaskCard(task);
-}
-
-function renderGroupCard(task) {
-  const card = node("article", "task-card quest-group-card");
-  card.tabIndex = 0;
-  card.draggable = true;
-  card.dataset.taskId = task.id;
-
-  const head = node("div", "quest-group-head");
-  const identity = node("div", "quest-group-identity");
-  identity.append(node("span", "quest-group-kicker", "Group"), node("h3", "quest-group-title", task.title));
-  const detail = node("button", "quest-group-detail", "•••");
-  detail.type = "button";
-  detail.setAttribute("aria-label", `Open ${task.title} details`);
-  detail.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void openTask(task.id);
-  });
-  head.append(identity, detail);
-  card.append(head);
-  if (task.goal) card.append(node("p", "quest-group-goal", task.goal));
-
-  const progress = state.taskHierarchy?.progressByTask?.[task.id] ?? { total: 0, done: 0, active: 0, review: 0, blocked: 0 };
-  const stats = node("div", "quest-group-stats");
-  stats.append(node("span", "quest-group-progress", `${progress.done}/${progress.total} done`));
-  if (progress.blocked > 0) stats.append(node("span", "quest-group-signal blocked", `${progress.blocked} blocked`));
-  if (progress.review > 0) stats.append(node("span", "quest-group-signal review", `${progress.review} review`));
-  const unseen = unseenDoneDescendantCount(task.id);
-  if (unseen > 0) stats.append(node("span", "quest-group-signal new", `${unseen} New`));
-  card.append(stats);
-
-  const focus = groupFocusChild(task.id);
-  if (focus && focus.status !== "done") {
-    const focusRow = node("div", "quest-group-focus");
-    focusRow.append(node("span", "quest-group-focus-label", "Next"), node("span", "quest-group-focus-title", focus.title));
-    card.append(focusRow);
-  }
-  if (task.status === "done" && !state.seenDoneTaskIds.has(task.id)) {
-    card.classList.add("task-card-unseen-done");
-    card.append(node("span", "task-new-done", "New"));
-  }
-
-  card.addEventListener("click", () => setQuestScope(task.id));
-  card.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      setQuestScope(task.id);
-    }
-  });
-  card.addEventListener("dragstart", (event) => {
-    event.dataTransfer?.setData("text/questboard-task", task.id);
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-    card.classList.add("dragging");
-  });
-  card.addEventListener("dragend", () => card.classList.remove("dragging"));
-  return card;
-}
 
 async function moveTask(taskId, status) {
   const task = state.tasks.find((item) => item.id === taskId);
@@ -2629,7 +2678,7 @@ function renderWorkGroupSection(task) {
     groupSummary.append(node("span", "work-group-label", "This task is a group"), node("strong", "work-group-name", copy));
     const open = node("button", "button ghost compact", "Open group");
     open.type = "button";
-    open.addEventListener("click", () => setQuestScope(task.id));
+    open.addEventListener("click", () => void openTask(task.id));
     groupSummary.append(open);
     section.append(groupSummary);
   }
@@ -2644,7 +2693,7 @@ function renderWorkGroupSection(task) {
     const actions = node("div", "work-group-actions");
     const openParent = node("button", "button ghost compact", "Open");
     openParent.type = "button";
-    openParent.addEventListener("click", () => setQuestScope(parentBinding.parentTaskId));
+    openParent.addEventListener("click", () => void openTask(parentBinding.parentTaskId));
     const remove = node("button", "button ghost compact", "Remove");
     remove.type = "button";
     remove.addEventListener("click", () => void removeTaskFromGroup(task.id, parentBinding.relation.id));
@@ -2884,7 +2933,7 @@ async function createGroupAroundTask(taskId, title) {
       },
     });
     await loadBoard();
-    setQuestScope(group.id);
+    await openTask(group.id);
     toast("Group created");
   } catch (error) {
     fail(error);
@@ -2906,8 +2955,7 @@ function openTaskDialog(task = null) {
     toast("Create a project first", true);
     return;
   }
-  const scope = task ? null : taskById(state.questScopeTaskId);
-  el["task-dialog-title"].textContent = task ? "Edit task" : scope ? `New task · ${scope.title}` : "New task";
+  el["task-dialog-title"].textContent = task ? "Edit task" : "New task";
   el["task-id"].value = task?.id ?? "";
   el["task-title"].value = task?.title ?? "";
   el["task-description"].value = task?.description ?? "";
@@ -2932,7 +2980,6 @@ async function saveTask(event) {
     tags: el["task-tags"].value.split(",").map((tag) => tag.trim()).filter(Boolean),
   };
   try {
-    let createdTask = null;
     if (taskId) {
       await api(`/tasks/${encodeURIComponent(taskId)}`, {
         method: "PATCH",
@@ -2940,27 +2987,12 @@ async function saveTask(event) {
         body,
       });
     } else {
-      const created = await api("/tasks", { method: "POST", actor: true, body: { ...body, projectId: state.projectId } });
-      createdTask = created.task;
-      if (state.questScopeTaskId) {
-        await api("/relations", {
-          method: "POST",
-          actor: true,
-          body: {
-            fromType: "task",
-            fromId: state.questScopeTaskId,
-            toType: "task",
-            toId: createdTask.id,
-            kind: "contains",
-            label: "Created inside scoped Quest group",
-          },
-        });
-      }
+      await api("/tasks", { method: "POST", actor: true, body: { ...body, projectId: state.projectId } });
     }
     el["task-dialog"].close();
     await loadBoard();
     if (taskId && state.selectedTaskId === taskId) await openTask(taskId);
-    toast(taskId ? "Task updated" : state.questScopeTaskId ? "Task created in group" : "Task created");
+    toast(taskId ? "Task updated" : "Task created");
   } catch (error) {
     fail(error);
   }

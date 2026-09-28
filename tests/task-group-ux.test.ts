@@ -15,26 +15,37 @@ const html = readFileSync(resolve("web/index.html"), "utf8");
 const app = readFileSync(resolve("web/app.js"), "utf8");
 const css = readFileSync(resolve("web/styles.css"), "utf8");
 
-test("Quest Group Web scopes the board to direct children and keeps Group progress/read state derived", () => {
+test("Quest stays flat while Task hierarchy is projected as Flow groups", () => {
   assert.match(html, /id="quest-board"/);
-  assert.match(html, /id="quest-scope-bar"/);
+  assert.doesNotMatch(html, /id="quest-scope-bar"/);
+  assert.match(html, /id="investigation-groups"/);
+  assert.doesNotMatch(html, /id="investigation-groups"[^>]*aria-hidden/);
   assert.match(app, /api\(`\/projects\/\$\{encodeURIComponent\(state\.projectId\)\}\/task-hierarchy`\)/);
-  assert.match(app, /function questDirectTaskIds\(\)[\s\S]*rootTaskIds/);
-  assert.match(app, /if \(state\.questScopeTaskId\) return hierarchyChildren\(state\.questScopeTaskId\)/);
-  assert.match(app, /function renderQuestScopeBar\(\)/);
-  assert.match(app, /quest-breadcrumb/);
-  assert.match(app, /aria-label", "Quest group breadcrumb/);
-  assert.match(app, /function renderQuestCard\(task\)[\s\S]*renderGroupCard\(task\)/);
-  assert.match(app, /function renderGroupCard\(task\)/);
-  assert.match(app, /progress\.done[}\/$\s\{]*progress\.total|\$\{progress\.done\}\/\$\{progress\.total\} done/);
-  assert.match(app, /unseenDoneDescendantCount\(task\.id\)/);
-  assert.match(app, /groupFocusChild\(task\.id\)/);
-  assert.match(app, /relation\.kind === "next-task"/);
-  assert.match(app, /function shouldShowQuestTask\(task\)[\s\S]*hasOpenDescendant[\s\S]*unseenDoneDescendantCount/);
+  assert.doesNotMatch(app, /questScopeTaskId/);
+  assert.doesNotMatch(app, /function renderQuestScopeBar\(\)/);
+  assert.match(app, /const statusTasks = state\.tasks\.filter\(\(task\) => task\.status === status\)/);
+  assert.match(app, /tasks\.forEach\(\(task\) => list\.append\(renderTaskCard\(task\)\)\)/);
+  assert.match(app, /function investigationGroupTaskForNode\(nodeId\)/);
+  assert.match(app, /ancestryByTask/);
+  assert.match(app, /function renderInvestigationGroups\(\)/);
+  assert.match(app, /investigation-group-progress/);
+  assert.match(app, /investigation-group-goal/);
+  assert.match(app, /\(group\.goal \|\| ""\)\.trim\(\)/);
+  assert.match(app, /function attachInvestigationGroupDrag\(head, shell, nodeIds\)/);
+  assert.match(app, /state\.investigationZoom/);
+  assert.match(app, /shell\.style\.transform = `translate\(\$\{latestDx\}px, \$\{latestDy\}px\)`/);
+  assert.match(app, /function commitInvestigationGroupMove\(moves\)/);
+  assert.match(app, /persistInvestigationPosition\(move\.entityType, move\.entityId, move\.to\)/);
+  assert.match(app, /state\.investigationUndo\.push\(\{ moves: historyEntries \}\)/);
+  assert.match(app, /applyInvestigationHistoryAction\(entry, "from"\)/);
+  assert.match(app, /applyInvestigationHistoryAction\(entry, "to"\)/);
+  assert.match(app, /const moves = Array\.isArray\(entry\.moves\) \? entry\.moves : \[entry\]/);
   assert.match(css, /\.quest-board \{/);
-  assert.match(css, /\.quest-scope-bar \{/);
-  assert.match(css, /\.quest-group-card \{/);
-  assert.match(css, /\.quest-group-signal\.new/);
+  assert.doesNotMatch(css, /\.quest-scope-bar \{/);
+  assert.match(css, /\.investigation-groups \{/);
+  assert.match(css, /\.investigation-group \{/);
+  assert.match(css, /\.investigation-group-head[^}]*touch-action: none/);
+  assert.match(css, /\.investigation-group-goal \{/);
 });
 
 test("Quest Group Web exposes semantic membership actions without replacing generic Relations", () => {
@@ -47,7 +58,7 @@ test("Quest Group Web exposes semantic membership actions without replacing gene
   assert.match(app, /async function createGroupAroundTask\(taskId, title\)/);
   assert.match(app, /kind: "contains"/);
   assert.match(app, /api\(`\/relations\/\$\{encodeURIComponent\(relationId\)\}`[\s\S]*method: "DELETE"/);
-  assert.match(app, /state\.questScopeTaskId[\s\S]*label: "Created inside scoped Quest group"/);
+  assert.match(app, /await openTask\(group\.id\)/);
   assert.match(app, /detailsContent\.append\(summary, claimSection, evidenceSection, activitySection\)/);
   assert.match(css, /\.work-group-section/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.work-group-form \{ grid-template-columns: 1fr; \}/);
