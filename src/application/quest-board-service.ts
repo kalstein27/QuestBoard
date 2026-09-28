@@ -34,6 +34,13 @@ import {
 import type { ConcurrencyDiagnosticEvent, ConcurrencyDiagnosticSink } from "../observability/concurrency-log.js";
 import { NOOP_CONCURRENCY_DIAGNOSTIC_SINK } from "../observability/concurrency-log.js";
 import type { MutationRequest, QuestBoardRepository, TaskListFilter } from "./quest-board-repository.js";
+import type { TaskHierarchySnapshot } from "./task-hierarchy.js";
+import {
+  assertCanAddTaskHierarchyEdge,
+  buildTaskHierarchySnapshot,
+  canonicalTaskHierarchyRelation,
+  taskHierarchyEdgeFromRelation,
+} from "./task-hierarchy.js";
 
 const MAX_INTERNAL_UPDATE_ATTEMPTS = 4;
 
@@ -442,6 +449,15 @@ export class QuestBoardService {
     return this.repository.listTasks(filter);
   }
 
+  getTaskHierarchy(projectId: string): TaskHierarchySnapshot {
+    this.getProject(projectId);
+    return buildTaskHierarchySnapshot(
+      projectId,
+      this.repository.listTasks({ projectId }),
+      this.repository.listProjectRelations(projectId),
+    );
+  }
+
   updateTask(taskId: string, patch: UpdateTaskInput, actor: ActorRef, options: MutationOptions = {}): Task {
     const explicitExpectedRevision = patch.expectedRevision === undefined
       ? undefined
@@ -748,25 +764,39 @@ export class QuestBoardService {
 
   createRelation(input: CreateRelationInput, actor: ActorRef, options: MutationOptions = {}): Relation {
     return this.runMutation("relation.create", actor, options, input, undefined, () => {
-      if (input.fromType === input.toType && input.fromId === input.toId) {
+      const kind = requiredText(input.kind, "Relation kind");
+      const canonicalHierarchy = canonicalTaskHierarchyRelation({ ...input, kind });
+      const normalizedInput: CreateRelationInput = canonicalHierarchy
+        ? { ...canonicalHierarchy, ...(input.label !== undefined ? { label: input.label } : {}) }
+        : { ...input, kind };
+
+      if (normalizedInput.fromType === normalizedInput.toType && normalizedInput.fromId === normalizedInput.toId) {
         throw new TypeError("Relation endpoints must be different");
       }
 
-      const from = this.resolveRelationEndpoint(input.fromType, input.fromId);
-      const to = this.resolveRelationEndpoint(input.toType, input.toId);
+      const from = this.resolveRelationEndpoint(normalizedInput.fromType, normalizedInput.fromId);
+      const to = this.resolveRelationEndpoint(normalizedInput.toType, normalizedInput.toId);
       if (from.projectId !== to.projectId) {
         throw new TypeError("Relation endpoints must belong to the same project");
+      }
+
+      if (canonicalHierarchy) {
+        assertCanAddTaskHierarchyEdge(
+          canonicalHierarchy.fromId,
+          canonicalHierarchy.toId,
+          this.repository.listProjectRelations(from.projectId),
+        );
       }
 
       const timestamp = this.now();
       const relation: Relation = {
         id: this.newId(),
         projectId: from.projectId,
-        fromType: input.fromType,
-        fromId: input.fromId,
-        toType: input.toType,
-        toId: input.toId,
-        kind: requiredText(input.kind, "Relation kind"),
+        fromType: normalizedInput.fromType,
+        fromId: normalizedInput.fromId,
+        toType: normalizedInput.toType,
+        toId: normalizedInput.toId,
+        kind: normalizedInput.kind,
         label: input.label?.trim() ?? "",
         createdBy: actor.id,
         createdAt: timestamp,
@@ -1189,10 +1219,9 @@ export class QuestBoardService {
     for (const relation of this.repository.listTaskRelations(task.id)) {
       if (relation.fromType !== "task" || relation.toType !== "task") continue;
 
-      if (relation.kind === "part-of" && relation.toId === task.id) {
-        childTaskIds.add(relation.fromId);
-      } else if (relation.kind === "contains" && relation.fromId === task.id) {
-        childTaskIds.add(relation.toId);
+      const hierarchyEdge = taskHierarchyEdgeFromRelation(relation);
+      if (hierarchyEdge?.parentTaskId === task.id) {
+        childTaskIds.add(hierarchyEdge.childTaskId);
       } else if (relation.kind === "next-task" && relation.fromId === task.id) {
         explicitNextTaskIds.add(relation.toId);
       }

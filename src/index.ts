@@ -8,6 +8,7 @@ export * from "./application/code-map-service.js";
 export * from "./application/code-map-investigation-sync.js";
 export * from "./application/quest-board-repository.js";
 export * from "./application/quest-board-service.js";
+export * from "./application/task-hierarchy.js";
 export * from "./storage/sqlite/sqlite-quest-board-repository.js";
 export * from "./server/http-api.js";
 export * from "./adapters/agent-tools.js";

@@ -158,7 +158,7 @@ Keep handoffs short and operational. Conceptually, a useful resume capsule answe
 - **Evidence**: only the tests/logs/screenshots/operations needed to trust the current state;
 - **Guardrail**: only when a constraint or "do not repeat" fact must survive the handoff.
 
-Do not fill every field mechanically. Leave the smallest capsule that lets the next session act correctly. Activity, Artifacts, Relations, Investigation, and Code Map are drill-down context, not a mandatory pre-read bundle. `nextTaskId` is derived rather than persisted as a second workflow state: when `Next` is explicitly recorded, the parent has a `next-task` relation to a canonical child represented by `part-of` / `contains`, and exactly one such non-done child is selected, Resume may expose that child's id; missing, stale, non-child, or ambiguous pointers are omitted fail-closed.
+Do not fill every field mechanically. Leave the smallest capsule that lets the next session act correctly. Activity, Artifacts, Relations, Investigation, and Code Map are drill-down context, not a mandatory pre-read bundle. Task hierarchy membership is canonicalized as `contains` from parent → child for new writes; compatibility reads still accept legacy `part-of` and `part_of` child → parent relations. `nextTaskId` is derived rather than persisted as a second workflow state: when `Next` is explicitly recorded, the parent has a `next-task` relation to exactly one active canonical child in that normalized hierarchy, Resume may expose that child's id; missing, stale, non-child, done, or ambiguous pointers are omitted fail-closed.
 
 Do not put secrets into Activity text or Artifact locators.
 
