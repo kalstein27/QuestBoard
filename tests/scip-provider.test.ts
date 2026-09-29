@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -66,7 +66,10 @@ const fixture = JSON.stringify({
 
 test("SCIP TypeScript provider keeps index.scip outside the repository and normalizes the bundled decoder result", async () => {
   const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-"));
+  const projectRoot = mkdtempSync(join(tmpdir(), "questboard-scip-project-"));
   try {
+    writeFileSync(join(projectRoot, "tsconfig.json"), JSON.stringify({ include: ["src/**/*.ts"] }));
+    writeFileSync(join(projectRoot, "app.js"), "function browserEntry() { return 1; }\n");
     const runner = new FakeRunner([success()]);
     const provider = new ScipTypeScriptCodeIntelligenceProvider(runner, {
       storageRoot,
@@ -77,7 +80,7 @@ test("SCIP TypeScript provider keeps index.scip outside the repository and norma
 
     const graph = await provider.indexProject({
       projectId: "questboard",
-      rootPath: "/workspace/questboard",
+      rootPath: projectRoot,
     });
 
     assert.equal(graph.nodes.length, 1);
@@ -86,12 +89,19 @@ test("SCIP TypeScript provider keeps index.scip outside the repository and norma
     assert.deepEqual(runner.calls[0]?.args.slice(0, 2), ["index", "--output"]);
     const outputPath = runner.calls[0]?.args[2] ?? "";
     assert.ok(outputPath.startsWith(storageRoot));
-    assert.equal(outputPath.startsWith("/workspace/questboard"), false);
+    assert.equal(outputPath.startsWith(projectRoot), false);
     assert.equal(outputPath.endsWith("/index.scip"), true);
-    assert.equal(runner.calls[0]?.options.cwd, "/workspace/questboard");
-    assert.equal(runner.calls.length, 1, "provider should not require a separate scip CLI print step");
+    assert.equal(runner.calls[0]?.options.cwd, projectRoot);
+    assert.equal(runner.calls[0]?.args[3], ".");
+    const overlayPath = runner.calls[0]?.args[4] ?? "";
+    assert.equal(overlayPath.endsWith("/javascript-overlay.tsconfig.json"), true);
+    const overlay = JSON.parse(readFileSync(overlayPath, "utf8")) as { compilerOptions?: { allowJs?: boolean }; files?: string[] };
+    assert.equal(overlay.compilerOptions?.allowJs, true);
+    assert.deepEqual(overlay.files, [join(projectRoot, "app.js")]);
+    assert.equal(runner.calls.length, 1, "provider should keep TypeScript and JavaScript indexing in one SCIP command");
   } finally {
     rmSync(storageRoot, { recursive: true, force: true });
+    rmSync(projectRoot, { recursive: true, force: true });
   }
 });
 

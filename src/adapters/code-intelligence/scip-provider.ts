@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,6 +10,8 @@ import type {
   CodeIntelligenceCapabilities,
   CodeIntelligenceProvider,
 } from "../../application/code-intelligence.js";
+import { inferCodeLanguageFromPath } from "../../application/code-map-hierarchy.js";
+import { FileSystemCodeFileInventory } from "./file-inventory.js";
 import { normalizeScipGraph, parseScipJsonIndex, type ScipJsonIndex } from "./scip-normalizer.js";
 
 export interface ScipProcessRunOptions {
@@ -172,6 +174,35 @@ function indexDirectory(storageRoot: string, request: CodeIndexRequest): string 
   return join(storageRoot, `${request.projectId.replace(/[^A-Za-z0-9._-]/g, "_")}-${digest}`);
 }
 
+async function writeJavaScriptOverlayProject(
+  outputDirectory: string,
+  request: CodeIndexRequest,
+): Promise<string | undefined> {
+  if (!existsSync(request.rootPath)) return undefined;
+  const inventory = await new FileSystemCodeFileInventory().listFiles(request.rootPath);
+  const files = inventory
+    .filter((entry) => inferCodeLanguageFromPath(entry.path) === "javascript")
+    .map((entry) => resolve(request.rootPath, entry.path));
+  if (files.length === 0) return undefined;
+
+  const configPath = join(outputDirectory, "javascript-overlay.tsconfig.json");
+  writeFileSync(
+    configPath,
+    `${JSON.stringify({
+      compilerOptions: {
+        allowJs: true,
+        checkJs: false,
+        noEmit: true,
+        skipLibCheck: true,
+      },
+      files,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  return configPath;
+}
+
+
 function readIndexedSourceText(rootPath: string, index: ScipJsonIndex): ReadonlyMap<string, string> {
   const root = resolve(rootPath);
   const sources = new Map<string, string>();
@@ -216,10 +247,12 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
     const outputDirectory = indexDirectory(this.#storageRoot, request);
     const indexPath = join(outputDirectory, "index.scip");
     mkdirSync(dirname(indexPath), { recursive: true });
+    const javascriptOverlayProject = await writeJavaScriptOverlayProject(outputDirectory, request);
+    const projectArgs = javascriptOverlayProject ? [".", javascriptOverlayProject] : [];
 
     await this.#runner.run(
       this.#indexerExecutable,
-      ["index", "--output", indexPath],
+      ["index", "--output", indexPath, ...projectArgs],
       { cwd: request.rootPath },
     );
     const index = await this.#indexReader.read(indexPath);

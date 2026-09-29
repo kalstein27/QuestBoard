@@ -151,6 +151,18 @@ function normalizeText(value: string | undefined): string | undefined {
   return normalized || undefined;
 }
 
+function normalizedNodeLanguage(node: CodeNode): string {
+  return node.language?.trim().toLocaleLowerCase() || "unknown";
+}
+
+function queryMatchRank(node: CodeNode, query: string): number {
+  const name = node.name.toLocaleLowerCase();
+  if (name === query) return 0;
+  if (name.startsWith(query)) return 1;
+  if (name.includes(query)) return 2;
+  return 3;
+}
+
 function requireKnownNodeKind(value: string): asserts value is CodeNodeKind {
   if (!(CODE_NODE_KINDS as readonly string[]).includes(value)) {
     throw new CodeMapQueryError("code_map_query_invalid", `Unknown code node kind: ${value}`);
@@ -177,6 +189,34 @@ function relationSort(left: CodeRelation, right: CodeRelation): number {
     || left.from.localeCompare(right.from)
     || left.to.localeCompare(right.to)
     || left.id.localeCompare(right.id);
+}
+
+const NAVIGATION_RELATION_PRIORITY: Record<CodeRelationKind, number> = {
+  calls: 0,
+  contains: 0,
+  implements: 1,
+  overrides: 1,
+  extends: 1,
+  instantiates: 1,
+  imports: 2,
+  references_type: 2,
+  reads: 3,
+  writes: 3,
+  depends_on: 4,
+  unknown: 5,
+};
+
+function adjacentRelationSort(
+  nodeId: string,
+  nodeById: ReadonlyMap<string, CodeNode>,
+  left: CodeRelation,
+  right: CodeRelation,
+): number {
+  const leftNode = nodeById.get(otherNodeId(left, nodeId));
+  const rightNode = nodeById.get(otherNodeId(right, nodeId));
+  return NAVIGATION_RELATION_PRIORITY[left.kind] - NAVIGATION_RELATION_PRIORITY[right.kind]
+    || (leftNode && rightNode ? nodeSort(leftNode, rightNode) : 0)
+    || relationSort(left, right);
 }
 
 function requireNodeById(graph: CodeGraphSnapshot, nodeId: string | undefined): CodeNode {
@@ -274,9 +314,9 @@ export function queryCodeGraph(
           || node.name.toLocaleLowerCase().includes(query)
           || node.canonicalIdentity.toLocaleLowerCase().includes(query))
         .filter((node) => !path || node.location?.path.toLocaleLowerCase().includes(path))
-        .filter((node) => !language || node.language?.toLocaleLowerCase() === language)
+        .filter((node) => !language || normalizedNodeLanguage(node) === language)
         .filter((node) => !kindSet || kindSet.has(node.kind))
-        .sort(nodeSort);
+        .sort((left, right) => (query ? queryMatchRank(left, query) - queryMatchRank(right, query) : 0) || nodeSort(left, right));
       return {
         ...envelope,
         operation: "find_nodes",
@@ -312,7 +352,7 @@ export function queryCodeGraph(
             : hierarchyDirection === "parents"
               ? relation.to === current.nodeId
               : relation.from === current.nodeId)
-          .sort(relationSort);
+          .sort((left, right) => adjacentRelationSort(current.nodeId, nodeById, left, right));
         for (const relation of relations) {
           const nextId = otherNodeId(relation, current.nodeId);
           if (visited.has(nextId)) continue;
@@ -422,7 +462,7 @@ export function queryCodeGraph(
           .filter((relation) => relation.from === current.nodeId || relation.to === current.nodeId)
           .filter((relation) => directionAllows(relation, current.nodeId, direction))
           .filter((relation) => !kindSet || kindSet.has(relation.kind))
-          .sort(relationSort);
+          .sort((left, right) => adjacentRelationSort(current.nodeId, nodeById, left, right));
         for (const relation of adjacent) {
           if (selectedRelations.size >= limit || orderedNodeIds.length >= limit) {
             truncated = true;

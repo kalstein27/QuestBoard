@@ -32,6 +32,7 @@ function fixtureGraph(projectId = "questboard", rootPath = "/workspace/questboar
       { id: "file-caller", kind: "file", name: "caller.ts", canonicalIdentity: "file:src/caller.ts", language: "typescript", location: { path: "src/caller.ts" } },
       { id: "function-caller", kind: "function", name: "invokeService", canonicalIdentity: "scip:invokeService().", language: "typescript", location: { path: "src/caller.ts", startLine: 1, endLine: 5 } },
       { id: "config", kind: "variable", name: "config", canonicalIdentity: "scip:config.", language: "typescript", location: { path: "src/service.ts", startLine: 14 } },
+      { id: "file-readme", kind: "file", name: "README.md", canonicalIdentity: "file:README.md", location: { path: "README.md" } },
     ],
     relations: [
       { id: "contains-file-class", from: "file-service", to: "class-service", kind: "contains", confidence: 1 },
@@ -85,6 +86,15 @@ test("bounded Code Map queries navigate definition, hierarchy, callers, callees,
     ["file-service", 2],
   ]);
 
+  const children = queryCodeGraph(graph, "query-test-provider", {
+    operation: "hierarchy",
+    nodeId: "class-service",
+    direction: "children",
+    depth: 1,
+  });
+  assert.equal(children.operation, "hierarchy");
+  assert.deepEqual(children.entries.map((entry) => entry.node.id), ["method-run", "method-helper"]);
+
   const callers = queryCodeGraph(graph, "query-test-provider", {
     operation: "relations",
     nodeId: "method-run",
@@ -109,6 +119,46 @@ test("bounded Code Map queries navigate definition, hierarchy, callers, callees,
   });
   assert.equal(references.operation, "relations");
   assert.deepEqual(references.entries.map((entry) => entry.node.id), ["config"]);
+});
+
+test("find_nodes normalizes unknown language and ranks exact names ahead of enclosing canonical matches", () => {
+  const graph = fixtureGraph();
+  const unknown = queryCodeGraph(graph, "query-test-provider", {
+    operation: "find_nodes",
+    language: "unknown",
+  });
+  assert.equal(unknown.operation, "find_nodes");
+  assert.deepEqual(unknown.nodes.map((node) => node.id), ["file-readme"]);
+
+  const ranked = queryCodeGraph(graph, "query-test-provider", {
+    operation: "find_nodes",
+    query: "Service",
+    limit: 5,
+  });
+  assert.equal(ranked.operation, "find_nodes");
+  assert.equal(ranked.nodes[0]?.id, "class-service");
+});
+
+test("neighborhood keeps broad depends_on edges behind more useful navigation relations", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    { id: "dependency-noise", kind: "type", name: "DependencyNoise", canonicalIdentity: "scip:DependencyNoise#", language: "typescript", location: { path: "src/noise.ts", startLine: 1 } },
+  ];
+  graph.relations = [
+    ...graph.relations,
+    { id: "dependency-noise-edge", from: "method-run", to: "dependency-noise", kind: "depends_on", confidence: 0.9 },
+  ];
+
+  const neighborhood = queryCodeGraph(graph, "query-test-provider", {
+    operation: "neighborhood",
+    nodeId: "method-run",
+    direction: "outgoing",
+    depth: 1,
+    limit: 3,
+  });
+  assert.equal(neighborhood.operation, "neighborhood");
+  assert.deepEqual(neighborhood.nodes.map((node) => node.id), ["method-run", "method-helper", "config"]);
 });
 
 test("Code Map query limits are hard bounded and ambiguous search stays explicit", () => {

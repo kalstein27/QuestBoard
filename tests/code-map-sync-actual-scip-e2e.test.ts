@@ -81,6 +81,10 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     assert.equal(indexed.body.projection.relations.length, 5);
     const groupedNode = (indexed.body.graph.nodes as Array<{ id: string; name: string }>).find((node) => node.name === "createQuestBoardHttpServer");
     assert.ok(groupedNode, "actual SCIP graph should expose createQuestBoardHttpServer for Work Group aggregation proof");
+    const javascriptNode = (indexed.body.graph.nodes as Array<{ name: string; location?: { path?: string } }>).find(
+      (node) => node.name === "bindEvents" && node.location?.path === "web/app.js",
+    );
+    assert.ok(javascriptNode, "actual SCIP graph should semantically index JavaScript from web/app.js");
     const groupTask = service.createTask({ projectId: project.id, title: "HTTP Work Group", status: "in_progress" }, actor);
     const groupChild = service.createTask({ projectId: project.id, title: "HTTP scoped child", status: "ready" }, actor);
     service.createRelation({
