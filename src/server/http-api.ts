@@ -114,7 +114,7 @@ async function handleRequest(
     const args = requireObjectValue(body.arguments ?? {}, "arguments");
     try {
       sendJson(response, 200, {
-        result: executeQuestBoardAgentTool(
+        result: await executeQuestBoardAgentTool(
           {
             service,
             ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
@@ -143,7 +143,7 @@ async function handleRequest(
     requireDaemonClient(request);
     const body = await readJsonObject(request);
     const sessionId = requireString(body, "sessionId");
-    const mcpResponse = createQuestBoardMcpHandler(
+    const mcpResponse = await createQuestBoardMcpHandler(
       {
         service,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
@@ -164,6 +164,46 @@ async function handleRequest(
       sendNoContent(response);
     } else {
       sendJson(response, 200, mcpResponse);
+    }
+    return;
+  }
+
+  const codeMapStatusMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/status$/);
+  if (codeMapStatusMatch && method === "GET") {
+    const projectId = decodePathPart(codeMapStatusMatch[1]);
+    sendJson(response, 200, await executeQuestBoardAgentTool(
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      },
+      "questboard_get_code_map_status",
+      { projectId },
+    ));
+    return;
+  }
+
+  const codeMapRefreshMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/refresh$/);
+  if (codeMapRefreshMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapRefreshMatch[1]);
+    try {
+      sendJson(response, 200, await executeQuestBoardAgentTool(
+        {
+          service,
+          ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+        },
+        "questboard_refresh_code_map",
+        { projectId },
+      ));
+    } catch (error) {
+      const described = describeQuestBoardError(error);
+      const statusCode = described.code === "not_found"
+        ? 404
+        : described.code === "code_map_root_missing"
+          ? 409
+          : described.code === "code_map_query_unavailable" || described.code === "code_map_provider_failed"
+            ? 503
+            : 400;
+      sendJson(response, statusCode, { error: described });
     }
     return;
   }

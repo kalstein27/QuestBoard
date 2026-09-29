@@ -41,7 +41,7 @@ import {
   type CodeMapInvestigationSyncService,
 } from "../application/code-map-investigation-sync.js";
 import { CODE_NODE_KINDS, CODE_RELATION_KINDS } from "../application/code-intelligence.js";
-import type { CodeMapService } from "../application/code-map-service.js";
+import type { CodeMapRefreshResult, CodeMapService } from "../application/code-map-service.js";
 import { CodeMapAugmentationError, type CodeMapAugmentationService } from "../application/code-map-augmentation.js";
 import {
   CODE_SCOPE_BINDING_KINDS,
@@ -792,6 +792,30 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_get_code_map_status",
+    description: "Read bounded Code Map lifecycle status for one project, including indexing/provider state without returning the full graph.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_refresh_code_map",
+    description: "Run a fresh full Code Map index for one project's canonical rootPath and return only a bounded refresh summary. Provider installation is never triggered.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
     name: "questboard_get_code_map_provider_capabilities",
     description: "Read the shared Code Map provider registry and per-language coverage gaps. Reports trusted install options without installing anything.",
     inputSchema: {
@@ -1365,6 +1389,12 @@ export function executeQuestBoardAgentTool(
           codeMapQueryInput(args),
         ),
       };
+    case "questboard_get_code_map_status":
+      return {
+        codeMap: codeMapAgentStatus(context, service, requireString(args, "projectId")),
+      };
+    case "questboard_refresh_code_map":
+      return refreshCodeMapForAgent(context, service, requireString(args, "projectId"));
     case "questboard_get_code_map_provider_capabilities":
       return {
         capabilities: requireCodeMapService(context).providerCapabilities(requireString(args, "projectId")),
@@ -1558,6 +1588,69 @@ export function describeQuestBoardError(error: unknown): { code: string; message
 function normalizeAgentToolRuntime(runtime: QuestBoardAgentToolRuntime): QuestBoardAgentToolContext {
   if ("service" in runtime) return runtime;
   return { service: runtime };
+}
+
+function codeMapAgentStatus(
+  context: QuestBoardAgentToolContext,
+  service: QuestBoardService,
+  projectId: string,
+): Record<string, unknown> {
+  const project = service.getProject(projectId);
+  const codeMap = context.codeMapService;
+  const cached = codeMap?.getCached(projectId);
+  const providerCapabilities = codeMap?.providerCapabilities(projectId);
+  return {
+    projectId,
+    enabled: Boolean(codeMap),
+    available: Boolean(codeMap),
+    rootPathConfigured: Boolean(project.rootPath),
+    indexed: Boolean(cached),
+    ...(codeMap ? { provider: codeMap.providerId, capabilities: codeMap.capabilities } : {}),
+    ...(cached
+      ? {
+          indexedAt: cached.graph.indexedAt,
+          nodeCount: cached.graph.nodes.length,
+          relationCount: cached.graph.relations.length,
+        }
+      : {}),
+    ...(providerCapabilities ? { providerCapabilities } : {}),
+  };
+}
+
+async function refreshCodeMapForAgent(
+  context: QuestBoardAgentToolContext,
+  service: QuestBoardService,
+  projectId: string,
+): Promise<{ refresh: Record<string, unknown> }> {
+  const project = service.getProject(projectId);
+  const codeMap = requireCodeMapService(context);
+  if (!project.rootPath) {
+    throw new QuestBoardRemoteToolError(
+      "code_map_root_missing",
+      "Project rootPath is required before indexing Code Map",
+    );
+  }
+  let refreshed: CodeMapRefreshResult;
+  try {
+    refreshed = await codeMap.refresh({ projectId, rootPath: project.rootPath });
+  } catch {
+    throw new QuestBoardRemoteToolError(
+      "code_map_provider_failed",
+      `Code Map provider ${codeMap.providerId} failed to index this project`,
+    );
+  }
+  return {
+    refresh: {
+      projectId,
+      provider: codeMap.providerId,
+      mode: refreshed.mode,
+      indexedAt: refreshed.graph.indexedAt,
+      nodeCount: refreshed.graph.nodes.length,
+      relationCount: refreshed.graph.relations.length,
+      changedCodeNodeCount: refreshed.changedCodeNodeIds.length,
+      changedArchitectureNodeCount: refreshed.changedArchitectureNodeIds.length,
+    },
+  };
 }
 
 function requireCodeMapService(context: QuestBoardAgentToolContext): CodeMapService {

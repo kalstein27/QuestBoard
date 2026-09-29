@@ -67,7 +67,7 @@ interface JsonRpcError {
 export type JsonRpcResponse = JsonRpcSuccess | JsonRpcError;
 
 export interface QuestBoardMcpHandler {
-  handle(message: unknown): JsonRpcResponse | null;
+  handle(message: unknown): JsonRpcResponse | null | Promise<JsonRpcResponse | null>;
 }
 
 export function createQuestBoardMcpHandler(
@@ -75,7 +75,7 @@ export function createQuestBoardMcpHandler(
   sessionId: string = randomUUID(),
 ): QuestBoardMcpHandler {
   return {
-    handle(message: unknown): JsonRpcResponse | null {
+    handle(message: unknown): JsonRpcResponse | null | Promise<JsonRpcResponse | null> {
       let request: JsonRpcRequest;
       try {
         request = parseRequest(message);
@@ -89,12 +89,13 @@ export function createQuestBoardMcpHandler(
         }
         return null;
       }
+      const requestId = request.id;
 
       try {
         switch (request.method) {
           case "initialize": {
             optionalObject(request.params);
-            return rpcSuccess(request.id, {
+            return rpcSuccess(requestId, {
               protocolVersion: SUPPORTED_PROTOCOL_VERSION,
               capabilities: { tools: { listChanged: false } },
               serverInfo: { name: "questboard", version: "0.0.0" },
@@ -102,30 +103,36 @@ export function createQuestBoardMcpHandler(
             });
           }
           case "ping":
-            return rpcSuccess(request.id, {});
+            return rpcSuccess(requestId, {});
           case "tools/list":
-            return rpcSuccess(request.id, { tools: QUESTBOARD_AGENT_TOOLS });
+            return rpcSuccess(requestId, { tools: QUESTBOARD_AGENT_TOOLS });
           case "tools/call": {
             const params = requireObject(request.params, "tools/call params");
             const name = requireText(params.name, "tool name");
             const rawArgs = requireObject(params.arguments ?? {}, "tool arguments");
             const args = MUTATING_TOOLS.has(name) && rawArgs.requestId === undefined
-              ? { ...rawArgs, requestId: automaticMutationRequestId(sessionId, request.id, name, rawArgs) }
+              ? { ...rawArgs, requestId: automaticMutationRequestId(sessionId, requestId, name, rawArgs) }
               : rawArgs;
             try {
               const result = executeQuestBoardAgentTool(runtime, name, args);
-              return rpcSuccess(request.id, toolResult(result));
+              if (isPromiseLike(result)) {
+                return result.then(
+                  (resolved) => rpcSuccess(requestId, toolResult(resolved)),
+                  (error) => rpcSuccess(requestId, toolError(describeQuestBoardError(error))),
+                );
+              }
+              return rpcSuccess(requestId, toolResult(result));
             } catch (error) {
               const described = describeQuestBoardError(error);
-              return rpcSuccess(request.id, toolError(described));
+              return rpcSuccess(requestId, toolError(described));
             }
           }
           default:
-            return rpcError(request.id, -32601, `Method not found: ${request.method}`);
+            return rpcError(requestId, -32601, `Method not found: ${request.method}`);
         }
       } catch (error) {
         return rpcError(
-          request.id,
+          requestId,
           -32602,
           error instanceof Error ? error.message : "Invalid method parameters",
         );
@@ -151,9 +158,13 @@ export async function runQuestBoardMcpStdio(
       writeMessage(output, rpcError(null, -32700, "Parse error"));
       continue;
     }
-    const response = handler.handle(message);
+    const response = await handler.handle(message);
     if (response) writeMessage(output, response);
   }
+}
+
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return value instanceof Promise;
 }
 
 function parseRequest(message: unknown): JsonRpcRequest {
