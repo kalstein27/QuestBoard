@@ -71,6 +71,12 @@
             <span id="workspace-context">Work queue</span>
           </div>
           <div class="toolbar">
+            <div id="agent-focus-control" class="agent-focus-control hidden" aria-label="Agent focus controls">
+              <span id="agent-focus-status" class="agent-focus-status">Watching</span>
+              <button id="agent-focus-follow" class="button secondary compact" type="button">Follow</button>
+              <button id="agent-focus-free" class="button ghost compact" type="button">Free</button>
+              <button id="agent-focus-return" class="button ghost compact" type="button">Return to agent</button>
+            </div>
             <label id="hide-completed-control" class="quest-done-filter" title="Hide reviewed completed tasks on this device">
               <input id="hide-completed-toggle" type="checkbox" checked />
               <span>Hide completed</span>
@@ -123,6 +129,8 @@
                 <button id="investigation-zoom-in" class="investigation-control-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
                 <span class="investigation-control-divider" aria-hidden="true"></span>
                 <button id="investigation-fit" class="investigation-fit-button" type="button" title="Fit nodes to view">Fit</button>
+                <span class="investigation-control-divider" aria-hidden="true"></span>
+                <button id="investigation-code-lens" class="investigation-fit-button" type="button" aria-pressed="false" title="Show CodeScopes related to Flow work">Show code</button>
               </div>
               <div id="investigation-canvas" class="investigation-canvas">
                 <div id="investigation-groups" class="investigation-groups"></div>
@@ -143,8 +151,14 @@
             <div id="code-map-board" class="code-map-board hidden" aria-label="Code">
               <div class="code-map-toolbar">
                 <div class="code-map-heading">
-                  <strong>Architecture</strong>
+                  <button id="code-map-back" class="code-map-back" type="button" aria-label="Go back in Code navigation" title="Back" disabled>←</button>
+                  <strong>Source explorer</strong>
                   <span id="code-map-status" class="code-map-status"></span>
+                </div>
+                <div class="code-map-search-controls" role="search" aria-label="Search Code Map">
+                  <input id="code-map-search" type="search" placeholder="Symbol or path" autocomplete="off" aria-label="Search symbol or path" />
+                  <select id="code-map-kind-filter" aria-label="Filter by code kind"><option value="">All kinds</option></select>
+                  <select id="code-map-language-filter" aria-label="Filter by language"><option value="">All languages</option></select>
                 </div>
               </div>
               <div id="code-map-content" class="code-map-content"></div>

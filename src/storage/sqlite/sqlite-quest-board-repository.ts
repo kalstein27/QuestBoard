@@ -45,6 +45,14 @@ import type {
   CodeMapInvestigationNodeBinding,
   CodeMapInvestigationRelationBinding,
 } from "../../application/code-map-investigation-sync.js";
+import {
+  assertCodeMapManualRelationRevision,
+  type CodeMapManualRelation,
+} from "../../application/code-map-augmentation.js";
+import {
+  assertTaskCodeScopeBindingRevision,
+  type TaskCodeScopeBinding,
+} from "../../application/code-scope-binding.js";
 
 type ProjectRow = {
   id: string;
@@ -232,6 +240,47 @@ type CodeMapInvestigationRelationBindingRow = {
   first_synced_at: string;
   last_synced_at: string;
 };
+
+type CodeMapManualRelationRow = {
+  id: string;
+  project_id: string;
+  from_code_node_id: string;
+  from_canonical_identity: string;
+  to_code_node_id: string;
+  to_canonical_identity: string;
+  relation_kind: CodeMapManualRelation["relationKind"];
+  label: string;
+  rationale: string;
+  provenance: "manual";
+  created_by: string;
+  created_by_provider: string;
+  created_at: string;
+  updated_by: string;
+  updated_by_provider: string;
+  updated_at: string;
+  revision: number;
+};
+type TaskCodeScopeBindingRow = {
+  id: string;
+  project_id: string;
+  task_id: string;
+  code_node_id: string;
+  code_canonical_identity: string;
+  code_kind: TaskCodeScopeBinding["codeKind"] | null;
+  code_language: string | null;
+  code_path: string | null;
+  code_signature: string | null;
+  code_name: string | null;
+  kind: TaskCodeScopeBinding["kind"];
+  created_by: string;
+  created_by_provider: string;
+  created_at: string;
+  updated_by: string;
+  updated_by_provider: string;
+  updated_at: string;
+  revision: number;
+};
+
 
 export class SqliteQuestBoardRepository implements QuestBoardRepository {
   private readonly db: DatabaseSync;
@@ -921,6 +970,140 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       .run(projectId, codeRelationId);
   }
 
+  createCodeMapManualRelation(relation: CodeMapManualRelation): CodeMapManualRelation {
+    this.db.prepare(`
+      INSERT INTO code_map_manual_relations (
+        id, project_id, from_code_node_id, from_canonical_identity,
+        to_code_node_id, to_canonical_identity, relation_kind, label, rationale, provenance,
+        created_by, created_by_provider, created_at, updated_by, updated_by_provider, updated_at, revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      relation.id, relation.projectId, relation.fromCodeNodeId, relation.fromCanonicalIdentity,
+      relation.toCodeNodeId, relation.toCanonicalIdentity, relation.relationKind, relation.label, relation.rationale,
+      relation.provenance, relation.createdBy, relation.createdByProvider, relation.createdAt,
+      relation.updatedBy, relation.updatedByProvider, relation.updatedAt, relation.revision,
+    );
+    return this.getCodeMapManualRelation(relation.id)!;
+  }
+
+  getCodeMapManualRelation(relationId: string): CodeMapManualRelation | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM code_map_manual_relations WHERE id = ?")
+      .get(relationId) as CodeMapManualRelationRow | undefined;
+    return row ? mapCodeMapManualRelation(row) : undefined;
+  }
+
+  listCodeMapManualRelations(projectId: string): CodeMapManualRelation[] {
+    return (this.db
+      .prepare("SELECT * FROM code_map_manual_relations WHERE project_id = ? ORDER BY created_at ASC, id ASC")
+      .all(projectId) as CodeMapManualRelationRow[]).map(mapCodeMapManualRelation);
+  }
+
+  updateCodeMapManualRelation(relation: CodeMapManualRelation, expectedRevision: number): CodeMapManualRelation {
+    const current = this.getCodeMapManualRelation(relation.id);
+    if (!current) throw new EntityNotFoundError("Code Map manual relation", relation.id);
+    assertCodeMapManualRelationRevision(current, expectedRevision);
+    const result = this.db.prepare(`
+      UPDATE code_map_manual_relations
+      SET from_code_node_id = ?, from_canonical_identity = ?,
+          to_code_node_id = ?, to_canonical_identity = ?, relation_kind = ?,
+          label = ?, rationale = ?, updated_by = ?, updated_by_provider = ?, updated_at = ?, revision = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      relation.fromCodeNodeId, relation.fromCanonicalIdentity, relation.toCodeNodeId, relation.toCanonicalIdentity,
+      relation.relationKind, relation.label, relation.rationale, relation.updatedBy, relation.updatedByProvider,
+      relation.updatedAt, relation.revision, relation.id, expectedRevision,
+    );
+    if (result.changes !== 1) {
+      const latest = this.getCodeMapManualRelation(relation.id);
+      if (!latest) throw new EntityNotFoundError("Code Map manual relation", relation.id);
+      assertCodeMapManualRelationRevision(latest, expectedRevision);
+    }
+    return this.getCodeMapManualRelation(relation.id)!;
+  }
+
+  deleteCodeMapManualRelation(relationId: string, expectedRevision: number): void {
+    const current = this.getCodeMapManualRelation(relationId);
+    if (!current) throw new EntityNotFoundError("Code Map manual relation", relationId);
+    assertCodeMapManualRelationRevision(current, expectedRevision);
+    const result = this.db.prepare("DELETE FROM code_map_manual_relations WHERE id = ? AND revision = ?")
+      .run(relationId, expectedRevision);
+    if (result.changes !== 1) {
+      const latest = this.getCodeMapManualRelation(relationId);
+      if (!latest) throw new EntityNotFoundError("Code Map manual relation", relationId);
+      assertCodeMapManualRelationRevision(latest, expectedRevision);
+    }
+  }
+
+  createTaskCodeScopeBinding(binding: TaskCodeScopeBinding): TaskCodeScopeBinding {
+    this.db.prepare(`
+      INSERT INTO task_code_scope_bindings (
+        id, project_id, task_id, code_node_id, code_canonical_identity,
+        code_kind, code_language, code_path, code_signature, code_name, kind,
+        created_by, created_by_provider, created_at, updated_by, updated_by_provider, updated_at, revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      binding.id, binding.projectId, binding.taskId, binding.codeNodeId, binding.codeCanonicalIdentity,
+      binding.codeKind ?? null, binding.codeLanguage ?? null, binding.codePath ?? null, binding.codeSignature ?? null,
+      binding.codeName ?? null, binding.kind,
+      binding.createdBy, binding.createdByProvider, binding.createdAt, binding.updatedBy, binding.updatedByProvider,
+      binding.updatedAt, binding.revision,
+    );
+    return this.getTaskCodeScopeBinding(binding.id)!;
+  }
+
+  getTaskCodeScopeBinding(bindingId: string): TaskCodeScopeBinding | undefined {
+    const row = this.db.prepare("SELECT * FROM task_code_scope_bindings WHERE id = ?").get(bindingId) as TaskCodeScopeBindingRow | undefined;
+    return row ? mapTaskCodeScopeBinding(row) : undefined;
+  }
+
+  listTaskCodeScopeBindings(projectId: string): TaskCodeScopeBinding[] {
+    return (this.db
+      .prepare("SELECT * FROM task_code_scope_bindings WHERE project_id = ? ORDER BY created_at ASC, id ASC")
+      .all(projectId) as TaskCodeScopeBindingRow[]).map(mapTaskCodeScopeBinding);
+  }
+
+  updateTaskCodeScopeBinding(binding: TaskCodeScopeBinding, expectedRevision: number): TaskCodeScopeBinding {
+    const current = this.getTaskCodeScopeBinding(binding.id);
+    if (!current) throw new EntityNotFoundError("Task CodeScope binding", binding.id);
+    if (current.revision !== expectedRevision) {
+      throw new EntityRevisionConflictError("Task CodeScope binding", current.id, expectedRevision, current.revision);
+    }
+    const result = this.db.prepare(`
+      UPDATE task_code_scope_bindings
+      SET code_node_id = ?, code_canonical_identity = ?, code_kind = ?, code_language = ?, code_path = ?,
+          code_signature = ?, code_name = ?, updated_by = ?, updated_by_provider = ?, updated_at = ?, revision = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      binding.codeNodeId, binding.codeCanonicalIdentity, binding.codeKind ?? null, binding.codeLanguage ?? null,
+      binding.codePath ?? null, binding.codeSignature ?? null, binding.codeName ?? null, binding.updatedBy,
+      binding.updatedByProvider, binding.updatedAt, binding.revision, binding.id, expectedRevision,
+    );
+    if (result.changes !== 1) {
+      const latest = this.getTaskCodeScopeBinding(binding.id);
+      if (!latest) throw new EntityNotFoundError("Task CodeScope binding", binding.id);
+      if (latest.revision !== expectedRevision) {
+        throw new EntityRevisionConflictError("Task CodeScope binding", latest.id, expectedRevision, latest.revision);
+      }
+    }
+    return this.getTaskCodeScopeBinding(binding.id)!;
+  }
+
+  deleteTaskCodeScopeBinding(bindingId: string, expectedRevision: number): void {
+    const current = this.getTaskCodeScopeBinding(bindingId);
+    if (!current) throw new EntityNotFoundError("Task CodeScope binding", bindingId);
+    assertTaskCodeScopeBindingRevision(current, expectedRevision);
+    const result = this.db.prepare("DELETE FROM task_code_scope_bindings WHERE id = ? AND revision = ?")
+      .run(bindingId, expectedRevision);
+    if (result.changes !== 1) {
+      const latest = this.getTaskCodeScopeBinding(bindingId);
+      if (!latest) throw new EntityNotFoundError("Task CodeScope binding", bindingId);
+      assertTaskCodeScopeBindingRevision(latest, expectedRevision);
+    }
+  }
+
+
+
   listBoardPositions(projectId: string): BoardNodePosition[] {
     const rows = this.db
       .prepare("SELECT * FROM board_positions WHERE project_id = ? ORDER BY entity_type ASC, entity_id ASC")
@@ -1194,6 +1377,58 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       CREATE INDEX IF NOT EXISTS code_map_investigation_relation_bindings_project_state_idx
         ON code_map_investigation_relation_bindings(project_id, sync_state);
 
+      CREATE TABLE IF NOT EXISTS code_map_manual_relations (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        from_code_node_id TEXT NOT NULL,
+        from_canonical_identity TEXT NOT NULL,
+        to_code_node_id TEXT NOT NULL,
+        to_canonical_identity TEXT NOT NULL,
+        relation_kind TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        rationale TEXT NOT NULL DEFAULT '',
+        provenance TEXT NOT NULL CHECK (provenance = 'manual'),
+        created_by TEXT NOT NULL,
+        created_by_provider TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_by_provider TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        CHECK (from_code_node_id <> to_code_node_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS code_map_manual_relations_project_created_idx
+        ON code_map_manual_relations(project_id, created_at, id);
+
+      CREATE TABLE IF NOT EXISTS task_code_scope_bindings (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        code_node_id TEXT NOT NULL,
+        code_canonical_identity TEXT NOT NULL,
+        code_kind TEXT,
+        code_language TEXT,
+        code_path TEXT,
+        code_signature TEXT,
+        code_name TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('targets', 'implemented_in', 'affects', 'investigates')),
+        created_by TEXT NOT NULL,
+        created_by_provider TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_by_provider TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        UNIQUE (task_id, code_node_id, kind)
+      );
+
+      CREATE INDEX IF NOT EXISTS task_code_scope_bindings_project_task_idx
+        ON task_code_scope_bindings(project_id, task_id, created_at, id);
+
+      CREATE INDEX IF NOT EXISTS task_code_scope_bindings_project_node_idx
+        ON task_code_scope_bindings(project_id, code_node_id, created_at, id);
+
       CREATE TRIGGER IF NOT EXISTS code_map_investigation_node_binding_detach
       BEFORE DELETE ON investigation_nodes
       FOR EACH ROW BEGIN
@@ -1228,6 +1463,19 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
     if (!taskColumns.some((column) => column.name === "continuity_json")) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN continuity_json TEXT NOT NULL DEFAULT '{}'");
+    }
+
+    const codeScopeColumns = this.db.prepare("PRAGMA table_info(task_code_scope_bindings)").all() as Array<{ name: string }>;
+    for (const [name, definition] of [
+      ["code_kind", "TEXT"],
+      ["code_language", "TEXT"],
+      ["code_path", "TEXT"],
+      ["code_signature", "TEXT"],
+      ["code_name", "TEXT"],
+    ] as const) {
+      if (!codeScopeColumns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE task_code_scope_bindings ADD COLUMN ${name} ${definition}`);
+      }
     }
 
     const boardPositionDefinition = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'board_positions'").get() as { sql: string } | undefined;
@@ -1546,5 +1794,50 @@ function mapCodeMapInvestigationRelationBinding(row: CodeMapInvestigationRelatio
     lastSyncedAt: row.last_synced_at,
     ...(row.investigation_item_id ? { investigationItemId: row.investigation_item_id } : {}),
     ...(row.investigation_item_link_id ? { investigationItemLinkId: row.investigation_item_link_id } : {}),
+  };
+}
+
+function mapCodeMapManualRelation(row: CodeMapManualRelationRow): CodeMapManualRelation {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    fromCodeNodeId: row.from_code_node_id,
+    fromCanonicalIdentity: row.from_canonical_identity,
+    toCodeNodeId: row.to_code_node_id,
+    toCanonicalIdentity: row.to_canonical_identity,
+    relationKind: row.relation_kind,
+    label: row.label,
+    rationale: row.rationale,
+    provenance: row.provenance,
+    createdBy: row.created_by,
+    createdByProvider: row.created_by_provider,
+    createdAt: row.created_at,
+    updatedBy: row.updated_by,
+    updatedByProvider: row.updated_by_provider,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+  };
+}
+
+function mapTaskCodeScopeBinding(row: TaskCodeScopeBindingRow): TaskCodeScopeBinding {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    codeNodeId: row.code_node_id,
+    codeCanonicalIdentity: row.code_canonical_identity,
+    ...(row.code_kind ? { codeKind: row.code_kind } : {}),
+    ...(row.code_language ? { codeLanguage: row.code_language } : {}),
+    ...(row.code_path ? { codePath: row.code_path } : {}),
+    ...(row.code_signature ? { codeSignature: row.code_signature } : {}),
+    ...(row.code_name ? { codeName: row.code_name } : {}),
+    kind: row.kind,
+    createdBy: row.created_by,
+    createdByProvider: row.created_by_provider,
+    createdAt: row.created_at,
+    updatedBy: row.updated_by,
+    updatedByProvider: row.updated_by_provider,
+    updatedAt: row.updated_at,
+    revision: row.revision,
   };
 }

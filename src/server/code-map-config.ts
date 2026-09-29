@@ -2,8 +2,10 @@ import { accessSync, constants, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { CodeFidelityLevel, CodeIntelligenceProvider } from "../application/code-intelligence.js";
+import { CodeMapProviderRegistry, codeProviderExecutableLabel, type CodeProviderDefinition } from "../application/code-map-provider-registry.js";
 import { CompositeCodeIntelligenceProvider } from "../application/composite-code-intelligence-provider.js";
 import { CodeMapService } from "../application/code-map-service.js";
+import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import { FileSystemCodeFileInventory } from "../adapters/code-intelligence/file-inventory.js";
 import {
   GitNexusCodeIntelligenceProvider,
@@ -56,12 +58,17 @@ function withProviderMetadata(
 
 function createCompositeService(
   providers: readonly CodeIntelligenceProvider[],
+  providerRegistry?: CodeMapProviderRegistry,
+  manualRelations?: CodeMapManualRelationReader,
 ): CodeMapService {
   return new CodeMapService(
     new CompositeCodeIntelligenceProvider(
       providers,
       new FileSystemCodeFileInventory(),
     ),
+    undefined,
+    providerRegistry,
+    manualRelations,
   );
 }
 
@@ -136,6 +143,54 @@ function providerExecutable(
     : env.QUESTBOARD_GITNEXUS_EXECUTABLE?.trim() || "gitnexus";
 }
 
+const CODE_MAP_PROVIDER_DEFINITIONS: readonly CodeProviderDefinition[] = [
+  {
+    providerId: "scip-typescript",
+    languages: ["typescript", "javascript"],
+    fidelity: "semantic-call",
+    version: "0.4.0",
+    installOption: {
+      providerId: "scip-typescript",
+      sourceType: "npm",
+      source: "@sourcegraph/scip-typescript",
+      version: "0.4.0",
+      executable: "scip-typescript",
+      trust: "project-pinned",
+      requiresApproval: true,
+      executionBoundary: "external-host",
+      permissions: ["network", "project-dependency-install"],
+      reindexMode: "full",
+    },
+  },
+  {
+    providerId: "gitnexus",
+    languages: [],
+    fidelity: "semantic-call",
+    version: null,
+  },
+];
+
+export function createQuestBoardCodeMapProviderRegistry(
+  config: QuestBoardCodeMapConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+): CodeMapProviderRegistry {
+  const configured = new Set(config.providers ?? [config.provider]);
+  return new CodeMapProviderRegistry(CODE_MAP_PROVIDER_DEFINITIONS, (definition) => {
+    const provider = definition.providerId as QuestBoardCodeMapProvider;
+    const requestedExecutable = providerExecutable(provider, env, cwd);
+    const executable = findQuestBoardCodeMapExecutable(requestedExecutable, env);
+    return {
+      configured: configured.has(provider),
+      installed: Boolean(executable),
+      available: Boolean(executable),
+      executable: executable ?? requestedExecutable,
+      health: executable ? "ready" : "missing_executable",
+      diagnostics: executable ? [] : [`Executable not found: ${requestedExecutable}`],
+    };
+  });
+}
+
 
 
 export function withManagedServiceCodeMapDefault(
@@ -174,9 +229,12 @@ export function resolveQuestBoardCodeMapConfig(
 
 export function createConfiguredCodeMapService(
   env: NodeJS.ProcessEnv = process.env,
+  providerRegistryOverride?: CodeMapProviderRegistry,
+  manualRelations?: CodeMapManualRelationReader,
 ): CodeMapService | undefined {
   const config = resolveQuestBoardCodeMapConfig(env);
   if (!config) return undefined;
+  const providerRegistry = providerRegistryOverride ?? createQuestBoardCodeMapProviderRegistry(config, env);
 
   mkdirSync(config.storageRoot, { recursive: true });
   const configuredProviders = config.providers ?? [config.provider];
@@ -190,7 +248,7 @@ export function createConfiguredCodeMapService(
       if (!childService) throw new Error(`Code Map provider ${providerId} unexpectedly resolved without a service`);
       return semanticFactsProvider(childService, providerId);
     });
-    return createCompositeService(semanticProviders);
+    return createCompositeService(semanticProviders, providerRegistry, manualRelations);
   }
 
   if (config.provider === "scip-typescript") {
@@ -206,7 +264,7 @@ export function createConfiguredCodeMapService(
         languages: ["typescript", "javascript"],
         fidelity: "semantic-call",
       }),
-    ]);
+    ], providerRegistry, manualRelations);
   }
 
   const runner = new ExecFileGitNexusCliRunner({ executable: config.executable });
@@ -215,7 +273,7 @@ export function createConfiguredCodeMapService(
   });
   return createCompositeService([
     withProviderMetadata(provider, { fidelity: "semantic-call" }),
-  ]);
+  ], providerRegistry, manualRelations);
 }
 
 function executableCandidates(executable: string, env: NodeJS.ProcessEnv): string[] {
@@ -250,6 +308,7 @@ export function findQuestBoardCodeMapExecutable(
 
 export function createConfiguredCodeMapRuntime(
   env: NodeJS.ProcessEnv = process.env,
+  manualRelations?: CodeMapManualRelationReader,
 ): QuestBoardCodeMapRuntime {
   const config = resolveQuestBoardCodeMapConfig(env);
   if (!config) {
@@ -264,6 +323,7 @@ export function createConfiguredCodeMapRuntime(
   }
 
   const configuredProviders = config.providers ?? [config.provider];
+  const providerRegistry = createQuestBoardCodeMapProviderRegistry(config, env);
   const resolvedProviders = configuredProviders.map((provider) => {
     const requestedExecutable = providerExecutable(provider, env, process.cwd());
     return {
@@ -274,14 +334,14 @@ export function createConfiguredCodeMapRuntime(
   });
   const missingExecutables = resolvedProviders
     .filter((entry) => !entry.executable)
-    .map((entry) => entry.requestedExecutable);
+    .map((entry) => codeProviderExecutableLabel(entry.requestedExecutable) ?? "configured executable");
   const activeProviders = resolvedProviders.filter(
     (entry): entry is typeof entry & { executable: string } => Boolean(entry.executable),
   );
 
   let service: CodeMapService;
   if (activeProviders.length === 0) {
-    service = createCompositeService([]);
+    service = createCompositeService([], providerRegistry, manualRelations);
   } else {
     const resolvedEnv: NodeJS.ProcessEnv = {
       ...env,
@@ -302,7 +362,7 @@ export function createConfiguredCodeMapRuntime(
         resolvedEnv.QUESTBOARD_GITNEXUS_EXECUTABLE = entry.executable;
       }
     }
-    const configuredService = createConfiguredCodeMapService(resolvedEnv);
+    const configuredService = createConfiguredCodeMapService(resolvedEnv, providerRegistry, manualRelations);
     if (!configuredService) throw new Error("Code Map runtime unexpectedly resolved without a service");
     service = configuredService;
   }

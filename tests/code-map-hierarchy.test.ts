@@ -22,7 +22,6 @@ function semanticGraph(): CodeGraphSnapshot {
         kind: "class",
         name: "Service",
         canonicalIdentity: "src/service.ts#class:Service",
-        language: "typescript",
         location: { path: "src/service.ts", startLine: 1 },
       },
       {
@@ -30,7 +29,6 @@ function semanticGraph(): CodeGraphSnapshot {
         kind: "method",
         name: "run",
         canonicalIdentity: "src/service.ts#method:Service.run",
-        language: "typescript",
         location: { path: "src/service.ts", startLine: 2 },
       },
     ],
@@ -62,6 +60,8 @@ test("file hierarchy preserves provider containment and keeps unsupported-langua
   assert.equal(byPath.get("macos/Companion.swift")?.language, "swift");
   assert.equal(byPath.get("scripts/bootstrap.sh")?.language, "shellscript");
   assert.equal(byPath.get("windows/install.ps1")?.language, "powershell");
+  assert.equal(graph.nodes.find((node) => node.id === "service")?.language, "typescript");
+  assert.equal(graph.nodes.find((node) => node.id === "run")?.language, "typescript");
   assert.ok(graph.relations.some((relation) =>
     relation.kind === "contains" && relation.from === serviceFile.id && relation.to === "service",
   ));

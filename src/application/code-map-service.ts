@@ -23,6 +23,17 @@ import {
   type CodeMapQueryInput,
   type CodeMapQueryResult,
 } from "./code-map-query.js";
+import {
+  CodeMapProviderRegistry,
+  type CodeMapProviderCapabilityReport,
+  type CodeProviderInstallRequest,
+} from "./code-map-provider-registry.js";
+import {
+  augmentCodeGraphWithManualRelations,
+  projectCodeMapManualRelations,
+  type CodeMapManualRelationReader,
+  type CodeMapManualRelationView,
+} from "./code-map-augmentation.js";
 
 export type CodeMapRefreshMode = "full" | "incremental" | "cache-hit";
 
@@ -158,11 +169,20 @@ function changedArchitectureNodeIds(
 export class CodeMapService {
   readonly #provider: CodeIntelligenceProvider;
   readonly #fileInventory: CodeFileInventory | undefined;
+  readonly #providerRegistry: CodeMapProviderRegistry | undefined;
+  readonly #manualRelations: CodeMapManualRelationReader | undefined;
   readonly #cache = new Map<string, CodeMapSnapshot>();
 
-  constructor(provider: CodeIntelligenceProvider, fileInventory?: CodeFileInventory) {
+  constructor(
+    provider: CodeIntelligenceProvider,
+    fileInventory?: CodeFileInventory,
+    providerRegistry?: CodeMapProviderRegistry,
+    manualRelations?: CodeMapManualRelationReader,
+  ) {
     this.#provider = provider;
     this.#fileInventory = fileInventory;
+    this.#providerRegistry = providerRegistry;
+    this.#manualRelations = manualRelations;
   }
 
   get capabilities(): CodeIntelligenceProvider["capabilities"] {
@@ -175,6 +195,26 @@ export class CodeMapService {
 
   getCached(projectId: string): CodeMapSnapshot | undefined {
     return this.#cache.get(projectId);
+  }
+
+  providerCapabilities(projectId: string): CodeMapProviderCapabilityReport | undefined {
+    return this.#providerRegistry?.report(this.#cache.get(projectId)?.graph);
+  }
+
+  requestProviderInstall(projectId: string, providerId: string): CodeProviderInstallRequest {
+    if (!this.#providerRegistry) {
+      throw new Error("Code Map provider registry is not available in this runtime");
+    }
+    return this.#providerRegistry.requestInstall(projectId, providerId);
+  }
+
+  manualRelations(projectId: string): CodeMapManualRelationView[] {
+    const cached = this.#cache.get(projectId);
+    if (!cached || !this.#manualRelations) return [];
+    return projectCodeMapManualRelations(
+      cached.graph,
+      this.#manualRelations.listCodeMapManualRelations(projectId),
+    );
   }
 
   async refresh(request: CodeIndexRequest): Promise<CodeMapRefreshResult> {
@@ -230,7 +270,13 @@ export class CodeMapService {
         `Code Map has not been indexed for project ${projectId}`,
       );
     }
-    return queryCodeGraph(cached.graph, this.providerId, input);
+    const graph = this.#manualRelations
+      ? augmentCodeGraphWithManualRelations(
+          cached.graph,
+          this.#manualRelations.listCodeMapManualRelations(projectId),
+        )
+      : cached.graph;
+    return queryCodeGraph(graph, this.providerId, input);
   }
 
   overlayTasks(projectId: string, links: readonly CodeMapTaskLink[]): CodeMapTaskOverlay {

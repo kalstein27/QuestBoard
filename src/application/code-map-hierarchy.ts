@@ -142,6 +142,19 @@ export function materializeCodeFileHierarchy(
     fileNodeByPath.set(entry.path, fileNode);
   }
 
+  // Some semantic indexes omit document language even though every symbol still
+  // carries an exact source path. Keep language filtering/provider coverage
+  // provider-neutral by filling only missing language from that exact path.
+  // This never guesses containment or changes identity; it is the same
+  // extension-based classification used for canonical file inventory nodes.
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]!;
+    if (node.language || !node.location?.path) continue;
+    const path = normalizedPath(node.location.path);
+    const language = fileNodeByPath.get(path)?.language ?? inferCodeLanguageFromPath(path);
+    if (language) nodes[index] = { ...node, language };
+  }
+
   const hasIncomingContainment = new Set(
     relations.filter((relation) => relation.kind === "contains").map((relation) => relation.to),
   );

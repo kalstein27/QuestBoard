@@ -66,7 +66,8 @@ test("Code Map runtime keeps healthy semantic providers when another configured 
   assert.equal(runtime.service.providerId, "scip-typescript");
   assert.equal(runtime.availability.available, true);
   assert.equal(runtime.availability.reason, "missing_executable");
-  assert.deepEqual(runtime.availability.missingExecutables, ["/definitely/missing/gitnexus"]);
+  assert.deepEqual(runtime.availability.missingExecutables, ["gitnexus"]);
+  assert.doesNotMatch(runtime.availability.message ?? "", /\/definitely\/missing/);
 });
 
 
@@ -84,7 +85,8 @@ test("Code Map runtime degrades to file-only when the configured semantic indexe
   assert.equal(runtime.availability.provider, "scip-typescript");
   assert.equal(runtime.availability.reason, "missing_executable");
   assert.match(runtime.availability.message ?? "", /file-only fidelity/);
-  assert.deepEqual(runtime.availability.missingExecutables, ["/definitely/missing/scip-typescript"]);
+  assert.deepEqual(runtime.availability.missingExecutables, ["scip-typescript"]);
+  assert.doesNotMatch(runtime.availability.message ?? "", /\/definitely\/missing/);
 });
 
 test("GitNexus remains an explicit optional provider", () => {

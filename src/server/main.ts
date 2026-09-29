@@ -2,6 +2,9 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { QuestBoardService } from "../application/quest-board-service.js";
 import { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
+import { CodeMapAugmentationService } from "../application/code-map-augmentation.js";
+import { CodeScopeBindingService } from "../application/code-scope-binding.js";
+import { AgentFocusService } from "../application/agent-focus.js";
 import { createStderrConcurrencyDiagnosticSink } from "../observability/concurrency-log.js";
 import { SqliteQuestBoardRepository } from "../storage/sqlite/sqlite-quest-board-repository.js";
 import { createConfiguredCodeMapRuntime, withManagedServiceCodeMapDefault } from "./code-map-config.js";
@@ -29,16 +32,26 @@ const daemonIdentity = pinQuestBoardDaemonIdentity({
 });
 const service = new QuestBoardService(repository, undefined, undefined, createStderrConcurrencyDiagnosticSink());
 const codeMapEnv = withManagedServiceCodeMapDefault(process.env, managedServiceMode);
-const codeMapRuntime = createConfiguredCodeMapRuntime(codeMapEnv);
+const codeMapRuntime = createConfiguredCodeMapRuntime(codeMapEnv, repository);
 const codeMapInvestigationSyncService = codeMapRuntime.service
   ? new CodeMapInvestigationSyncService(codeMapRuntime.service, repository)
   : undefined;
+const codeMapAugmentationService = codeMapRuntime.service
+  ? new CodeMapAugmentationService(codeMapRuntime.service, repository)
+  : undefined;
+const codeScopeBindingService = codeMapRuntime.service
+  ? new CodeScopeBindingService(codeMapRuntime.service, repository, service)
+  : undefined;
+const agentFocusService = new AgentFocusService(repository);
 const tailnetMode = process.argv.includes("--tailnet") || process.env.QUESTBOARD_TAILNET === "1";
 const httpRuntime = await startQuestBoardHttpRuntime(service, {
   tailnetMode,
   daemonIdentity,
   ...(codeMapRuntime.service ? { codeMapService: codeMapRuntime.service } : {}),
   ...(codeMapInvestigationSyncService ? { codeMapInvestigationSyncService } : {}),
+  ...(codeMapAugmentationService ? { codeMapAugmentationService } : {}),
+  ...(codeScopeBindingService ? { codeScopeBindingService } : {}),
+  agentFocusService,
   codeMapAvailability: codeMapRuntime.availability,
   log: (message) => console.log(message),
 });

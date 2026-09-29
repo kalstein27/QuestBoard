@@ -18,6 +18,8 @@ import type {
   CodeMapInvestigationNodeBinding,
   CodeMapInvestigationRelationBinding,
 } from "./code-map-investigation-sync.js";
+import type { CodeMapManualRelation } from "./code-map-augmentation.js";
+import type { TaskCodeScopeBinding } from "./code-scope-binding.js";
 
 export interface MutationRequest {
   requestId: string;
@@ -109,6 +111,18 @@ export interface QuestBoardRepository {
   listCodeMapInvestigationRelationBindings(projectId: string): CodeMapInvestigationRelationBinding[];
   upsertCodeMapInvestigationRelationBinding(binding: CodeMapInvestigationRelationBinding): CodeMapInvestigationRelationBinding;
   deleteCodeMapInvestigationRelationBinding(projectId: string, codeRelationId: string): void;
+
+  createCodeMapManualRelation(relation: CodeMapManualRelation): CodeMapManualRelation;
+  getCodeMapManualRelation(relationId: string): CodeMapManualRelation | undefined;
+  listCodeMapManualRelations(projectId: string): CodeMapManualRelation[];
+  updateCodeMapManualRelation(relation: CodeMapManualRelation, expectedRevision: number): CodeMapManualRelation;
+  deleteCodeMapManualRelation(relationId: string, expectedRevision: number): void;
+  createTaskCodeScopeBinding(binding: TaskCodeScopeBinding): TaskCodeScopeBinding;
+  getTaskCodeScopeBinding(bindingId: string): TaskCodeScopeBinding | undefined;
+  listTaskCodeScopeBindings(projectId: string): TaskCodeScopeBinding[];
+  updateTaskCodeScopeBinding(binding: TaskCodeScopeBinding, expectedRevision: number): TaskCodeScopeBinding;
+  deleteTaskCodeScopeBinding(bindingId: string, expectedRevision: number): void;
+
 
   listBoardPositions(projectId: string): BoardNodePosition[];
   upsertBoardPosition(position: BoardNodePosition): BoardNodePosition;

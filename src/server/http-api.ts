@@ -39,7 +39,14 @@ import type {
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
 import type { CodeMapService } from "../application/code-map-service.js";
+import { CodeMapAugmentationError, type CodeMapAugmentationService } from "../application/code-map-augmentation.js";
+import {
+  CODE_SCOPE_BINDING_KINDS,
+  CodeScopeBindingError,
+  type CodeScopeBindingService,
+} from "../application/code-scope-binding.js";
 import { CodeMapQueryError } from "../application/code-map-query.js";
+import type { AgentFocusService } from "../application/agent-focus.js";
 import {
   CodeMapInvestigationSyncError,
   type CodeMapInvestigationSyncSelection,
@@ -59,6 +66,9 @@ export interface QuestBoardHttpServerOptions {
   daemonIdentity?: QuestBoardDaemonIdentity;
   codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  codeMapAugmentationService?: CodeMapAugmentationService;
+  codeScopeBindingService?: CodeScopeBindingService;
+  agentFocusService?: AgentFocusService;
   codeMapAvailability?: QuestBoardCodeMapAvailability;
 }
 
@@ -108,6 +118,13 @@ async function handleRequest(
           {
             service,
             ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+            ...(options.codeMapAugmentationService
+              ? { codeMapAugmentationService: options.codeMapAugmentationService }
+              : {}),
+            ...(options.codeScopeBindingService
+              ? { codeScopeBindingService: options.codeScopeBindingService }
+              : {}),
+            ...(options.agentFocusService ? { agentFocusService: options.agentFocusService } : {}),
             ...(options.codeMapInvestigationSyncService
               ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
               : {}),
@@ -130,6 +147,13 @@ async function handleRequest(
       {
         service,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+        ...(options.codeMapAugmentationService
+          ? { codeMapAugmentationService: options.codeMapAugmentationService }
+          : {}),
+        ...(options.codeScopeBindingService
+          ? { codeScopeBindingService: options.codeScopeBindingService }
+          : {}),
+        ...(options.agentFocusService ? { agentFocusService: options.agentFocusService } : {}),
         ...(options.codeMapInvestigationSyncService
           ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
           : {}),
@@ -142,6 +166,38 @@ async function handleRequest(
       sendJson(response, 200, mcpResponse);
     }
     return;
+  }
+
+  const agentFocusMatch = pathname.match(/^\/projects\/([^/]+)\/agent-focus$/);
+  if (agentFocusMatch && options.agentFocusService) {
+    const projectId = decodePathPart(agentFocusMatch[1]);
+    if (method === "GET") {
+      sendJson(response, 200, {
+        focus: options.agentFocusService.latest(projectId),
+        sessions: options.agentFocusService.list(projectId),
+      });
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJsonObject(request);
+      sendJson(response, 200, {
+        focus: options.agentFocusService.set({
+          projectId,
+          sessionId: requireString(body, "sessionId"),
+          ...optionalStringProperty(body, "taskId"),
+          ...optionalStringProperty(body, "workGroupId"),
+          ...optionalStringProperty(body, "flowNodeId"),
+          ...optionalStringProperty(body, "codeScopeId"),
+        }),
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      const sessionId = optionalQueryText(url, "sessionId");
+      if (!sessionId) throw new TypeError("sessionId query parameter is required");
+      sendJson(response, 200, options.agentFocusService.clear(projectId, sessionId));
+      return;
+    }
   }
 
   if (pathname === "/projects") {
@@ -227,6 +283,36 @@ async function handleRequest(
     return;
   }
 
+  const codeMapProviderInstallMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/providers\/([^/]+)\/install-request$/);
+  if (codeMapProviderInstallMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapProviderInstallMatch[1]);
+    service.getProject(projectId);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      },
+      "questboard_request_code_map_provider_install",
+      { projectId, providerId: decodePathPart(codeMapProviderInstallMatch[2]) },
+    ));
+    return;
+  }
+
+  const codeMapProvidersMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/providers$/);
+  if (codeMapProvidersMatch && method === "GET") {
+    const projectId = decodePathPart(codeMapProvidersMatch[1]);
+    service.getProject(projectId);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      },
+      "questboard_get_code_map_provider_capabilities",
+      { projectId },
+    ));
+    return;
+  }
+
   const codeMapQueryMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/query$/);
   if (codeMapQueryMatch && method === "POST") {
     const projectId = decodePathPart(codeMapQueryMatch[1]);
@@ -245,6 +331,9 @@ async function handleRequest(
       {
         service,
         codeMapService: options.codeMapService,
+        ...(options.codeMapAugmentationService
+          ? { codeMapAugmentationService: options.codeMapAugmentationService }
+          : {}),
         ...(options.codeMapInvestigationSyncService
           ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
           : {}),
@@ -252,6 +341,181 @@ async function handleRequest(
       "questboard_query_code_map",
       { ...body, projectId },
     ));
+    return;
+  }
+
+  const codeMapManualRelationsMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/manual-relations$/);
+  if (codeMapManualRelationsMatch) {
+    const projectId = decodePathPart(codeMapManualRelationsMatch[1]);
+    service.getProject(projectId);
+    if (!options.codeMapAugmentationService) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_augmentation_unavailable",
+          message: "Code Map manual augmentation is not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+    const context = {
+      service,
+      ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      codeMapAugmentationService: options.codeMapAugmentationService,
+    };
+    if (method === "GET") {
+      sendJson(response, 200, executeQuestBoardAgentTool(
+        context,
+        "questboard_list_code_map_manual_relations",
+        { projectId },
+      ));
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJsonObject(request);
+      sendJson(response, 201, executeQuestBoardAgentTool(
+        context,
+        "questboard_create_code_map_manual_relation",
+        {
+          ...body,
+          projectId,
+          actor: requireActor(request),
+          ...mutationOptions(request),
+        },
+      ));
+      return;
+    }
+  }
+
+  const codeMapManualRelationMatch = pathname.match(/^\/code-map\/manual-relations\/([^/]+)$/);
+  if (codeMapManualRelationMatch && (method === "PATCH" || method === "DELETE")) {
+    if (!options.codeMapAugmentationService) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_augmentation_unavailable",
+          message: "Code Map manual augmentation is not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+    const relationId = decodePathPart(codeMapManualRelationMatch[1]);
+    const context = {
+      service,
+      ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      codeMapAugmentationService: options.codeMapAugmentationService,
+    };
+    if (method === "PATCH") {
+      const body = await readJsonObject(request);
+      sendJson(response, 200, executeQuestBoardAgentTool(
+        context,
+        "questboard_update_code_map_manual_relation",
+        {
+          ...body,
+          relationId,
+          actor: requireActor(request),
+          ...mutationOptions(request),
+        },
+      ));
+      return;
+    }
+    const expectedRevision = url.searchParams.get("expectedRevision");
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      context,
+      "questboard_delete_code_map_manual_relation",
+      {
+        relationId,
+        actor: requireActor(request),
+        ...mutationOptions(request),
+        ...(expectedRevision ? { expectedRevision: Number(expectedRevision) } : {}),
+      },
+    ));
+    return;
+  }
+
+  const codeScopeBindingsMatch = pathname.match(/^\/projects\/([^/]+)\/code-scope-bindings$/);
+  if (codeScopeBindingsMatch && options.codeScopeBindingService) {
+    const projectId = decodePathPart(codeScopeBindingsMatch[1]);
+    if (method === "GET") {
+      const taskId = optionalQueryText(url, "taskId");
+      const codeNodeId = optionalQueryText(url, "codeNodeId");
+      sendJson(response, 200, {
+        codeScopeBindings: options.codeScopeBindingService.list(projectId, {
+          ...(taskId ? { taskId } : {}),
+          ...(codeNodeId ? { codeNodeId } : {}),
+        }),
+      });
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJsonObject(request);
+      const binding = options.codeScopeBindingService.attach(
+        {
+          projectId,
+          taskId: requireString(body, "taskId"),
+          codeNodeId: requireString(body, "codeNodeId"),
+          ...optionalEnumProperty(body, "kind", CODE_SCOPE_BINDING_KINDS),
+        },
+        requireActor(request),
+        mutationOptions(request),
+      );
+      sendJson(response, 201, { codeScopeBinding: binding });
+      return;
+    }
+  }
+
+  const createScopedTaskMatch = pathname.match(/^\/projects\/([^/]+)\/code-scope-tasks$/);
+  if (createScopedTaskMatch && method === "POST" && options.codeScopeBindingService) {
+    const projectId = decodePathPart(createScopedTaskMatch[1]);
+    const body = await readJsonObject(request);
+    sendJson(response, 201, options.codeScopeBindingService.createTaskForScope(
+      {
+        projectId,
+        codeNodeId: requireString(body, "codeNodeId"),
+        ...optionalEnumProperty(body, "kind", CODE_SCOPE_BINDING_KINDS),
+        task: {
+          title: requireString(body, "title"),
+          ...optionalStringProperty(body, "description"),
+          ...optionalStringProperty(body, "goal"),
+          ...optionalStringProperty(body, "now"),
+          ...optionalStringProperty(body, "next"),
+          ...optionalEnumProperty(body, "status", TASK_STATUSES),
+          ...optionalEnumProperty(body, "priority", TASK_PRIORITIES),
+          ...optionalStringArrayProperty(body, "tags"),
+        },
+      },
+      requireActor(request),
+      mutationOptions(request),
+    ));
+    return;
+  }
+
+  const codeScopeBindingMatch = pathname.match(/^\/code-scope-bindings\/([^/]+)$/);
+  if (codeScopeBindingMatch && method === "DELETE" && options.codeScopeBindingService) {
+    const expectedRevisionText = optionalQueryText(url, "expectedRevision");
+    const expectedRevision = expectedRevisionText ? Number(expectedRevisionText) : undefined;
+    if (expectedRevision !== undefined && (!Number.isInteger(expectedRevision) || expectedRevision < 1)) {
+      throw new TypeError("expectedRevision must be a positive integer");
+    }
+    sendJson(response, 200, options.codeScopeBindingService.detach(
+      decodePathPart(codeScopeBindingMatch[1]),
+      requireActor(request),
+      { ...mutationOptions(request), ...(expectedRevision ? { expectedRevision } : {}) },
+    ));
+    return;
+  }
+
+  const codeScopeRelinkMatch = pathname.match(/^\/code-scope-bindings\/([^/]+)\/relink$/);
+  if (codeScopeRelinkMatch && method === "POST" && options.codeScopeBindingService) {
+    const body = await readJsonObject(request);
+    sendJson(response, 200, {
+      codeScopeBinding: options.codeScopeBindingService.relink(
+        decodePathPart(codeScopeRelinkMatch[1]),
+        requireActor(request),
+        {
+          ...mutationOptions(request),
+          ...optionalPositiveIntegerProperty(body, "expectedRevision"),
+        },
+      ),
+    });
     return;
   }
 
@@ -276,8 +540,13 @@ async function handleRequest(
         ...(availability?.reason ? { reason: availability.reason } : {}),
         ...(availability?.message ? { message: availability.message } : {}),
         ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
+        ...(codeMapService?.providerCapabilities(projectId)
+          ? { providerCapabilities: codeMapService.providerCapabilities(projectId) }
+          : {}),
         graph: cached?.graph ?? null,
         projection: cached?.projection ?? null,
+        manualRelations: codeMapService?.manualRelations(projectId) ?? [],
+        codeScopeBindings: options.codeScopeBindingService?.list(projectId) ?? [],
       });
       return;
     }
@@ -318,6 +587,8 @@ async function handleRequest(
           provider: codeMapService.providerId,
           graph: cached?.graph ?? null,
           projection: cached?.projection ?? null,
+          manualRelations: codeMapService.manualRelations(projectId),
+          codeScopeBindings: options.codeScopeBindingService?.list(projectId) ?? [],
           error: {
             code: "code_map_provider_failed",
             message: `Code Map provider ${codeMapService.providerId} failed to index this project`,
@@ -331,11 +602,16 @@ async function handleRequest(
         indexed: true,
         provider: codeMapService.providerId,
         capabilities: codeMapService.capabilities,
+        ...(codeMapService.providerCapabilities(projectId)
+          ? { providerCapabilities: codeMapService.providerCapabilities(projectId) }
+          : {}),
         mode: refreshed.mode,
         changedCodeNodeIds: refreshed.changedCodeNodeIds,
         changedArchitectureNodeIds: refreshed.changedArchitectureNodeIds,
         graph: refreshed.graph,
         projection: refreshed.projection,
+        manualRelations: codeMapService.manualRelations(projectId),
+        codeScopeBindings: options.codeScopeBindingService?.list(projectId) ?? [],
       });
       return;
     }
@@ -996,6 +1272,24 @@ function sendError(response: ServerResponse, error: unknown): void {
       ? 409
       : error.code === "code_node_not_found"
         ? 404
+        : 400;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
+  if (error instanceof CodeMapAugmentationError) {
+    const statusCode = error.code === "code_map_node_not_found"
+      ? 404
+      : error.code === "code_map_not_indexed" || error.code === "code_map_manual_relation_stale"
+        ? 409
+        : 400;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
+  if (error instanceof CodeScopeBindingError) {
+    const statusCode = error.code === "code_map_node_not_found"
+      ? 404
+      : error.code === "code_map_not_indexed" || error.code === "task_project_mismatch"
+        ? 409
         : 400;
     sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
     return;

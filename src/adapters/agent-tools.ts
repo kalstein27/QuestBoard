@@ -42,6 +42,14 @@ import {
 } from "../application/code-map-investigation-sync.js";
 import { CODE_NODE_KINDS, CODE_RELATION_KINDS } from "../application/code-intelligence.js";
 import type { CodeMapService } from "../application/code-map-service.js";
+import { CodeMapAugmentationError, type CodeMapAugmentationService } from "../application/code-map-augmentation.js";
+import {
+  CODE_SCOPE_BINDING_KINDS,
+  CodeScopeBindingError,
+  type CodeScopeBindingService,
+} from "../application/code-scope-binding.js";
+import { CodeProviderLifecycleError } from "../application/code-map-provider-registry.js";
+import type { AgentFocusService } from "../application/agent-focus.js";
 import {
   CODE_MAP_HIERARCHY_DIRECTIONS,
   CODE_MAP_QUERY_DIRECTIONS,
@@ -67,6 +75,9 @@ export interface QuestBoardAgentToolContext {
   service: QuestBoardService;
   codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  codeMapAugmentationService?: CodeMapAugmentationService;
+  codeScopeBindingService?: CodeScopeBindingService;
+  agentFocusService?: AgentFocusService;
 }
 
 export type QuestBoardAgentToolRuntime = QuestBoardService | QuestBoardAgentToolContext;
@@ -781,6 +792,220 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_get_code_map_provider_capabilities",
+    description: "Read the shared Code Map provider registry and per-language coverage gaps. Reports trusted install options without installing anything.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_request_code_map_provider_install",
+    description: "Return a trusted, approval-required external-host install request for one Code Map provider. This tool never executes package or executable installation and never triggers indexing.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        providerId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId", "providerId"],
+    },
+  },
+  {
+    name: "questboard_list_code_scope_bindings",
+    description: "List persistent Task-to-CodeScope bindings. Bindings remain readable after restart before reindex and report active, stale, or unindexed state.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        codeNodeId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_attach_task_code_scope",
+    description: "Attach an existing Task to one exact indexed CodeScope without changing the Task domain model.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        codeNodeId: { type: "string", minLength: 1 },
+        kind: { type: "string", enum: [...CODE_SCOPE_BINDING_KINDS] },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "taskId", "codeNodeId", "actor"],
+    },
+  },
+  {
+    name: "questboard_detach_task_code_scope",
+    description: "Detach one persistent Task-to-CodeScope binding without deleting the Task or Code node.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        bindingId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["bindingId", "actor"],
+    },
+  },
+  {
+    name: "questboard_relink_task_code_scope",
+    description: "Relink one stale/relinkable persistent Task-to-CodeScope binding only when the current Code Map has one conservative unique target. Ambiguous targets remain stale.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        bindingId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["bindingId", "actor"],
+    },
+  },
+  {
+    name: "questboard_create_task_for_code_scope",
+    description: "Atomically create a Task and bind it to one exact indexed CodeScope. Targetless Tasks remain supported through ordinary Task creation.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        codeNodeId: { type: "string", minLength: 1 },
+        kind: { type: "string", enum: [...CODE_SCOPE_BINDING_KINDS] },
+        title: { type: "string", minLength: 1 },
+        description: { type: "string" },
+        goal: { type: "string", minLength: 1 },
+        now: { type: "string", minLength: 1 },
+        next: { type: "string", minLength: 1 },
+        status: { type: "string", enum: [...TASK_STATUSES] },
+        priority: { type: "string", enum: [...TASK_PRIORITIES] },
+        tags: { type: "array", uniqueItems: true, items: { type: "string" } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "codeNodeId", "title", "actor"],
+    },
+  },
+  {
+    name: "questboard_get_agent_focus",
+    description: "Read ephemeral agent focus for a project. Focus is process-memory only and is not a claim, authorization grant, Task Activity, or durable history.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { projectId: { type: "string", minLength: 1 } },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_set_agent_focus",
+    description: "Publish minimal ephemeral agent focus for one session without writing Task Activity/history.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        sessionId: { type: "string", minLength: 1 },
+        taskId: { type: "string", minLength: 1 },
+        workGroupId: { type: "string", minLength: 1 },
+        flowNodeId: { type: "string", minLength: 1 },
+        codeScopeId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId", "sessionId"],
+    },
+  },
+  {
+    name: "questboard_clear_agent_focus",
+    description: "Clear one session's ephemeral agent focus without touching canonical work state.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        sessionId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId", "sessionId"],
+    },
+  },
+  {
+    name: "questboard_list_code_map_manual_relations",
+    description: "List persistent manual Code Map relation augmentations with active/stale state and explicit manual provenance.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { projectId: { type: "string", minLength: 1 } },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_create_code_map_manual_relation",
+    description: "Create a persistent manual relation between two exact indexed Code Map nodes without modifying provider-derived facts.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        fromCodeNodeId: { type: "string", minLength: 1 },
+        toCodeNodeId: { type: "string", minLength: 1 },
+        relationKind: { type: "string", enum: [...CODE_RELATION_KINDS] },
+        label: { type: "string" },
+        rationale: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "fromCodeNodeId", "toCodeNodeId", "relationKind", "actor"],
+    },
+  },
+  {
+    name: "questboard_update_code_map_manual_relation",
+    description: "Update one manual Code Map relation using exact endpoints and optional revision CAS. Stale endpoints are never fuzzy-relinked.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        relationId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        fromCodeNodeId: { type: "string", minLength: 1 },
+        toCodeNodeId: { type: "string", minLength: 1 },
+        relationKind: { type: "string", enum: [...CODE_RELATION_KINDS] },
+        label: { type: "string" },
+        rationale: { type: "string" },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["relationId", "actor"],
+    },
+  },
+  {
+    name: "questboard_delete_code_map_manual_relation",
+    description: "Delete one persistent manual Code Map relation using optional revision CAS; provider-derived relations are never touched.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        relationId: { type: "string", minLength: 1 },
+        expectedRevision: { type: "integer", minimum: 1 },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["relationId", "actor"],
+    },
+  },
+  {
     name: "questboard_preview_code_map_investigation_sync",
     description: "Preview extraction/synchronization of Code Map architecture nodes and relations into the Investigation graph without mutating it.",
     inputSchema: {
@@ -1140,6 +1365,145 @@ export function executeQuestBoardAgentTool(
           codeMapQueryInput(args),
         ),
       };
+    case "questboard_get_code_map_provider_capabilities":
+      return {
+        capabilities: requireCodeMapService(context).providerCapabilities(requireString(args, "projectId")),
+      };
+    case "questboard_request_code_map_provider_install":
+      return {
+        installRequest: requireCodeMapService(context).requestProviderInstall(
+          requireString(args, "projectId"),
+          requireString(args, "providerId"),
+        ),
+      };
+    case "questboard_list_code_scope_bindings":
+      return {
+        codeScopeBindings: requireCodeScopeBindingService(context).list(
+          requireString(args, "projectId"),
+          {
+            ...optionalStringProperty(args, "taskId"),
+            ...optionalStringProperty(args, "codeNodeId"),
+          },
+        ),
+      };
+    case "questboard_attach_task_code_scope":
+      return {
+        codeScopeBinding: requireCodeScopeBindingService(context).attach(
+          {
+            projectId: requireString(args, "projectId"),
+            taskId: requireString(args, "taskId"),
+            codeNodeId: requireString(args, "codeNodeId"),
+            ...optionalEnumProperty(args, "kind", CODE_SCOPE_BINDING_KINDS),
+          },
+          requireActor(args),
+          mutationOptions(args),
+        ),
+      };
+    case "questboard_detach_task_code_scope":
+      return requireCodeScopeBindingService(context).detach(
+        requireString(args, "bindingId"),
+        requireActor(args),
+        {
+          ...mutationOptions(args),
+          ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        },
+      );
+    case "questboard_relink_task_code_scope":
+      return {
+        codeScopeBinding: requireCodeScopeBindingService(context).relink(
+          requireString(args, "bindingId"),
+          requireActor(args),
+          {
+            ...mutationOptions(args),
+            ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+          },
+        ),
+      };
+    case "questboard_create_task_for_code_scope":
+      return requireCodeScopeBindingService(context).createTaskForScope(
+        {
+          projectId: requireString(args, "projectId"),
+          codeNodeId: requireString(args, "codeNodeId"),
+          ...optionalEnumProperty(args, "kind", CODE_SCOPE_BINDING_KINDS),
+          task: {
+            title: requireString(args, "title"),
+            ...optionalStringProperty(args, "description"),
+            ...optionalStringProperty(args, "goal"),
+            ...optionalStringProperty(args, "now"),
+            ...optionalStringProperty(args, "next"),
+            ...optionalEnumProperty(args, "status", TASK_STATUSES),
+            ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
+            ...optionalStringArrayProperty(args, "tags"),
+          },
+        },
+        requireActor(args),
+        mutationOptions(args),
+      );
+    case "questboard_get_agent_focus":
+      return {
+        focus: requireAgentFocusService(context).latest(requireString(args, "projectId")),
+        sessions: requireAgentFocusService(context).list(requireString(args, "projectId")),
+      };
+    case "questboard_set_agent_focus":
+      return {
+        focus: requireAgentFocusService(context).set({
+          projectId: requireString(args, "projectId"),
+          sessionId: requireString(args, "sessionId"),
+          ...optionalStringProperty(args, "taskId"),
+          ...optionalStringProperty(args, "workGroupId"),
+          ...optionalStringProperty(args, "flowNodeId"),
+          ...optionalStringProperty(args, "codeScopeId"),
+        }),
+      };
+    case "questboard_clear_agent_focus":
+      return requireAgentFocusService(context).clear(
+        requireString(args, "projectId"),
+        requireString(args, "sessionId"),
+      );
+    case "questboard_list_code_map_manual_relations":
+      return {
+        manualRelations: requireCodeMapAugmentationService(context).list(requireString(args, "projectId")),
+      };
+    case "questboard_create_code_map_manual_relation":
+      return {
+        manualRelation: requireCodeMapAugmentationService(context).create(
+          {
+            projectId: requireString(args, "projectId"),
+            fromCodeNodeId: requireString(args, "fromCodeNodeId"),
+            toCodeNodeId: requireString(args, "toCodeNodeId"),
+            relationKind: requireEnum(args, "relationKind", CODE_RELATION_KINDS),
+            ...optionalStringProperty(args, "label"),
+            ...optionalStringProperty(args, "rationale"),
+          },
+          requireActor(args),
+          mutationOptions(args),
+        ),
+      };
+    case "questboard_update_code_map_manual_relation":
+      return {
+        manualRelation: requireCodeMapAugmentationService(context).update(
+          requireString(args, "relationId"),
+          {
+            ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+            ...optionalStringProperty(args, "fromCodeNodeId"),
+            ...optionalStringProperty(args, "toCodeNodeId"),
+            ...optionalEnumProperty(args, "relationKind", CODE_RELATION_KINDS),
+            ...optionalStringProperty(args, "label"),
+            ...optionalStringProperty(args, "rationale"),
+          },
+          requireActor(args),
+          mutationOptions(args),
+        ),
+      };
+    case "questboard_delete_code_map_manual_relation":
+      return requireCodeMapAugmentationService(context).delete(
+        requireString(args, "relationId"),
+        requireActor(args),
+        {
+          ...mutationOptions(args),
+          ...optionalPositiveIntegerProperty(args, "expectedRevision"),
+        },
+      );
     case "questboard_preview_code_map_investigation_sync": {
       const sync = requireCodeMapInvestigationSyncService(context);
       return {
@@ -1175,6 +1539,9 @@ export function executeQuestBoardAgentTool(
 export function describeQuestBoardError(error: unknown): { code: string; message: string } {
   if (error instanceof QuestBoardRemoteToolError) return { code: error.code, message: error.message };
   if (error instanceof CodeMapQueryError) return { code: error.code, message: error.message };
+  if (error instanceof CodeProviderLifecycleError) return { code: error.code, message: error.message };
+  if (error instanceof CodeMapAugmentationError) return { code: error.code, message: error.message };
+  if (error instanceof CodeScopeBindingError) return { code: error.code, message: error.message };
   if (error instanceof CodeMapInvestigationSyncError) return { code: error.code, message: error.message };
   if (error instanceof EntityNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof ClaimConflictError) return { code: "claim_conflict", message: error.message };
@@ -1201,6 +1568,36 @@ function requireCodeMapService(context: QuestBoardAgentToolContext): CodeMapServ
     );
   }
   return context.codeMapService;
+}
+
+function requireCodeScopeBindingService(context: QuestBoardAgentToolContext): CodeScopeBindingService {
+  if (!context.codeScopeBindingService) {
+    throw new QuestBoardRemoteToolError(
+      "code_scope_binding_unavailable",
+      "Task-to-CodeScope bindings are not available in this QuestBoard runtime",
+    );
+  }
+  return context.codeScopeBindingService;
+}
+
+function requireAgentFocusService(context: QuestBoardAgentToolContext): AgentFocusService {
+  if (!context.agentFocusService) {
+    throw new QuestBoardRemoteToolError(
+      "agent_focus_unavailable",
+      "Ephemeral Agent Focus is not available in this QuestBoard runtime",
+    );
+  }
+  return context.agentFocusService;
+}
+
+function requireCodeMapAugmentationService(context: QuestBoardAgentToolContext): CodeMapAugmentationService {
+  if (!context.codeMapAugmentationService) {
+    throw new QuestBoardRemoteToolError(
+      "code_map_augmentation_unavailable",
+      "Code Map manual augmentation is not available in this QuestBoard runtime",
+    );
+  }
+  return context.codeMapAugmentationService;
 }
 
 const CODE_MAP_QUERY_INPUT_DIRECTIONS = [

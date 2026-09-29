@@ -34,6 +34,13 @@ const MUTATING_TOOLS = new Set([
   "questboard_unlink_investigation_item_from_node",
   "questboard_attach_existing_task_to_investigation",
   "questboard_reorder_investigation_items",
+  "questboard_create_code_map_manual_relation",
+  "questboard_update_code_map_manual_relation",
+  "questboard_delete_code_map_manual_relation",
+  "questboard_attach_task_code_scope",
+  "questboard_detach_task_code_scope",
+  "questboard_relink_task_code_scope",
+  "questboard_create_task_for_code_scope",
   "questboard_apply_code_map_investigation_sync",
   "questboard_apply_migration_batch",
 ]);
