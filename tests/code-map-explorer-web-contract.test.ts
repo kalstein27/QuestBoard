@@ -89,6 +89,9 @@ test("Code Map indexing failure preserves a visible last-good raw source snapsho
   assert.match(app, /last-good snapshot/);
   assert.match(app, /Showing the last good snapshot/);
   assert.match(css, /\.code-map-banner\.warning/);
+  assert.match(app, /map\.freshness === "stale"/);
+  assert.match(app, /Existing results remain available/);
+  assert.match(app, /Refresh \/ Re-index/);
 });
 
 test("Code Map inspector remains a desktop side panel and mobile bottom sheet", () => {

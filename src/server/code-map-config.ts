@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { CodeFidelityLevel, CodeIntelligenceProvider } from "../application/code-intelligence.js";
@@ -15,6 +15,14 @@ import {
   ExecFileScipProcessRunner,
   ScipTypeScriptCodeIntelligenceProvider,
 } from "../adapters/code-intelligence/scip-provider.js";
+import { createHash } from "node:crypto";
+import type { CodeMapPersistenceConfig } from "../application/code-map-persistence.js";
+import type { QuestBoardRepository } from "../application/quest-board-repository.js";
+import {
+  FileSystemCodeMapPersistedSnapshotStore,
+  FileSystemCodeMapSourceStateProvider,
+} from "../adapters/code-intelligence/code-map-persistence.js";
+import { assertCodeMapStorageRootOutsideProject } from "../adapters/code-intelligence/code-map-persistence.js";
 
 export type QuestBoardCodeMapProvider = "gitnexus" | "scip-typescript";
 
@@ -46,13 +54,17 @@ export interface QuestBoardCodeMapRuntime {
 function withProviderMetadata(
   provider: CodeIntelligenceProvider,
   metadata: { languages?: readonly string[]; fidelity: CodeFidelityLevel },
+  storageRoot?: string,
 ): CodeIntelligenceProvider {
   return {
     ...(provider.providerId ? { providerId: provider.providerId } : {}),
     ...(metadata.languages ? { languages: metadata.languages } : {}),
     fidelity: metadata.fidelity,
     capabilities: provider.capabilities,
-    indexProject: (request) => provider.indexProject(request),
+    indexProject: (request) => {
+      if (storageRoot) assertCodeMapStorageRootOutsideProject(storageRoot, request.rootPath);
+      return provider.indexProject(request);
+    },
   };
 }
 
@@ -60,6 +72,7 @@ function createCompositeService(
   providers: readonly CodeIntelligenceProvider[],
   providerRegistry?: CodeMapProviderRegistry,
   manualRelations?: CodeMapManualRelationReader,
+  persistence?: CodeMapPersistenceConfig,
 ): CodeMapService {
   return new CodeMapService(
     new CompositeCodeIntelligenceProvider(
@@ -69,6 +82,7 @@ function createCompositeService(
     undefined,
     providerRegistry,
     manualRelations,
+    persistence,
   );
 }
 
@@ -170,6 +184,38 @@ const CODE_MAP_PROVIDER_DEFINITIONS: readonly CodeProviderDefinition[] = [
   },
 ];
 
+function codeMapProviderContractFingerprint(config: QuestBoardCodeMapConfig): string {
+  const configured = config.providers ?? [config.provider];
+  const contract = configured.map((providerId) => {
+    const definition = CODE_MAP_PROVIDER_DEFINITIONS.find((entry) => entry.providerId === providerId);
+    if (!definition) throw new Error(`Missing Code Map provider definition for ${providerId}`);
+    return {
+      providerId: definition.providerId,
+      languages: [...definition.languages],
+      fidelity: definition.fidelity,
+      version: definition.version,
+    };
+  });
+  return createHash("sha256").update(JSON.stringify(contract)).digest("hex");
+}
+
+function configuredCodeMapPersistence(
+  config: QuestBoardCodeMapConfig,
+  projectReader?: CodeMapManualRelationReader,
+): CodeMapPersistenceConfig {
+  const candidate = projectReader as (CodeMapManualRelationReader & Partial<Pick<QuestBoardRepository, "getProject">>) | undefined;
+  const getProject = candidate?.getProject;
+  return {
+    store: new FileSystemCodeMapPersistedSnapshotStore(config.storageRoot),
+    sourceState: new FileSystemCodeMapSourceStateProvider(),
+    providerConfigFingerprint: codeMapProviderContractFingerprint(config),
+    validateStorageRootForProject: (rootPath: string) => assertCodeMapStorageRootOutsideProject(config.storageRoot, rootPath),
+    ...(getProject
+      ? { rootPathForProject: (projectId: string) => getProject.call(candidate, projectId)?.rootPath }
+      : {}),
+  };
+}
+
 export function createQuestBoardCodeMapProviderRegistry(
   config: QuestBoardCodeMapConfig,
   env: NodeJS.ProcessEnv = process.env,
@@ -231,12 +277,12 @@ export function createConfiguredCodeMapService(
   env: NodeJS.ProcessEnv = process.env,
   providerRegistryOverride?: CodeMapProviderRegistry,
   manualRelations?: CodeMapManualRelationReader,
+  persistence?: CodeMapPersistenceConfig,
 ): CodeMapService | undefined {
   const config = resolveQuestBoardCodeMapConfig(env);
   if (!config) return undefined;
   const providerRegistry = providerRegistryOverride ?? createQuestBoardCodeMapProviderRegistry(config, env);
 
-  mkdirSync(config.storageRoot, { recursive: true });
   const configuredProviders = config.providers ?? [config.provider];
   if (configuredProviders.length > 1) {
     const semanticProviders = configuredProviders.map((providerId) => {
@@ -248,7 +294,7 @@ export function createConfiguredCodeMapService(
       if (!childService) throw new Error(`Code Map provider ${providerId} unexpectedly resolved without a service`);
       return semanticFactsProvider(childService, providerId);
     });
-    return createCompositeService(semanticProviders, providerRegistry, manualRelations);
+    return createCompositeService(semanticProviders, providerRegistry, manualRelations, persistence);
   }
 
   if (config.provider === "scip-typescript") {
@@ -263,8 +309,8 @@ export function createConfiguredCodeMapService(
       withProviderMetadata(provider, {
         languages: ["typescript", "javascript"],
         fidelity: "semantic-call",
-      }),
-    ], providerRegistry, manualRelations);
+      }, config.storageRoot),
+    ], providerRegistry, manualRelations, persistence);
   }
 
   const runner = new ExecFileGitNexusCliRunner({ executable: config.executable });
@@ -272,8 +318,8 @@ export function createConfiguredCodeMapService(
     storageRoot: config.storageRoot,
   });
   return createCompositeService([
-    withProviderMetadata(provider, { fidelity: "semantic-call" }),
-  ], providerRegistry, manualRelations);
+    withProviderMetadata(provider, { fidelity: "semantic-call" }, config.storageRoot),
+  ], providerRegistry, manualRelations, persistence);
 }
 
 function executableCandidates(executable: string, env: NodeJS.ProcessEnv): string[] {
@@ -322,6 +368,8 @@ export function createConfiguredCodeMapRuntime(
     };
   }
 
+  const persistence = configuredCodeMapPersistence(config, manualRelations);
+
   const configuredProviders = config.providers ?? [config.provider];
   const providerRegistry = createQuestBoardCodeMapProviderRegistry(config, env);
   const resolvedProviders = configuredProviders.map((provider) => {
@@ -341,7 +389,7 @@ export function createConfiguredCodeMapRuntime(
 
   let service: CodeMapService;
   if (activeProviders.length === 0) {
-    service = createCompositeService([], providerRegistry, manualRelations);
+    service = createCompositeService([], providerRegistry, manualRelations, persistence);
   } else {
     const resolvedEnv: NodeJS.ProcessEnv = {
       ...env,
@@ -362,7 +410,7 @@ export function createConfiguredCodeMapRuntime(
         resolvedEnv.QUESTBOARD_GITNEXUS_EXECUTABLE = entry.executable;
       }
     }
-    const configuredService = createConfiguredCodeMapService(resolvedEnv, providerRegistry, manualRelations);
+    const configuredService = createConfiguredCodeMapService(resolvedEnv, providerRegistry, manualRelations, persistence);
     if (!configuredService) throw new Error("Code Map runtime unexpectedly resolved without a service");
     service = configuredService;
   }

@@ -80,19 +80,21 @@ test("file hierarchy preserves provider containment and keeps unsupported-langua
   assert.equal(incomingContains.get("run"), 1);
 });
 
-test("filesystem inventory is provider-neutral and skips generated/dependency directories", async () => {
+test("filesystem inventory is provider-neutral and skips generated/dependency/runtime directories", async () => {
   const root = mkdtempSync(join(tmpdir(), "questboard-file-inventory-"));
   try {
     mkdirSync(join(root, "src"), { recursive: true });
     mkdirSync(join(root, "macos"), { recursive: true });
     mkdirSync(join(root, "scripts"), { recursive: true });
     mkdirSync(join(root, "windows"), { recursive: true });
+    mkdirSync(join(root, ".questboard"), { recursive: true });
     mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
     mkdirSync(join(root, "dist"), { recursive: true });
     writeFileSync(join(root, "src", "main.ts"), "export const value = 1;\n");
     writeFileSync(join(root, "macos", "Companion.swift"), "func start() {}\n");
     writeFileSync(join(root, "scripts", "bootstrap.sh"), "#!/bin/sh\n");
     writeFileSync(join(root, "windows", "install.ps1"), "Write-Host ok\n");
+    writeFileSync(join(root, ".questboard", "questboard.sqlite"), "runtime state\n");
     writeFileSync(join(root, "node_modules", "pkg", "ignored.js"), "ignored\n");
     writeFileSync(join(root, "dist", "ignored.js"), "ignored\n");
 

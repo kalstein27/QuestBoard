@@ -2,9 +2,10 @@ import { readdir } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { CodeFileInventory, CodeFileInventoryEntry } from "../../application/code-map-hierarchy.js";
 
-const DEFAULT_IGNORED_DIRECTORIES = new Set([
+export const DEFAULT_CODE_MAP_IGNORED_DIRECTORIES = new Set([
   ".git",
   ".chatgpt2codex",
+  ".questboard",
   "node_modules",
   "dist",
   "build",
@@ -39,7 +40,7 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
 
   constructor(options: FileSystemCodeFileInventoryOptions = {}) {
     this.#maxFiles = options.maxFiles ?? 50_000;
-    this.#ignoredDirectories = options.ignoredDirectories ?? DEFAULT_IGNORED_DIRECTORIES;
+    this.#ignoredDirectories = options.ignoredDirectories ?? DEFAULT_CODE_MAP_IGNORED_DIRECTORIES;
   }
 
   async listFiles(rootPath: string): Promise<readonly CodeFileInventoryEntry[]> {

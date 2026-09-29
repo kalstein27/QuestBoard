@@ -571,6 +571,8 @@ async function handleRequest(
 
     if (method === "GET") {
       const cached = codeMapService?.getCached(projectId);
+      const snapshotState = codeMapService?.snapshotLifecycleState(projectId);
+      const hydrationDiagnostic = codeMapService?.hydrationDiagnostic(projectId);
       sendJson(response, 200, {
         enabled,
         available,
@@ -580,6 +582,8 @@ async function handleRequest(
         ...(availability?.reason ? { reason: availability.reason } : {}),
         ...(availability?.message ? { message: availability.message } : {}),
         ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
+        ...(snapshotState ?? {}),
+        ...(hydrationDiagnostic ?? {}),
         ...(codeMapService?.providerCapabilities(projectId)
           ? { providerCapabilities: codeMapService.providerCapabilities(projectId) }
           : {}),

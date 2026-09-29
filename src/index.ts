@@ -12,6 +12,7 @@ export * from "./application/agent-focus.js";
 export * from "./application/code-map-projection.js";
 export * from "./application/code-map-overlay.js";
 export * from "./application/code-map-service.js";
+export * from "./application/code-map-persistence.js";
 export * from "./application/code-map-investigation-sync.js";
 export * from "./application/quest-board-repository.js";
 export * from "./application/quest-board-service.js";

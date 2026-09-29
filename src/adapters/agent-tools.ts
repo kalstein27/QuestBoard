@@ -1598,6 +1598,8 @@ function codeMapAgentStatus(
   const project = service.getProject(projectId);
   const codeMap = context.codeMapService;
   const cached = codeMap?.getCached(projectId);
+  const snapshotState = codeMap?.snapshotLifecycleState(projectId);
+  const hydrationDiagnostic = codeMap?.hydrationDiagnostic(projectId);
   const providerCapabilities = codeMap?.providerCapabilities(projectId);
   return {
     projectId,
@@ -1613,6 +1615,8 @@ function codeMapAgentStatus(
           relationCount: cached.graph.relations.length,
         }
       : {}),
+    ...(snapshotState ?? {}),
+    ...(hydrationDiagnostic ?? {}),
     ...(providerCapabilities ? { providerCapabilities } : {}),
   };
 }

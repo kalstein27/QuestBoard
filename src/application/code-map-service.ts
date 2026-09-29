@@ -34,6 +34,15 @@ import {
   type CodeMapManualRelationReader,
   type CodeMapManualRelationView,
 } from "./code-map-augmentation.js";
+import { CODE_GRAPH_SCHEMA_VERSION } from "./code-intelligence.js";
+import {
+  CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION,
+  type CodeMapHydrationDiagnostic,
+  type CodeMapHydrationRejectReason,
+  type CodeMapPersistenceConfig,
+  type CodeMapSnapshotLifecycleState,
+  type PersistedCodeMapSnapshotEnvelope,
+} from "./code-map-persistence.js";
 
 export type CodeMapRefreshMode = "full" | "incremental" | "cache-hit";
 
@@ -166,23 +175,50 @@ function changedArchitectureNodeIds(
   return changed.sort();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function persistedEnvelopeOrReason(
+  raw: unknown,
+  expectedProjectId: string,
+  expectedRootIdentity: string,
+  expectedProviderFingerprint: string,
+): { envelope?: PersistedCodeMapSnapshotEnvelope; reason?: CodeMapHydrationRejectReason } {
+  if (!isRecord(raw)) return { reason: "corrupt" };
+  if (raw.formatVersion !== CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION) return { reason: "format_changed" };
+  if (raw.graphSchemaVersion !== CODE_GRAPH_SCHEMA_VERSION) return { reason: "schema_changed" };
+  if (raw.projectId !== expectedProjectId) return { reason: "project_changed" };
+  if (raw.rootIdentity !== expectedRootIdentity) return { reason: "root_changed" };
+  if (raw.providerConfigFingerprint !== expectedProviderFingerprint) return { reason: "provider_changed" };
+  if (!isRecord(raw.graph)) return { reason: "corrupt" };
+  return { envelope: raw as unknown as PersistedCodeMapSnapshotEnvelope };
+}
+
 export class CodeMapService {
   readonly #provider: CodeIntelligenceProvider;
   readonly #fileInventory: CodeFileInventory | undefined;
   readonly #providerRegistry: CodeMapProviderRegistry | undefined;
   readonly #manualRelations: CodeMapManualRelationReader | undefined;
+  readonly #persistence: CodeMapPersistenceConfig | undefined;
   readonly #cache = new Map<string, CodeMapSnapshot>();
+  readonly #snapshotStates = new Map<string, CodeMapSnapshotLifecycleState>();
+  readonly #sourceManifestFingerprints = new Map<string, string | undefined>();
+  readonly #hydrationDiagnostics = new Map<string, CodeMapHydrationDiagnostic>();
+  readonly #hydrationAttempted = new Set<string>();
 
   constructor(
     provider: CodeIntelligenceProvider,
     fileInventory?: CodeFileInventory,
     providerRegistry?: CodeMapProviderRegistry,
     manualRelations?: CodeMapManualRelationReader,
+    persistence?: CodeMapPersistenceConfig,
   ) {
     this.#provider = provider;
     this.#fileInventory = fileInventory;
     this.#providerRegistry = providerRegistry;
     this.#manualRelations = manualRelations;
+    this.#persistence = persistence;
   }
 
   get capabilities(): CodeIntelligenceProvider["capabilities"] {
@@ -194,11 +230,23 @@ export class CodeMapService {
   }
 
   getCached(projectId: string): CodeMapSnapshot | undefined {
+    if (!this.#cache.has(projectId)) this.#hydrate(projectId);
     return this.#cache.get(projectId);
   }
 
+  snapshotLifecycleState(projectId: string): CodeMapSnapshotLifecycleState | undefined {
+    const cached = this.getCached(projectId);
+    if (!cached) return undefined;
+    return this.#refreshFreshness(projectId, cached.graph.rootPath);
+  }
+
+  hydrationDiagnostic(projectId: string): CodeMapHydrationDiagnostic | undefined {
+    this.getCached(projectId);
+    return this.#hydrationDiagnostics.get(projectId);
+  }
+
   providerCapabilities(projectId: string): CodeMapProviderCapabilityReport | undefined {
-    return this.#providerRegistry?.report(this.#cache.get(projectId)?.graph);
+    return this.#providerRegistry?.report(this.getCached(projectId)?.graph);
   }
 
   requestProviderInstall(projectId: string, providerId: string): CodeProviderInstallRequest {
@@ -209,7 +257,7 @@ export class CodeMapService {
   }
 
   manualRelations(projectId: string): CodeMapManualRelationView[] {
-    const cached = this.#cache.get(projectId);
+    const cached = this.getCached(projectId);
     if (!cached || !this.#manualRelations) return [];
     return projectCodeMapManualRelations(
       cached.graph,
@@ -218,7 +266,8 @@ export class CodeMapService {
   }
 
   async refresh(request: CodeIndexRequest): Promise<CodeMapRefreshResult> {
-    const cached = this.#cache.get(request.projectId);
+    this.#persistence?.validateStorageRootForProject?.(request.rootPath);
+    const cached = this.getCached(request.projectId);
     if (cached && request.changes && request.changes.length === 0) {
       return {
         ...cached,
@@ -253,6 +302,9 @@ export class CodeMapService {
     const changedMacroNodeIds = changedArchitectureNodeIds(cached?.projection, projection);
     const snapshot: CodeMapSnapshot = { graph, projection };
     this.#cache.set(request.projectId, snapshot);
+    this.#hydrationAttempted.add(request.projectId);
+    this.#hydrationDiagnostics.delete(request.projectId);
+    this.#recordFreshIndex(request.projectId, request.rootPath, graph);
 
     return {
       ...snapshot,
@@ -263,7 +315,7 @@ export class CodeMapService {
   }
 
   query(projectId: string, input: CodeMapQueryInput): CodeMapQueryResult {
-    const cached = this.#cache.get(projectId);
+    const cached = this.getCached(projectId);
     if (!cached) {
       throw new CodeMapQueryError(
         "code_map_not_indexed",
@@ -280,7 +332,7 @@ export class CodeMapService {
   }
 
   overlayTasks(projectId: string, links: readonly CodeMapTaskLink[]): CodeMapTaskOverlay {
-    const cached = this.#cache.get(projectId);
+    const cached = this.getCached(projectId);
     if (!cached) {
       throw new Error(`Code Map has not been indexed for project ${projectId}`);
     }
@@ -289,5 +341,176 @@ export class CodeMapService {
 
   invalidate(projectId: string): void {
     this.#cache.delete(projectId);
+    this.#snapshotStates.delete(projectId);
+    this.#sourceManifestFingerprints.delete(projectId);
+    this.#hydrationDiagnostics.delete(projectId);
+    this.#hydrationAttempted.delete(projectId);
+  }
+
+  #recordFreshIndex(projectId: string, rootPath: string, graph: CodeGraphSnapshot): void {
+    const persistence = this.#persistence;
+    if (!persistence) {
+      this.#snapshotStates.set(projectId, { snapshotSource: "fresh-index", freshness: "unknown" });
+      return;
+    }
+
+    let sourceManifestFingerprint: string | undefined;
+    let state: CodeMapSnapshotLifecycleState;
+    try {
+      sourceManifestFingerprint = persistence.sourceState.sourceManifestFingerprint(rootPath);
+      state = { snapshotSource: "fresh-index", freshness: "current" };
+    } catch {
+      state = {
+        snapshotSource: "fresh-index",
+        freshness: "unknown",
+        staleReason: "source_check_failed",
+      };
+    }
+    this.#sourceManifestFingerprints.set(projectId, sourceManifestFingerprint);
+    this.#snapshotStates.set(projectId, state);
+
+    try {
+      const envelope: PersistedCodeMapSnapshotEnvelope = {
+        formatVersion: CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION,
+        graphSchemaVersion: graph.schemaVersion,
+        projectId,
+        rootIdentity: persistence.sourceState.rootIdentity(rootPath),
+        providerConfigFingerprint: persistence.providerConfigFingerprint,
+        ...(sourceManifestFingerprint ? { sourceManifestFingerprint } : {}),
+        persistedAt: persistence.now?.() ?? new Date().toISOString(),
+        graph,
+      };
+      persistence.store.save(projectId, envelope);
+    } catch {
+      // Persistence is a restart optimization. A successful fresh index remains usable in memory.
+    }
+  }
+
+  #refreshFreshness(projectId: string, rootPath: string): CodeMapSnapshotLifecycleState {
+    const currentState = this.#snapshotStates.get(projectId)
+      ?? { snapshotSource: "fresh-index" as const, freshness: "unknown" as const };
+    const persistence = this.#persistence;
+    if (!persistence) return currentState;
+
+    if (!this.#sourceManifestFingerprints.has(projectId)) {
+      const unknown: CodeMapSnapshotLifecycleState = {
+        snapshotSource: currentState.snapshotSource,
+        freshness: "unknown",
+        staleReason: "source_check_failed",
+      };
+      this.#snapshotStates.set(projectId, unknown);
+      return unknown;
+    }
+    const baseline = this.#sourceManifestFingerprints.get(projectId);
+    if (!baseline) {
+      const unknown: CodeMapSnapshotLifecycleState = {
+        snapshotSource: currentState.snapshotSource,
+        freshness: "unknown",
+        staleReason: "source_check_failed",
+      };
+      this.#snapshotStates.set(projectId, unknown);
+      return unknown;
+    }
+
+    try {
+      const current = persistence.sourceState.sourceManifestFingerprint(rootPath);
+      const next: CodeMapSnapshotLifecycleState = current === baseline
+        ? { snapshotSource: currentState.snapshotSource, freshness: "current" }
+        : { snapshotSource: currentState.snapshotSource, freshness: "stale", staleReason: "source_changed" };
+      this.#snapshotStates.set(projectId, next);
+      return next;
+    } catch {
+      const unknown: CodeMapSnapshotLifecycleState = {
+        snapshotSource: currentState.snapshotSource,
+        freshness: "unknown",
+        staleReason: "source_check_failed",
+      };
+      this.#snapshotStates.set(projectId, unknown);
+      return unknown;
+    }
+  }
+
+  #hydrate(projectId: string): void {
+    const persistence = this.#persistence;
+    if (!persistence || this.#hydrationAttempted.has(projectId)) return;
+    this.#hydrationAttempted.add(projectId);
+
+    const rootPath = persistence.rootPathForProject?.(projectId);
+    if (!rootPath) return;
+
+    try {
+      persistence.validateStorageRootForProject?.(rootPath);
+    } catch {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "storage_inside_project" });
+      return;
+    }
+
+    let raw: unknown;
+    try {
+      raw = persistence.store.load(projectId);
+    } catch {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "corrupt" });
+      return;
+    }
+    if (raw === undefined) return;
+
+    let rootIdentity: string;
+    try {
+      rootIdentity = persistence.sourceState.rootIdentity(rootPath);
+    } catch {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "root_changed" });
+      return;
+    }
+
+    const parsed = persistedEnvelopeOrReason(
+      raw,
+      projectId,
+      rootIdentity,
+      persistence.providerConfigFingerprint,
+    );
+    if (!parsed.envelope) {
+      this.#hydrationDiagnostics.set(projectId, {
+        hydrationRejectReason: parsed.reason ?? "corrupt",
+      });
+      return;
+    }
+
+    const envelope = parsed.envelope;
+    const graph = envelope.graph;
+    if (graph.projectId !== projectId) {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "project_changed" });
+      return;
+    }
+    if (graph.schemaVersion !== CODE_GRAPH_SCHEMA_VERSION) {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "schema_changed" });
+      return;
+    }
+    let persistedGraphRootIdentity: string;
+    try {
+      persistedGraphRootIdentity = persistence.sourceState.rootIdentity(graph.rootPath);
+    } catch {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "root_changed" });
+      return;
+    }
+    if (persistedGraphRootIdentity !== rootIdentity) {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "root_changed" });
+      return;
+    }
+    try {
+      assertValidCodeGraphSnapshot(graph);
+    } catch {
+      this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "graph_invalid" });
+      return;
+    }
+
+    const snapshot: CodeMapSnapshot = {
+      graph,
+      projection: projectCodeArchitecture(graph),
+    };
+    this.#cache.set(projectId, snapshot);
+    this.#sourceManifestFingerprints.set(projectId, envelope.sourceManifestFingerprint);
+    this.#snapshotStates.set(projectId, { snapshotSource: "persisted", freshness: "unknown" });
+    this.#hydrationDiagnostics.delete(projectId);
+    this.#refreshFreshness(projectId, rootPath);
   }
 }

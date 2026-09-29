@@ -714,14 +714,20 @@ function renderCodeMapBoard() {
   syncCodeMapSearchControls(map);
   const timestamp = map.graph.indexedAt ? new Date(map.graph.indexedAt).toLocaleString() : "Indexed";
   const provider = map.provider && map.provider !== "unknown" ? `${map.provider} · ` : "";
-  const stale = Boolean(state.codeMapIndexError);
-  el["code-map-status"].textContent = stale
+  const indexFailed = Boolean(state.codeMapIndexError);
+  const sourceStale = map.freshness === "stale";
+  const snapshotSource = map.snapshotSource === "persisted" ? "persisted snapshot" : (map.mode || "cached");
+  el["code-map-status"].textContent = indexFailed
     ? `${provider}last-good snapshot · ${timestamp} · indexing failed`
-    : `${provider}${map.mode || "cached"} · ${timestamp}`;
+    : sourceStale
+      ? `${provider}${snapshotSource} · stale · ${timestamp}`
+      : `${provider}${snapshotSource} · ${timestamp}`;
   el["code-map-back"].disabled = state.codeMapNavigationHistory.length === 0;
   const shell = node("div", "code-map-explorer-shell");
-  if (stale) {
+  if (indexFailed) {
     shell.append(node("div", "code-map-banner warning", `Showing the last good snapshot. ${state.codeMapIndexError}`));
+  } else if (sourceStale) {
+    shell.append(node("div", "code-map-banner warning", "Source files changed after this Code Map snapshot. Existing results remain available; use Refresh / Re-index when you want a fresh index."));
   }
   const providerPanel = codeMapProviderPanel(map);
   if (providerPanel) shell.append(providerPanel);
