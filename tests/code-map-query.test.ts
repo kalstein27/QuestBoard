@@ -121,6 +121,35 @@ test("bounded Code Map queries navigate definition, hierarchy, callers, callees,
   assert.deepEqual(references.entries.map((entry) => entry.node.id), ["config"]);
 });
 
+test("semantic references exclude broad depends_on noise while explicit dependency queries preserve it", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    { id: "local-noise", kind: "variable", name: "parsed", canonicalIdentity: "scip:src/service.ts:local 7", language: "typescript", location: { path: "src/service.ts", startLine: 7 } },
+  ];
+  graph.relations = [
+    ...graph.relations,
+    { id: "run-local-noise", from: "method-run", to: "local-noise", kind: "depends_on", confidence: 0.9 },
+  ];
+
+  const references = queryCodeGraph(graph, "query-test-provider", {
+    operation: "relations",
+    nodeId: "method-run",
+    semantic: "references",
+  });
+  assert.equal(references.operation, "relations");
+  assert.deepEqual(references.entries.map((entry) => entry.node.id), ["config"]);
+
+  const dependencies = queryCodeGraph(graph, "query-test-provider", {
+    operation: "relations",
+    nodeId: "method-run",
+    direction: "outgoing",
+    relationKinds: ["depends_on"],
+  });
+  assert.equal(dependencies.operation, "relations");
+  assert.deepEqual(dependencies.entries.map((entry) => entry.node.id), ["local-noise"]);
+});
+
 test("find_nodes normalizes unknown language and ranks exact names ahead of enclosing canonical matches", () => {
   const graph = fixtureGraph();
   const unknown = queryCodeGraph(graph, "query-test-provider", {

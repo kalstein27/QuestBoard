@@ -33,7 +33,6 @@ export const CODE_MAP_QUERY_MAX_DEPTH = 4;
 export const CODE_MAP_QUERY_MAX_SEEDS = 10;
 
 const REFERENCE_RELATION_KINDS = new Set<CodeRelationKind>([
-  "depends_on",
   "implements",
   "overrides",
   "extends",
@@ -43,6 +42,11 @@ const REFERENCE_RELATION_KINDS = new Set<CodeRelationKind>([
   "reads",
   "writes",
 ]);
+
+// `depends_on` is the conservative fallback for provider references that do
+// not carry a more specific role. Keep those raw facts queryable through
+// relationKinds, but do not mix them into the higher-signal semantic
+// references shortcut by default.
 
 export type CodeMapQueryErrorCode =
   | "code_map_not_indexed"
