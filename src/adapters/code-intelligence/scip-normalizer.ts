@@ -9,6 +9,7 @@ import {
   type CodeRelation,
   type CodeRelationKind,
 } from "../../application/code-intelligence.js";
+import { inferCodeLanguageFromPath } from "../../application/code-map-hierarchy.js";
 
 const SCIP_ROLE_DEFINITION = 1;
 const SCIP_ROLE_IMPORT = 2;
@@ -395,7 +396,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
 
   const semanticFileCountByLanguage = new Map<string, number>();
   for (const document of input.index.documents) {
-    const language = normalizeCodeLanguage(document.language);
+    const language = normalizeCodeLanguage(document.language ?? inferCodeLanguageFromPath(document.relativePath));
     semanticFileCountByLanguage.set(language, (semanticFileCountByLanguage.get(language) ?? 0) + 1);
   }
 

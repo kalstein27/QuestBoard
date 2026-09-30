@@ -88,6 +88,23 @@ test("normalizes SCIP definitions, references, and implementation relationships 
   assert.equal(JSON.stringify(graph).includes("scip-typescript npm"), true, "canonical SCIP identity is retained, not a backend row id");
 });
 
+test("SCIP coverage infers document language from path when the index omits it", () => {
+  const graph = normalizeScipGraph({
+    projectId: "questboard",
+    rootPath: "/workspace/questboard",
+    indexedAt: "2026-09-23T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [{ relativePath: "src/empty.ts", symbols: [], occurrences: [] }],
+      externalSymbols: [],
+    }),
+  });
+
+  const typescriptCoverage = graph.coverage?.languages.find((entry) => entry.language === "typescript");
+  assert.equal(typescriptCoverage?.semanticEligibleFileCount, 1);
+  assert.equal(typescriptCoverage?.semanticIndexedFileCount, 1);
+  assert.equal(graph.coverage?.languages.some((entry) => entry.language === "unknown"), false);
+});
+
 test("SCIP source supplement promotes only syntactic call occurrences to calls", () => {
   const caller = "scip-typescript npm questboard 0.0.0 src/server/http-api.ts/handleRequest().";
   const callee = "scip-typescript npm questboard 0.0.0 src/application/quest-board-service.ts/QuestBoardService#createTask().";
