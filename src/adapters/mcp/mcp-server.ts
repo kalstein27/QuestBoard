@@ -11,6 +11,7 @@ import {
 const SUPPORTED_PROTOCOL_VERSION = "2025-06-18";
 const MUTATING_TOOLS = new Set([
   "questboard_create_project",
+  "questboard_checkpoint_task",
   "questboard_create_task",
   "questboard_update_task",
   "questboard_delete_task",
@@ -21,6 +22,11 @@ const MUTATING_TOOLS = new Set([
   "questboard_delete_artifact",
   "questboard_add_relation",
   "questboard_delete_relation",
+  "questboard_create_flow_work_group",
+  "questboard_update_flow_work_group",
+  "questboard_delete_flow_work_group",
+  "questboard_set_flow_work_group_member",
+  "questboard_remove_flow_work_group_member",
   "questboard_create_investigation_node",
   "questboard_update_investigation_node",
   "questboard_delete_investigation_node",

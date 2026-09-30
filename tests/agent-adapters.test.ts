@@ -446,6 +446,55 @@ test("MCP automatic mutation request ids replay exact retries without colliding 
   }
 });
 
+test("MCP automatic mutation request ids cover checkpoint and Flow Work Group retries", () => {
+  const repository = new SqliteQuestBoardRepository();
+  const service = new QuestBoardService(repository);
+  const project = service.createProject({ name: "MCP durable retry coverage" }, owner);
+  const task = service.createTask({ projectId: project.id, title: "Checkpoint once", status: "ready" }, owner);
+  const handler = createQuestBoardMcpHandler(service);
+
+  try {
+    const checkpointRequest = {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: {
+        name: "questboard_checkpoint_task",
+        arguments: {
+          taskId: task.id,
+          now: "Checkpointed",
+          next: "Continue",
+          activity: { type: "note_added", summary: "Only once" },
+          actor: agent,
+        },
+      },
+    };
+    const checkpoint = handler.handle(checkpointRequest) as { result: { isError?: boolean } };
+    const checkpointReplay = handler.handle(checkpointRequest) as { result: { isError?: boolean } };
+    assert.equal(checkpoint.result.isError, undefined);
+    assert.equal(checkpointReplay.result.isError, undefined);
+    assert.equal(service.listTaskActivity(task.id).filter((entry) => entry.summary === "Only once").length, 1);
+
+    const createGroupRequest = {
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "questboard_create_flow_work_group",
+        arguments: { projectId: project.id, title: "Create once", actor: agent },
+      },
+    };
+    const created = handler.handle(createGroupRequest) as { result: { structuredContent: { group: { id: string } }; isError?: boolean } };
+    const createdReplay = handler.handle(createGroupRequest) as { result: { structuredContent: { group: { id: string } }; isError?: boolean } };
+    assert.equal(created.result.isError, undefined);
+    assert.equal(createdReplay.result.isError, undefined);
+    assert.equal(created.result.structuredContent.group.id, createdReplay.result.structuredContent.group.id);
+    assert.equal(service.listFlowWorkGroups(project.id).filter((group) => group.title === "Create once").length, 1);
+  } finally {
+    repository.close();
+  }
+});
+
 test("CLI uses the same agent tool boundary and supports neutral actor overrides", async () => {
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
