@@ -1043,13 +1043,19 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_preview_code_map_investigation_sync",
-    description: "Preview extraction/synchronization of Code Map architecture nodes and relations into the Investigation graph without mutating it.",
+    description: "Preview extraction/synchronization of Code Map architecture projection nodes and relations into the Investigation graph without mutating it. Partial selection uses architecture node IDs returned by a full sync preview, not raw CodeGraphSnapshot IDs from questboard_query_code_map.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         projectId: { type: "string", minLength: 1 },
-        codeNodeIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        codeNodeIds: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Architecture projection node IDs returned by preview.nodes[].codeNodeId. Raw CodeGraphSnapshot node IDs are not accepted.",
+        },
         includeRelations: { type: "boolean" },
         recreateDetached: { type: "boolean" },
       },
@@ -1058,13 +1064,19 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_apply_code_map_investigation_sync",
-    description: "Apply a previously previewed Code Map to Investigation sync transactionally using the exact projection fingerprint.",
+    description: "Apply a previously previewed Code Map architecture projection to Investigation sync transactionally using the exact projection fingerprint. Partial selection uses architecture node IDs returned by preview.nodes[].codeNodeId.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         projectId: { type: "string", minLength: 1 },
-        codeNodeIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        codeNodeIds: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Architecture projection node IDs returned by preview.nodes[].codeNodeId. Raw CodeGraphSnapshot node IDs are not accepted.",
+        },
         includeRelations: { type: "boolean" },
         recreateDetached: { type: "boolean" },
         expectedProjectionFingerprint: { type: "string", minLength: 1 },

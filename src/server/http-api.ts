@@ -1351,7 +1351,10 @@ function sendError(response: ServerResponse, error: unknown): void {
     return;
   }
   if (error instanceof CodeMapInvestigationSyncError) {
-    const statusCode = error.code === "code_map_sync_invalid_selection" ? 400 : 409;
+    const statusCode = [
+      "code_map_sync_invalid_selection",
+      "code_map_sync_raw_node_selection_unsupported",
+    ].includes(error.code) ? 400 : 409;
     sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
     return;
   }

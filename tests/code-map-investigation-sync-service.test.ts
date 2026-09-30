@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
+  CodeMapInvestigationSyncError,
   CodeMapInvestigationSyncService,
   CodeMapService,
   CodeMapSyncPreviewStaleError,
@@ -196,6 +197,17 @@ test("partial preview blocks relations whose unselected endpoint has not been ex
   await codeMap.refresh({ projectId: project.id, rootPath: "/workspace/project" });
   const projection = codeMap.getCached(project.id)!.projection;
   const http = projection.nodes.find((node) => node.kind === "http_api")!;
+
+  assert.throws(
+    () => sync.preview(project.id, { codeNodeIds: ["http-partial"] }),
+    (error: unknown) => {
+      assert.ok(error instanceof CodeMapInvestigationSyncError);
+      assert.equal(error.code, "code_map_sync_raw_node_selection_unsupported");
+      assert.match(error.message, /architecture projection node IDs only/);
+      assert.match(error.message, /preview\.nodes\[\]\.codeNodeId/);
+      return true;
+    },
+  );
 
   const preview = sync.preview(project.id, { codeNodeIds: [http.id], includeRelations: true });
   assert.equal(preview.counts.nodes.create, 1);

@@ -7,7 +7,7 @@ import type {
   InvestigationNode,
 } from "../core/domain.js";
 import type { MutationRequest, QuestBoardRepository } from "./quest-board-repository.js";
-import type { CodeMapService } from "./code-map-service.js";
+import type { CodeMapService, CodeMapSnapshot } from "./code-map-service.js";
 import type {
   CodeArchitectureNode,
   CodeArchitectureNodeKind,
@@ -300,9 +300,9 @@ export class CodeMapInvestigationSyncService {
   ) {}
 
   preview(projectId: string, selection: CodeMapInvestigationSyncSelection = {}): CodeMapInvestigationSyncPreview {
-    const projection = this.projection(projectId);
-    const normalized = this.normalizeSelection(projection, selection);
-    return this.previewProjection(projection, normalized);
+    const snapshot = this.snapshot(projectId);
+    const normalized = this.normalizeSelection(snapshot.projection, new Set(snapshot.graph.nodes.map((node) => node.id)), selection);
+    return this.previewProjection(snapshot.projection, normalized);
   }
 
   apply(
@@ -311,12 +311,13 @@ export class CodeMapInvestigationSyncService {
     actor: ActorRef,
     requestId: string,
   ): CodeMapInvestigationSyncResult {
-    const projection = this.projection(projectId);
+    const snapshot = this.snapshot(projectId);
+    const projection = snapshot.projection;
     const projectionFingerprint = fingerprintCodeMapInvestigationProjection(projection);
     if (projectionFingerprint !== input.expectedProjectionFingerprint) {
       throw new CodeMapSyncPreviewStaleError();
     }
-    const selection = this.normalizeSelection(projection, input);
+    const selection = this.normalizeSelection(projection, new Set(snapshot.graph.nodes.map((node) => node.id)), input);
     const normalizedRequestId = normalizeSyncRequestId(requestId);
     const request: MutationRequest = {
       requestId: normalizedRequestId,
@@ -337,7 +338,8 @@ export class CodeMapInvestigationSyncService {
     };
 
     return this.repository.runIdempotentMutation(request, () => {
-      const freshProjection = this.projection(projectId);
+      const freshSnapshot = this.snapshot(projectId);
+      const freshProjection = freshSnapshot.projection;
       if (fingerprintCodeMapInvestigationProjection(freshProjection) !== input.expectedProjectionFingerprint) {
         throw new CodeMapSyncPreviewStaleError();
       }
@@ -365,8 +367,14 @@ export class CodeMapInvestigationSyncService {
     return cached.projection;
   }
 
+  private snapshot(projectId: string): CodeMapSnapshot {
+    this.projection(projectId);
+    return this.codeMap.getCached(projectId)!;
+  }
+
   private normalizeSelection(
     projection: CodeArchitectureProjection,
+    rawNodeIds: ReadonlySet<string>,
     selection: CodeMapInvestigationSyncSelection,
   ): NormalizedSelection {
     const allIds = projection.nodes.map((node) => node.id);
@@ -378,6 +386,12 @@ export class CodeMapInvestigationSyncService {
     }
     const known = new Set(allIds);
     for (const codeNodeId of unique) {
+      if (!known.has(codeNodeId) && rawNodeIds.has(codeNodeId)) {
+        throw new CodeMapInvestigationSyncError(
+          "code_map_sync_raw_node_selection_unsupported",
+          `Raw Code Map node ${codeNodeId} is valid in the canonical CodeGraphSnapshot, but Investigation sync accepts architecture projection node IDs only. Call preview without codeNodeIds and use preview.nodes[].codeNodeId for partial sync.`,
+        );
+      }
       if (!known.has(codeNodeId)) {
         throw new CodeMapSyncInvalidSelectionError(`Unknown Code Map node ${codeNodeId}`);
       }

@@ -94,7 +94,7 @@ test("HTTP and MCP share one Code Map sync cache and stable error contract", asy
     assert.ok(toolNames.includes("questboard_preview_code_map_investigation_sync"));
     assert.ok(toolNames.includes("questboard_apply_code_map_investigation_sync"));
 
-    const mcpApply = await json(`${baseUrl}/_questboard/mcp-proxy`, {
+    const rawQuery = await json(`${baseUrl}/_questboard/mcp-proxy`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-questboard-daemon-client": "1" },
       body: JSON.stringify({
@@ -102,6 +102,57 @@ test("HTTP and MCP share one Code Map sync cache and stable error contract", asy
         message: {
           jsonrpc: "2.0",
           id: 2,
+          method: "tools/call",
+          params: {
+            name: "questboard_query_code_map",
+            arguments: { projectId: project.id, operation: "find_nodes", query: "createTask", limit: 10 },
+          },
+        },
+      }),
+    });
+    const rawNodeId = rawQuery.body.result.structuredContent.query.nodes[0]?.id as string;
+    assert.equal(rawNodeId, "service-node");
+
+    const httpRawSelection = await json(previewUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ codeNodeIds: [rawNodeId] }),
+    });
+    assert.equal(httpRawSelection.response.status, 400);
+    assert.equal(httpRawSelection.body.error.code, "code_map_sync_raw_node_selection_unsupported");
+    assert.match(httpRawSelection.body.error.message, /preview\.nodes\[\]\.codeNodeId/);
+
+    const mcpRawSelection = await json(`${baseUrl}/_questboard/mcp-proxy`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-questboard-daemon-client": "1" },
+      body: JSON.stringify({
+        sessionId: "sync-boundary-session",
+        message: {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "questboard_preview_code_map_investigation_sync",
+            arguments: { projectId: project.id, codeNodeIds: [rawNodeId] },
+          },
+        },
+      }),
+    });
+    assert.equal(mcpRawSelection.response.status, 200);
+    assert.equal(mcpRawSelection.body.result.isError, true);
+    assert.equal(
+      mcpRawSelection.body.result.structuredContent.error.code,
+      "code_map_sync_raw_node_selection_unsupported",
+    );
+
+    const mcpApply = await json(`${baseUrl}/_questboard/mcp-proxy`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-questboard-daemon-client": "1" },
+      body: JSON.stringify({
+        sessionId: "sync-boundary-session",
+        message: {
+          jsonrpc: "2.0",
+          id: 4,
           method: "tools/call",
           params: {
             name: "questboard_apply_code_map_investigation_sync",
