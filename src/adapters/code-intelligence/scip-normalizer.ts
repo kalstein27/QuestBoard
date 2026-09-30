@@ -357,6 +357,14 @@ interface DefinitionRecord {
   nodeId: string;
 }
 
+function scopedSymbolKey(document: ScipDocument, symbol: string): string {
+  return symbol.startsWith("local ") ? `${document.relativePath}\0${symbol}` : symbol;
+}
+
+function canonicalScipIdentity(document: ScipDocument, symbol: string): string {
+  return symbol.startsWith("local ") ? `scip:${document.relativePath}:${symbol}` : `scip:${symbol}`;
+}
+
 function relationKindForRoles(roles: number): CodeRelationKind {
   if ((roles & SCIP_ROLE_IMPORT) !== 0) return "imports";
   if ((roles & SCIP_ROLE_WRITE) !== 0) return "writes";
@@ -381,7 +389,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const infoBySymbol = new Map<string, ScipSymbolInformation>();
   for (const info of input.index.externalSymbols) infoBySymbol.set(info.symbol, info);
   for (const document of input.index.documents) {
-    for (const info of document.symbols) infoBySymbol.set(info.symbol, info);
+    for (const info of document.symbols) infoBySymbol.set(scopedSymbolKey(document, info.symbol), info);
   }
 
   const definitions: DefinitionRecord[] = [];
@@ -389,9 +397,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   for (const document of input.index.documents) {
     for (const occurrence of document.occurrences) {
       if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) === 0 || !occurrence.range) continue;
-      if (nodeBySymbol.has(occurrence.symbol)) continue;
-      const info = infoBySymbol.get(occurrence.symbol);
-      const canonicalIdentity = `scip:${occurrence.symbol}`;
+      const symbolKey = scopedSymbolKey(document, occurrence.symbol);
+      if (nodeBySymbol.has(symbolKey)) continue;
+      const info = infoBySymbol.get(symbolKey);
+      const canonicalIdentity = canonicalScipIdentity(document, occurrence.symbol);
       const nodeId = stableId("node", canonicalIdentity);
       const location = {
         path: document.relativePath,
@@ -411,7 +420,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         location,
         ...(info?.signature ? { signature: info.signature } : {}),
       };
-      nodeBySymbol.set(occurrence.symbol, node);
+      nodeBySymbol.set(symbolKey, node);
       definitions.push({ symbol: occurrence.symbol, document, occurrence, nodeId });
     }
   }
@@ -430,13 +439,15 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   // indexer omits enclosingSymbol, use the narrowest enclosing definition
   // range in the same document as conservative structural evidence.
   const directlyContained = new Set<string>();
-  for (const [symbol, info] of infoBySymbol) {
-    if (!info.enclosingSymbol) continue;
-    const child = nodeBySymbol.get(symbol)?.id;
-    const parent = nodeBySymbol.get(info.enclosingSymbol)?.id;
-    if (!child || !parent) continue;
-    addRelation(relations, parent, child, "contains");
-    directlyContained.add(child);
+  for (const document of input.index.documents) {
+    for (const info of document.symbols) {
+      if (!info.enclosingSymbol) continue;
+      const child = nodeBySymbol.get(scopedSymbolKey(document, info.symbol))?.id;
+      const parent = nodeBySymbol.get(scopedSymbolKey(document, info.enclosingSymbol))?.id;
+      if (!child || !parent) continue;
+      addRelation(relations, parent, child, "contains");
+      directlyContained.add(child);
+    }
   }
 
   for (const definition of definitions) {
@@ -454,16 +465,18 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     if (parent) addRelation(relations, parent.nodeId, definition.nodeId, "contains");
   }
 
-  for (const [symbol, info] of infoBySymbol) {
-    const from = nodeBySymbol.get(symbol)?.id;
-    if (!from) continue;
-    for (const relationship of info.relationships) {
-      const to = nodeBySymbol.get(relationship.symbol)?.id;
-      if (!to) continue;
-      if (relationship.isImplementation) addRelation(relations, from, to, "implements");
-      if (relationship.isTypeDefinition) addRelation(relations, from, to, "references_type");
-      if (relationship.isReference && !relationship.isImplementation) addRelation(relations, from, to, "depends_on");
-      if (relationship.isDefinition) addRelation(relations, from, to, "depends_on");
+  for (const document of input.index.documents) {
+    for (const info of document.symbols) {
+      const from = nodeBySymbol.get(scopedSymbolKey(document, info.symbol))?.id;
+      if (!from) continue;
+      for (const relationship of info.relationships) {
+        const to = nodeBySymbol.get(scopedSymbolKey(document, relationship.symbol))?.id;
+        if (!to) continue;
+        if (relationship.isImplementation) addRelation(relations, from, to, "implements");
+        if (relationship.isTypeDefinition) addRelation(relations, from, to, "references_type");
+        if (relationship.isReference && !relationship.isImplementation) addRelation(relations, from, to, "depends_on");
+        if (relationship.isDefinition) addRelation(relations, from, to, "depends_on");
+      }
     }
   }
 
@@ -473,7 +486,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const lineStarts = source ? lineStartOffsets(source) : undefined;
     for (const occurrence of document.occurrences) {
       if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) !== 0 || !occurrence.range) continue;
-      const target = nodeBySymbol.get(occurrence.symbol)?.id;
+      const target = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id;
       if (!target) continue;
       const owners = documentDefinitions
         .filter((definition) => definition.occurrence.enclosingRange && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))

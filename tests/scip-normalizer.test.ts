@@ -177,6 +177,62 @@ test("SCIP parser accepts typed camelCase ranges and snake_case fields", () => {
   });
 });
 
+test("SCIP keeps document-local symbols isolated across files", () => {
+  const A_OWNER = "scip-typescript npm questboard 0.0.0 src/a.ts/aOwner().";
+  const B_OWNER = "scip-typescript npm questboard 0.0.0 src/b.ts/bOwner().";
+  const graph = normalizeScipGraph({
+    projectId: "questboard",
+    rootPath: "/workspace/questboard",
+    indexedAt: "2026-09-30T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [
+        {
+          relativePath: "src/a.ts",
+          language: "typescript",
+          symbols: [
+            { symbol: A_OWNER, displayName: "aOwner", kind: "Function" },
+            { symbol: "local 0", displayName: "aLocal", kind: "Function" },
+          ],
+          occurrences: [
+            { symbol: A_OWNER, symbolRoles: 1, range: [0, 9, 15], enclosingRange: [0, 0, 3, 1] },
+            { symbol: "local 0", symbolRoles: 1, range: [1, 11, 17] },
+            { symbol: "local 0", symbolRoles: 0, range: [2, 2, 8] },
+          ],
+        },
+        {
+          relativePath: "src/b.ts",
+          language: "typescript",
+          symbols: [
+            { symbol: B_OWNER, displayName: "bOwner", kind: "Function" },
+            { symbol: "local 0", displayName: "bLocal", kind: "Function" },
+          ],
+          occurrences: [
+            { symbol: B_OWNER, symbolRoles: 1, range: [0, 9, 15], enclosingRange: [0, 0, 3, 1] },
+            { symbol: "local 0", symbolRoles: 1, range: [1, 11, 17] },
+            { symbol: "local 0", symbolRoles: 0, range: [2, 2, 8] },
+          ],
+        },
+      ],
+    }),
+    sourceTextByPath: new Map([
+      ["src/a.ts", "function aOwner() {\n  function aLocal() {}\n  aLocal();\n}\n"],
+      ["src/b.ts", "function bOwner() {\n  function bLocal() {}\n  bLocal();\n}\n"],
+    ]),
+  });
+
+  const aLocal = graph.nodes.find((node) => node.canonicalIdentity === "scip:src/a.ts:local 0")!;
+  const bLocal = graph.nodes.find((node) => node.canonicalIdentity === "scip:src/b.ts:local 0")!;
+  const aOwner = graph.nodes.find((node) => node.canonicalIdentity === `scip:${A_OWNER}`)!;
+  const bOwner = graph.nodes.find((node) => node.canonicalIdentity === `scip:${B_OWNER}`)!;
+
+  assert.equal(graph.nodes.length, 4);
+  assert.notEqual(aLocal.id, bLocal.id);
+  assert.ok(graph.relations.some((relation) => relation.from === aOwner.id && relation.to === aLocal.id && relation.kind === "calls"));
+  assert.ok(graph.relations.some((relation) => relation.from === bOwner.id && relation.to === bLocal.id && relation.kind === "calls"));
+  assert.equal(graph.relations.some((relation) => relation.from === aOwner.id && relation.to === bLocal.id), false);
+  assert.equal(graph.relations.some((relation) => relation.from === bOwner.id && relation.to === aLocal.id), false);
+});
+
 test("SCIP infers stable kinds and names from scip print documentation when kind/displayName are omitted", () => {
   const MODULE = "scip-typescript npm questboard 0.0.0 src/`sample.ts`/";
   const SERVICE = `${MODULE}Service#`;
