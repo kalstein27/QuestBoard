@@ -8,7 +8,16 @@ import {
 import { QuestBoardRemoteToolError } from "./agent-tools.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const LONG_RUNNING_REQUEST_TIMEOUT_MS = 120_000;
 const DAEMON_CLIENT_HEADER = "x-questboard-daemon-client";
+const LONG_RUNNING_AGENT_TOOLS = new Set([
+  "questboard_refresh_code_map",
+]);
+
+export interface QuestBoardDaemonClientOptions {
+  requestTimeoutMs?: number;
+  longRunningRequestTimeoutMs?: number;
+}
 
 export class QuestBoardDaemonClient {
   readonly baseUrl: string;
@@ -16,6 +25,7 @@ export class QuestBoardDaemonClient {
   constructor(
     baseUrl: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly options: QuestBoardDaemonClientOptions = {},
   ) {
     this.baseUrl = normalizeDaemonUrl(baseUrl);
   }
@@ -65,7 +75,11 @@ export class QuestBoardDaemonClient {
   }
 
   async callAgentTool(name: string, input: unknown = {}): Promise<unknown> {
-    const response = await this.postJson("/_questboard/agent-tool", { name, arguments: input });
+    const response = await this.postJson(
+      "/_questboard/agent-tool",
+      { name, arguments: input },
+      this.requestTimeoutMs(name),
+    );
     const payload = await response.json() as {
       result?: unknown;
       error?: { code?: unknown; message?: unknown };
@@ -79,12 +93,22 @@ export class QuestBoardDaemonClient {
   }
 
   async forwardMcp(sessionId: string, message: unknown): Promise<unknown | null> {
-    const response = await this.postJson("/_questboard/mcp-proxy", { sessionId, message });
+    const response = await this.postJson(
+      "/_questboard/mcp-proxy",
+      { sessionId, message },
+      this.requestTimeoutMs(mcpToolName(message)),
+    );
     if (response.status === 204) return null;
     return await response.json() as unknown;
   }
 
-  private async postJson(pathname: string, body: unknown): Promise<Response> {
+  private requestTimeoutMs(toolName: string | undefined): number {
+    return toolName && LONG_RUNNING_AGENT_TOOLS.has(toolName)
+      ? (this.options.longRunningRequestTimeoutMs ?? LONG_RUNNING_REQUEST_TIMEOUT_MS)
+      : (this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  }
+
+  private async postJson(pathname: string, body: unknown, timeoutMs: number): Promise<Response> {
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${pathname}`, {
@@ -94,9 +118,16 @@ export class QuestBoardDaemonClient {
           [DAEMON_CLIENT_HEADER]: "1",
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(
+          `QuestBoard daemon request timed out after ${timeoutMs}ms at ${this.baseUrl}${pathname}; `
+          + "the daemon may still be processing the operation and its terminal state is unknown",
+          { cause: error },
+        );
+      }
       throw daemonUnavailable(this.baseUrl, error);
     }
     if (!response.ok) {
@@ -104,6 +135,15 @@ export class QuestBoardDaemonClient {
     }
     return response;
   }
+}
+
+function mcpToolName(message: unknown): string | undefined {
+  if (message === null || typeof message !== "object" || Array.isArray(message)) return undefined;
+  const envelope = message as { method?: unknown; params?: unknown };
+  if (envelope.method !== "tools/call") return undefined;
+  if (envelope.params === null || typeof envelope.params !== "object" || Array.isArray(envelope.params)) return undefined;
+  const name = (envelope.params as { name?: unknown }).name;
+  return typeof name === "string" ? name : undefined;
 }
 
 export function resolveQuestBoardDaemonUrl(
