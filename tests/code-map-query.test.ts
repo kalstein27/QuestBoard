@@ -125,10 +125,12 @@ test("semantic references exclude broad depends_on noise while explicit dependen
   const graph = fixtureGraph();
   graph.nodes = [
     ...graph.nodes,
+    { id: "stable-global", kind: "variable", name: "GLOBAL_SCHEMA", canonicalIdentity: "scip:GLOBAL_SCHEMA.", language: "typescript", location: { path: "src/service.ts", startLine: 2 } },
     { id: "local-noise", kind: "variable", name: "parsed", canonicalIdentity: "scip:src/service.ts:local 7", language: "typescript", location: { path: "src/service.ts", startLine: 7 } },
   ];
   graph.relations = [
     ...graph.relations,
+    { id: "run-stable-global", from: "method-run", to: "stable-global", kind: "depends_on", confidence: 0.9 },
     { id: "run-local-noise", from: "method-run", to: "local-noise", kind: "depends_on", confidence: 0.9 },
   ];
 
@@ -147,7 +149,18 @@ test("semantic references exclude broad depends_on noise while explicit dependen
     relationKinds: ["depends_on"],
   });
   assert.equal(dependencies.operation, "relations");
-  assert.deepEqual(dependencies.entries.map((entry) => entry.node.id), ["local-noise"]);
+  assert.deepEqual(dependencies.entries.map((entry) => entry.node.id), ["stable-global", "local-noise"]);
+
+  const boundedDependencies = queryCodeGraph(graph, "query-test-provider", {
+    operation: "relations",
+    nodeId: "method-run",
+    direction: "outgoing",
+    relationKinds: ["depends_on"],
+    limit: 1,
+  });
+  assert.equal(boundedDependencies.operation, "relations");
+  assert.deepEqual(boundedDependencies.entries.map((entry) => entry.node.id), ["stable-global"]);
+  assert.equal(boundedDependencies.truncated, true);
 });
 
 test("find_nodes normalizes unknown language and ranks exact names ahead of enclosing canonical matches", () => {

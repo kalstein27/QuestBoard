@@ -195,6 +195,18 @@ function relationSort(left: CodeRelation, right: CodeRelation): number {
     || left.id.localeCompare(right.id);
 }
 
+function adjacentNodeSort(
+  nodeId: string,
+  nodeById: ReadonlyMap<string, CodeNode>,
+  left: CodeRelation,
+  right: CodeRelation,
+): number {
+  const leftNode = nodeById.get(otherNodeId(left, nodeId));
+  const rightNode = nodeById.get(otherNodeId(right, nodeId));
+  return (leftNode && rightNode ? nodeSort(leftNode, rightNode) : 0)
+    || relationSort(left, right);
+}
+
 const NAVIGATION_RELATION_PRIORITY: Record<CodeRelationKind, number> = {
   calls: 0,
   contains: 0,
@@ -407,11 +419,16 @@ export function queryCodeGraph(
         return kind;
       });
       const kindSet = semanticFilter?.kinds ?? (relationKinds ? new Set(relationKinds) : undefined);
+      const sourceOrderedDependencies = !semanticFilter
+        && relationKinds?.length === 1
+        && relationKinds[0] === "depends_on";
       const matching = graph.relations
         .filter((relation) => relation.from === node.id || relation.to === node.id)
         .filter((relation) => directionAllows(relation, node.id, direction))
         .filter((relation) => !kindSet || kindSet.has(relation.kind))
-        .sort(relationSort);
+        .sort((left, right) => sourceOrderedDependencies
+          ? adjacentNodeSort(node.id, nodeById, left, right)
+          : relationSort(left, right));
       const entries = matching
         .slice(0, limit)
         .map((relation) => ({ relation, node: nodeById.get(otherNodeId(relation, node.id))! }));
