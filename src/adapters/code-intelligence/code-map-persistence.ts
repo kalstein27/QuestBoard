@@ -16,12 +16,14 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   CodeMapPersistedSnapshotStore,
+  CodeMapRefreshJobReceipt,
   CodeMapSourceStateProvider,
   PersistedCodeMapSnapshotEnvelope,
 } from "../../application/code-map-persistence.js";
 import { DEFAULT_CODE_MAP_IGNORED_DIRECTORIES } from "./file-inventory.js";
 
 const MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
+const MAX_REFRESH_JOB_BYTES = 64 * 1024;
 const DEFAULT_MAX_FILES = 50_000;
 
 function sha256(value: string): string {
@@ -30,6 +32,10 @@ function sha256(value: string): string {
 
 function projectSnapshotPath(storageRoot: string, projectId: string): string {
   return join(storageRoot, "snapshots", sha256(projectId), "snapshot.json");
+}
+
+function projectRefreshJobPath(storageRoot: string, projectId: string): string {
+  return join(storageRoot, "snapshots", sha256(projectId), "refresh-job.json");
 }
 
 function canonicalPathAllowingMissingLeaf(path: string): string {
@@ -70,6 +76,38 @@ export class FileSystemCodeMapPersistedSnapshotStore implements CodeMapPersisted
     if (!metadata.isFile()) throw new Error("Persisted Code Map snapshot is not a regular file");
     if (metadata.size > MAX_SNAPSHOT_BYTES) throw new Error("Persisted Code Map snapshot exceeds the read limit");
     return JSON.parse(readFileSync(path, "utf8"));
+  }
+
+  loadRefreshJob(projectId: string): unknown | undefined {
+    const path = projectRefreshJobPath(this.#storageRoot, projectId);
+    if (!existsSync(path)) return undefined;
+    const metadata = statSync(path);
+    if (!metadata.isFile()) throw new Error("Persisted Code Map refresh job is not a regular file");
+    if (metadata.size > MAX_REFRESH_JOB_BYTES) throw new Error("Persisted Code Map refresh job exceeds the read limit");
+    return JSON.parse(readFileSync(path, "utf8"));
+  }
+
+  saveRefreshJob(projectId: string, receipt: CodeMapRefreshJobReceipt): void {
+    const path = projectRefreshJobPath(this.#storageRoot, projectId);
+    mkdirSync(dirname(path), { recursive: true });
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const serialized = `${JSON.stringify(receipt)}\n`;
+    if (Buffer.byteLength(serialized) > MAX_REFRESH_JOB_BYTES) {
+      throw new Error("Persisted Code Map refresh job exceeds the write limit");
+    }
+
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(temporaryPath, "wx", 0o600);
+      writeFileSync(descriptor, serialized, "utf8");
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      renameSync(temporaryPath, path);
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+      rmSync(temporaryPath, { force: true });
+    }
   }
 
   save(projectId: string, snapshot: PersistedCodeMapSnapshotEnvelope): void {

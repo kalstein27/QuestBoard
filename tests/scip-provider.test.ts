@@ -6,10 +6,13 @@ import test from "node:test";
 import {
   ScipTypeScriptCodeIntelligenceProvider,
   type ScipIndexReader,
+  type ScipGraphLoader,
+  type ScipGraphLoadInput,
   type ScipProcessRunOptions,
   type ScipProcessRunResult,
   type ScipProcessRunner,
 } from "../src/adapters/code-intelligence/scip-provider.js";
+import type { CodeGraphSnapshot } from "../src/application/code-intelligence.js";
 import { parseScipJsonIndex } from "../src/adapters/code-intelligence/scip-normalizer.js";
 
 interface Call {
@@ -47,6 +50,20 @@ class FakeIndexReader implements ScipIndexReader {
 
   async read() {
     return parseScipJsonIndex(JSON.parse(this.#json));
+  }
+}
+
+class FakeGraphLoader implements ScipGraphLoader {
+  calls: ScipGraphLoadInput[] = [];
+  readonly #graph: CodeGraphSnapshot;
+
+  constructor(graph: CodeGraphSnapshot) {
+    this.#graph = graph;
+  }
+
+  async load(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot> {
+    this.calls.push(input);
+    return this.#graph;
   }
 }
 
@@ -115,6 +132,41 @@ test("SCIP provider advertises full-index semantics instead of claiming incremen
     impactAnalysis: false,
     callTrace: false,
   });
+});
+
+test("SCIP provider delegates production graph loading behind the worker/offload seam", async () => {
+  const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-storage-"));
+  const projectRoot = mkdtempSync(join(tmpdir(), "questboard-scip-project-"));
+  try {
+    writeFileSync(join(projectRoot, "tsconfig.json"), JSON.stringify({ include: ["src/**/*.ts"] }));
+    const runner = new FakeRunner([success()]);
+    const graph: CodeGraphSnapshot = {
+      schemaVersion: 1,
+      projectId: "questboard",
+      rootPath: projectRoot,
+      indexedAt: "2026-09-30T00:00:00.000Z",
+      nodes: [],
+      relations: [],
+    };
+    const graphLoader = new FakeGraphLoader(graph);
+    const provider = new ScipTypeScriptCodeIntelligenceProvider(runner, {
+      storageRoot,
+      indexerExecutable: "scip-typescript-test",
+      graphLoader,
+      now: () => graph.indexedAt,
+    });
+
+    const result = await provider.indexProject({ projectId: "questboard", rootPath: projectRoot });
+
+    assert.equal(result, graph);
+    assert.equal(graphLoader.calls.length, 1);
+    assert.equal(graphLoader.calls[0]?.request.rootPath, projectRoot);
+    assert.equal(graphLoader.calls[0]?.indexedAt, graph.indexedAt);
+    assert.equal(graphLoader.calls[0]?.indexPath.endsWith("/index.scip"), true);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
 });
 
 

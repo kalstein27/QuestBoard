@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   assertValidCodeGraphSnapshot,
   type CodeGraphSnapshot,
@@ -43,6 +44,7 @@ import {
   type CodeMapSnapshotLifecycleState,
   type PersistedCodeMapSnapshotEnvelope,
 } from "./code-map-persistence.js";
+import type { CodeMapRefreshJobReceipt } from "./code-map-persistence.js";
 
 export type CodeMapRefreshMode = "full" | "incremental" | "cache-hit";
 
@@ -179,6 +181,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseRefreshJobReceipt(
+  value: unknown,
+  projectId: string,
+  providerId: string,
+): CodeMapRefreshJobReceipt | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.projectId !== projectId || value.providerId !== providerId) return undefined;
+  if (typeof value.jobId !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string") return undefined;
+  if (value.state !== "running" && value.state !== "succeeded" && value.state !== "failed") return undefined;
+  if (value.phase !== "queued" && value.phase !== "indexing" && value.phase !== "complete" && value.phase !== "interrupted") return undefined;
+  return value as unknown as CodeMapRefreshJobReceipt;
+}
+
 function persistedEnvelopeOrReason(
   raw: unknown,
   expectedProjectId: string,
@@ -206,6 +221,8 @@ export class CodeMapService {
   readonly #sourceManifestFingerprints = new Map<string, string | undefined>();
   readonly #hydrationDiagnostics = new Map<string, CodeMapHydrationDiagnostic>();
   readonly #hydrationAttempted = new Set<string>();
+  readonly #refreshJobs = new Map<string, CodeMapRefreshJobReceipt>();
+  readonly #refreshTasks = new Map<string, Promise<void>>();
 
   constructor(
     provider: CodeIntelligenceProvider,
@@ -254,6 +271,65 @@ export class CodeMapService {
       throw new Error("Code Map provider registry is not available in this runtime");
     }
     return this.#providerRegistry.requestInstall(projectId, providerId);
+  }
+
+  refreshJob(projectId: string): CodeMapRefreshJobReceipt | undefined {
+    const cached = this.#refreshJobs.get(projectId);
+    if (cached) return cached;
+    const load = this.#persistence?.store.loadRefreshJob;
+    if (!load) return undefined;
+    let parsed: CodeMapRefreshJobReceipt | undefined;
+    try {
+      parsed = parseRefreshJobReceipt(load.call(this.#persistence!.store, projectId), projectId, this.providerId);
+    } catch {
+      return undefined;
+    }
+    if (!parsed) return undefined;
+    if (parsed.state === "running") {
+      const now = this.#now();
+      parsed = {
+        ...parsed,
+        state: "failed",
+        phase: "interrupted",
+        updatedAt: now,
+        finishedAt: now,
+        error: {
+          code: "refresh_interrupted",
+          message: "Code Map refresh was interrupted by a service restart",
+        },
+      };
+      this.#persistRefreshJob(parsed);
+    }
+    this.#refreshJobs.set(projectId, parsed);
+    return parsed;
+  }
+
+  startRefresh(request: CodeIndexRequest): CodeMapRefreshJobReceipt {
+    this.#persistence?.validateStorageRootForProject?.(request.rootPath);
+    const existing = this.refreshJob(request.projectId);
+    if (existing?.state === "running") return existing;
+
+    const now = this.#now();
+    const receipt: CodeMapRefreshJobReceipt = {
+      jobId: `refresh_${randomUUID()}`,
+      projectId: request.projectId,
+      providerId: this.providerId,
+      state: "running",
+      phase: "queued",
+      startedAt: now,
+      updatedAt: now,
+    };
+    this.#refreshJobs.set(request.projectId, receipt);
+    this.#persistRefreshJob(receipt);
+
+    queueMicrotask(() => {
+      const task = this.#runRefreshJob(request, receipt.jobId);
+      this.#refreshTasks.set(request.projectId, task);
+      void task.finally(() => {
+        if (this.#refreshTasks.get(request.projectId) === task) this.#refreshTasks.delete(request.projectId);
+      });
+    });
+    return receipt;
   }
 
   manualRelations(projectId: string): CodeMapManualRelationView[] {
@@ -312,6 +388,65 @@ export class CodeMapService {
       changedCodeNodeIds: changedRawNodeIds,
       changedArchitectureNodeIds: changedMacroNodeIds,
     };
+  }
+
+  async #runRefreshJob(request: CodeIndexRequest, jobId: string): Promise<void> {
+    const current = this.#refreshJobs.get(request.projectId);
+    if (!current || current.jobId !== jobId) return;
+    const indexing: CodeMapRefreshJobReceipt = {
+      ...current,
+      phase: "indexing",
+      updatedAt: this.#now(),
+    };
+    this.#refreshJobs.set(request.projectId, indexing);
+    this.#persistRefreshJob(indexing);
+
+    try {
+      const refreshed = await this.refresh(request);
+      const finishedAt = this.#now();
+      const completed: CodeMapRefreshJobReceipt = {
+        ...indexing,
+        state: "succeeded",
+        phase: "complete",
+        updatedAt: finishedAt,
+        finishedAt,
+        indexedAt: refreshed.graph.indexedAt,
+        mode: refreshed.mode,
+        nodeCount: refreshed.graph.nodes.length,
+        relationCount: refreshed.graph.relations.length,
+        changedCodeNodeCount: refreshed.changedCodeNodeIds.length,
+        changedArchitectureNodeCount: refreshed.changedArchitectureNodeIds.length,
+      };
+      this.#refreshJobs.set(request.projectId, completed);
+      this.#persistRefreshJob(completed);
+    } catch (error) {
+      const finishedAt = this.#now();
+      const failed: CodeMapRefreshJobReceipt = {
+        ...indexing,
+        state: "failed",
+        phase: "complete",
+        updatedAt: finishedAt,
+        finishedAt,
+        error: {
+          code: "refresh_failed",
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        },
+      };
+      this.#refreshJobs.set(request.projectId, failed);
+      this.#persistRefreshJob(failed);
+    }
+  }
+
+  #now(): string {
+    return this.#persistence?.now?.() ?? new Date().toISOString();
+  }
+
+  #persistRefreshJob(receipt: CodeMapRefreshJobReceipt): void {
+    try {
+      this.#persistence?.store.saveRefreshJob?.(receipt.projectId, receipt);
+    } catch {
+      // Job receipts improve restart recovery. In-memory lifecycle remains authoritative for this process.
+    }
   }
 
   query(projectId: string, input: CodeMapQueryInput): CodeMapQueryResult {

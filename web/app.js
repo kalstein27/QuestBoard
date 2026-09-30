@@ -652,9 +652,19 @@ async function refreshCodeMap() {
     state.codeMapLoading = true;
     setBusy(true);
     renderCodeMapBoard();
-    state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`, { method: "POST" });
+    const refreshPath = `/projects/${encodeURIComponent(state.projectId)}/code-map/refresh`;
+    const started = await api(refreshPath, { method: "POST" });
+    let receipt = started.refresh;
+    while (receipt?.state === "running") {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      receipt = (await api(refreshPath)).refresh;
+    }
+    if (!receipt || receipt.state !== "succeeded") {
+      throw new Error(receipt?.error?.message || "Code indexing failed");
+    }
+    state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
     state.codeMapIndexError = null;
-    toast(state.codeMap.mode === "cache-hit" ? "Code is current" : "Code indexed");
+    toast(receipt.mode === "cache-hit" ? "Code is current" : "Code indexed");
   } catch (error) {
     state.codeMapIndexError = error.message || "Code indexing failed";
     try {

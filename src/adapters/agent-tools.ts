@@ -41,7 +41,7 @@ import {
   type CodeMapInvestigationSyncService,
 } from "../application/code-map-investigation-sync.js";
 import { CODE_NODE_KINDS, CODE_RELATION_KINDS } from "../application/code-intelligence.js";
-import type { CodeMapRefreshResult, CodeMapService } from "../application/code-map-service.js";
+import type { CodeMapService } from "../application/code-map-service.js";
 import { CodeMapAugmentationError, type CodeMapAugmentationService } from "../application/code-map-augmentation.js";
 import {
   CODE_SCOPE_BINDING_KINDS,
@@ -805,7 +805,19 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_refresh_code_map",
-    description: "Run a fresh full Code Map index for one project's canonical rootPath and return only a bounded refresh summary. Provider installation is never triggered.",
+    description: "Start or reuse one background full Code Map refresh for the canonical Project rootPath and return a bounded job receipt immediately. Provider installation is never triggered.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_get_code_map_refresh_status",
+    description: "Read the latest bounded Code Map refresh job receipt for one project, including running/succeeded/failed terminal state.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1395,6 +1407,10 @@ export function executeQuestBoardAgentTool(
       };
     case "questboard_refresh_code_map":
       return refreshCodeMapForAgent(context, service, requireString(args, "projectId"));
+    case "questboard_get_code_map_refresh_status":
+      return {
+        refresh: requireCodeMapService(context).refreshJob(requireString(args, "projectId")) ?? null,
+      };
     case "questboard_get_code_map_provider_capabilities":
       return {
         capabilities: requireCodeMapService(context).providerCapabilities(requireString(args, "projectId")),
@@ -1621,11 +1637,11 @@ function codeMapAgentStatus(
   };
 }
 
-async function refreshCodeMapForAgent(
+function refreshCodeMapForAgent(
   context: QuestBoardAgentToolContext,
   service: QuestBoardService,
   projectId: string,
-): Promise<{ refresh: Record<string, unknown> }> {
+): { refresh: Record<string, unknown> } {
   const project = service.getProject(projectId);
   const codeMap = requireCodeMapService(context);
   if (!project.rootPath) {
@@ -1634,25 +1650,16 @@ async function refreshCodeMapForAgent(
       "Project rootPath is required before indexing Code Map",
     );
   }
-  let refreshed: CodeMapRefreshResult;
-  try {
-    refreshed = await codeMap.refresh({ projectId, rootPath: project.rootPath });
-  } catch {
-    throw new QuestBoardRemoteToolError(
-      "code_map_provider_failed",
-      `Code Map provider ${codeMap.providerId} failed to index this project`,
-    );
-  }
+  const refresh = codeMap.startRefresh({ projectId, rootPath: project.rootPath });
   return {
     refresh: {
       projectId,
       provider: codeMap.providerId,
-      mode: refreshed.mode,
-      indexedAt: refreshed.graph.indexedAt,
-      nodeCount: refreshed.graph.nodes.length,
-      relationCount: refreshed.graph.relations.length,
-      changedCodeNodeCount: refreshed.changedCodeNodeIds.length,
-      changedArchitectureNodeCount: refreshed.changedArchitectureNodeIds.length,
+      jobId: refresh.jobId,
+      state: refresh.state,
+      phase: refresh.phase,
+      startedAt: refresh.startedAt,
+      updatedAt: refresh.updatedAt,
     },
   };
 }

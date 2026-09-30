@@ -54,3 +54,32 @@ export interface CodeMapSnapshotLifecycleState {
 export interface CodeMapHydrationDiagnostic {
   hydrationRejectReason: CodeMapHydrationRejectReason;
 }
+
+export type CodeMapRefreshJobState = "running" | "succeeded" | "failed";
+export type CodeMapRefreshJobPhase = "queued" | "indexing" | "complete" | "interrupted";
+
+export interface CodeMapRefreshJobReceipt {
+  jobId: string;
+  projectId: string;
+  providerId: string;
+  state: CodeMapRefreshJobState;
+  phase: CodeMapRefreshJobPhase;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  indexedAt?: string;
+  mode?: "full" | "incremental" | "cache-hit";
+  nodeCount?: number;
+  relationCount?: number;
+  changedCodeNodeCount?: number;
+  changedArchitectureNodeCount?: number;
+  error?: {
+    code: "refresh_failed" | "refresh_interrupted";
+    message: string;
+  };
+}
+
+export interface CodeMapPersistedSnapshotStore {
+  loadRefreshJob?(projectId: string): unknown | undefined;
+  saveRefreshJob?(projectId: string, receipt: CodeMapRefreshJobReceipt): void;
+}

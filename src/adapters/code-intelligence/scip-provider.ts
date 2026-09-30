@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import type {
   CodeGraphSnapshot,
   CodeIndexRequest,
@@ -85,11 +86,22 @@ export interface ScipTypeScriptProviderOptions {
   storageRoot: string;
   indexerExecutable?: string;
   indexReader?: ScipIndexReader;
+  graphLoader?: ScipGraphLoader;
   now?: () => string;
 }
 
 export interface ScipIndexReader {
   read(indexPath: string): Promise<ScipJsonIndex>;
+}
+
+export interface ScipGraphLoadInput {
+  indexPath: string;
+  request: CodeIndexRequest;
+  indexedAt: string;
+}
+
+export interface ScipGraphLoader {
+  load(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot>;
 }
 
 interface BundledScipDecoder {
@@ -166,6 +178,40 @@ class BundledScipIndexReader implements ScipIndexReader {
   }
 }
 
+export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot> {
+  const index = await new BundledScipIndexReader().read(input.indexPath);
+  return normalizeScipGraph({
+    projectId: input.request.projectId,
+    rootPath: input.request.rootPath,
+    indexedAt: input.indexedAt,
+    index,
+    sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
+  });
+}
+
+export class WorkerScipGraphLoader implements ScipGraphLoader {
+  async load(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot> {
+    return await new Promise<CodeGraphSnapshot>((resolvePromise, reject) => {
+      const worker = new Worker(new URL("./scip-normalizer-worker.js", import.meta.url), {
+        workerData: input,
+      });
+      let settled = false;
+      worker.once("message", (message: { ok: true; graph: CodeGraphSnapshot } | { ok: false; error: string }) => {
+        settled = true;
+        if (message.ok) resolvePromise(message.graph);
+        else reject(new Error(message.error));
+      });
+      worker.once("error", (error) => {
+        settled = true;
+        reject(error);
+      });
+      worker.once("exit", (code) => {
+        if (!settled) reject(new Error(`SCIP normalization worker exited before returning a result (code ${code})`));
+      });
+    });
+  }
+}
+
 function indexDirectory(storageRoot: string, request: CodeIndexRequest): string {
   const digest = createHash("sha256")
     .update(`${request.projectId}\0${request.rootPath}`)
@@ -231,6 +277,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
   readonly #storageRoot: string;
   readonly #indexerExecutable: string;
   readonly #indexReader: ScipIndexReader;
+  readonly #graphLoader: ScipGraphLoader | undefined;
   readonly #now: () => string;
 
   constructor(runner: ScipProcessRunner, options: ScipTypeScriptProviderOptions) {
@@ -239,6 +286,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
     this.#storageRoot = options.storageRoot;
     this.#indexerExecutable = options.indexerExecutable?.trim() || "scip-typescript";
     this.#indexReader = options.indexReader ?? new BundledScipIndexReader();
+    this.#graphLoader = options.graphLoader ?? (options.indexReader ? undefined : new WorkerScipGraphLoader());
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -255,11 +303,15 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
       ["index", "--output", indexPath, ...projectArgs],
       { cwd: request.rootPath },
     );
+    const indexedAt = this.#now();
+    if (this.#graphLoader) {
+      return await this.#graphLoader.load({ indexPath, request, indexedAt });
+    }
     const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
       projectId: request.projectId,
       rootPath: request.rootPath,
-      indexedAt: this.#now(),
+      indexedAt,
       index,
       sourceTextByPath: readIndexedSourceText(request.rootPath, index),
     });

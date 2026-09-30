@@ -183,10 +183,22 @@ async function handleRequest(
   }
 
   const codeMapRefreshMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/refresh$/);
+  if (codeMapRefreshMatch && method === "GET") {
+    const projectId = decodePathPart(codeMapRefreshMatch[1]);
+    sendJson(response, 200, await executeQuestBoardAgentTool(
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      },
+      "questboard_get_code_map_refresh_status",
+      { projectId },
+    ));
+    return;
+  }
   if (codeMapRefreshMatch && method === "POST") {
     const projectId = decodePathPart(codeMapRefreshMatch[1]);
     try {
-      sendJson(response, 200, await executeQuestBoardAgentTool(
+      sendJson(response, 202, await executeQuestBoardAgentTool(
         {
           service,
           ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),

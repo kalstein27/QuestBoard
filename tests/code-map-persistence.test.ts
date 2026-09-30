@@ -23,6 +23,7 @@ import { createConfiguredCodeMapRuntime } from "../src/server/code-map-config.js
 
 class MemoryStore implements CodeMapPersistedSnapshotStore {
   value: unknown;
+  refreshJob: unknown;
 
   load() {
     return this.value;
@@ -30,6 +31,14 @@ class MemoryStore implements CodeMapPersistedSnapshotStore {
 
   save(_projectId: string, snapshot: PersistedCodeMapSnapshotEnvelope) {
     this.value = structuredClone(snapshot);
+  }
+
+  loadRefreshJob(_projectId: string) {
+    return this.refreshJob;
+  }
+
+  saveRefreshJob(_projectId: string, receipt: unknown) {
+    this.refreshJob = structuredClone(receipt);
   }
 }
 
@@ -135,6 +144,35 @@ test("persisted Code Map hydrates after service recreation without invoking prov
   assert.equal(query.operation, "find_nodes");
   if (query.operation !== "find_nodes") throw new Error("Expected find_nodes result");
   assert.equal(query.nodes[0]?.name, "main");
+});
+
+test("persisted running Code Map refresh is terminalized as interrupted after service restart", () => {
+  const store = new MemoryStore();
+  const sourceState = new MutableSourceState();
+  store.saveRefreshJob("project-1", {
+    jobId: "refresh-before-restart",
+    projectId: "project-1",
+    providerId: "fixture-provider",
+    state: "running",
+    phase: "indexing",
+    startedAt: "2026-09-29T14:59:00.000Z",
+    updatedAt: "2026-09-29T14:59:30.000Z",
+  });
+
+  const restarted = new CodeMapService(
+    new CountingProvider(),
+    undefined,
+    undefined,
+    undefined,
+    persistence(store, sourceState),
+  );
+  const receipt = restarted.refreshJob("project-1");
+
+  assert.equal(receipt?.jobId, "refresh-before-restart");
+  assert.equal(receipt?.state, "failed");
+  assert.equal(receipt?.phase, "interrupted");
+  assert.equal(receipt?.error?.code, "refresh_interrupted");
+  assert.equal((store.loadRefreshJob("project-1") as { state?: string }).state, "failed");
 });
 
 test("source change marks hydrated snapshot stale without provider execution and explicit refresh clears it", async () => {
@@ -274,6 +312,24 @@ test("filesystem snapshot and source manifest stay outside project checkout", ()
     };
     store.save("project-1", envelope);
     assert.deepEqual(store.load("project-1"), envelope);
+    const refreshReceipt = {
+      jobId: "refresh-file-store",
+      projectId: "project-1",
+      providerId: "fixture-provider",
+      state: "succeeded" as const,
+      phase: "complete" as const,
+      startedAt: "2026-09-29T14:00:00.000Z",
+      updatedAt: "2026-09-29T14:01:00.000Z",
+      finishedAt: "2026-09-29T14:01:00.000Z",
+      indexedAt: "2026-09-29T14:00:00.000Z",
+      mode: "full" as const,
+      nodeCount: 1,
+      relationCount: 0,
+      changedCodeNodeCount: 1,
+      changedArchitectureNodeCount: 0,
+    };
+    store.saveRefreshJob("project-1", refreshReceipt);
+    assert.deepEqual(store.loadRefreshJob("project-1"), refreshReceipt);
     assert.deepEqual(readdirSync(projectRoot).sort(), [".questboard", "src"]);
 
     writeFileSync(join(projectRoot, ".questboard", "questboard.sqlite"), "db-state-b-with-more-bytes\n");
