@@ -81,14 +81,31 @@ function codeRelationFingerprint(relation: CodeGraphSnapshot["relations"][number
   });
 }
 
+function pushAttachedRelation(
+  index: Map<string, string[]>,
+  nodeId: string,
+  fingerprint: string,
+): void {
+  const existing = index.get(nodeId);
+  if (existing) existing.push(fingerprint);
+  else index.set(nodeId, [fingerprint]);
+}
+
+function codeRelationFingerprintsByNode(graph: CodeGraphSnapshot): Map<string, readonly string[]> {
+  const index = new Map<string, string[]>();
+  for (const relation of graph.relations) {
+    const fingerprint = `${relation.id}:${codeRelationFingerprint(relation)}`;
+    pushAttachedRelation(index, relation.from, fingerprint);
+    if (relation.to !== relation.from) pushAttachedRelation(index, relation.to, fingerprint);
+  }
+  for (const fingerprints of index.values()) fingerprints.sort();
+  return index;
+}
+
 function codeNodeFingerprint(
   node: CodeGraphSnapshot["nodes"][number],
-  graph: CodeGraphSnapshot,
+  attachedRelations: readonly string[],
 ): string {
-  const attachedRelations = graph.relations
-    .filter((relation) => relation.from === node.id || relation.to === node.id)
-    .map((relation) => `${relation.id}:${codeRelationFingerprint(relation)}`)
-    .sort();
   return JSON.stringify({
     kind: node.kind,
     name: node.name,
@@ -116,6 +133,8 @@ function changedCodeNodeIds(
 
   const previousById = new Map(previous.nodes.map((node) => [node.id, node] as const));
   const nextById = new Map(next.nodes.map((node) => [node.id, node] as const));
+  const previousRelationsByNode = codeRelationFingerprintsByNode(previous);
+  const nextRelationsByNode = codeRelationFingerprintsByNode(next);
   const allIds = new Set([...previousById.keys(), ...nextById.keys()]);
   const changed: string[] = [];
 
@@ -126,21 +145,33 @@ function changedCodeNodeIds(
       changed.push(id);
       continue;
     }
-    if (codeNodeFingerprint(before, previous) !== codeNodeFingerprint(after, next)) {
+    if (
+      codeNodeFingerprint(before, previousRelationsByNode.get(id) ?? [])
+      !== codeNodeFingerprint(after, nextRelationsByNode.get(id) ?? [])
+    ) {
       changed.push(id);
     }
   }
   return changed.sort();
 }
 
+function architectureRelationFingerprintsByNode(
+  projection: CodeArchitectureProjection,
+): Map<string, readonly string[]> {
+  const index = new Map<string, string[]>();
+  for (const relation of projection.relations) {
+    const fingerprint = `${relation.from}:${relation.kind}:${relation.to}`;
+    pushAttachedRelation(index, relation.from, fingerprint);
+    if (relation.to !== relation.from) pushAttachedRelation(index, relation.to, fingerprint);
+  }
+  for (const fingerprints of index.values()) fingerprints.sort();
+  return index;
+}
+
 function architectureNodeFingerprint(
   node: CodeArchitectureProjection["nodes"][number],
-  projection: CodeArchitectureProjection,
+  attachedRelations: readonly string[],
 ): string {
-  const attachedRelations = projection.relations
-    .filter((relation) => relation.from === node.id || relation.to === node.id)
-    .map((relation) => `${relation.from}:${relation.kind}:${relation.to}`)
-    .sort();
   return JSON.stringify({
     kind: node.kind,
     title: node.title,
@@ -157,6 +188,8 @@ function changedArchitectureNodeIds(
 
   const previousById = new Map(previous.nodes.map((node) => [node.id, node] as const));
   const nextById = new Map(next.nodes.map((node) => [node.id, node] as const));
+  const previousRelationsByNode = architectureRelationFingerprintsByNode(previous);
+  const nextRelationsByNode = architectureRelationFingerprintsByNode(next);
   const allIds = new Set([...previousById.keys(), ...nextById.keys()]);
   const changed: string[] = [];
 
@@ -168,8 +201,8 @@ function changedArchitectureNodeIds(
       continue;
     }
     if (
-      architectureNodeFingerprint(before, previous) !==
-      architectureNodeFingerprint(after, next)
+      architectureNodeFingerprint(before, previousRelationsByNode.get(id) ?? []) !==
+      architectureNodeFingerprint(after, nextRelationsByNode.get(id) ?? [])
     ) {
       changed.push(id);
     }

@@ -127,6 +127,35 @@ test("Code Map service reports raw node changes independently from compatibility
   assert.deepEqual(incremental.changedArchitectureNodeIds, []);
 });
 
+test("Code Map service marks both endpoints changed when only an attached relation changes", async () => {
+  const before = graph(["service-a", "service-b"], "2026-09-22T13:00:00.000Z");
+  before.relations = [{
+    id: "service-a-calls-service-b",
+    from: "service-a",
+    to: "service-b",
+    kind: "calls",
+    confidence: 1,
+  }];
+  const after = graph(["service-a", "service-b"], "2026-09-22T13:05:00.000Z");
+  after.relations = [{
+    id: "service-a-calls-service-b",
+    from: "service-a",
+    to: "service-b",
+    kind: "depends_on",
+    confidence: 1,
+  }];
+  const service = new CodeMapService(new FakeProvider([before, after]));
+  const request = { projectId: "questboard", rootPath: "/workspace/questboard" };
+
+  await service.refresh(request);
+  const incremental = await service.refresh({
+    ...request,
+    changes: [{ path: "src/application/quest-board-service.ts", kind: "modified" }],
+  });
+
+  assert.deepEqual(incremental.changedCodeNodeIds, ["service-a", "service-b"]);
+});
+
 test("Code Map service merges provider-neutral file inventory and attaches top-level symbols", async () => {
   const provider = new FakeProvider([
     rawOnlyGraph("startOperation(): void", "2026-09-22T13:00:00.000Z"),
