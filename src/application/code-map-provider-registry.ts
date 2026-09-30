@@ -53,7 +53,10 @@ export interface CodeProviderRegistryEntry extends CodeProviderDefinition, CodeP
 export interface CodeLanguageCapabilityReport {
   language: string;
   discoveredFileCount: number;
+  eligibleFileCount: number | null;
   indexedFileCount: number;
+  excludedFileCount: number;
+  exclusionReason: "provider_project_scope" | null;
   symbolCount: number;
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
@@ -176,6 +179,9 @@ export class CodeMapProviderRegistry {
         .filter((provider) => provider.languages.includes(language) && !provider.available && provider.installOption)
         .map((provider) => provider.installOption!);
       const graphCoverage = graph.coverage?.languages.find((entry) => entry.language === language);
+      const eligibleFileCount = graphCoverage?.semanticEligibleFileCount ?? null;
+      const indexedFileCount = graphCoverage?.semanticIndexedFileCount ?? facts.indexedFilePaths.size;
+      const excludedFileCount = graphCoverage?.semanticExcludedFileCount ?? 0;
       const fidelity = maxFidelity([
         facts.fidelity,
         graphCoverage?.fidelity ?? "file-only",
@@ -189,13 +195,16 @@ export class CodeMapProviderRegistry {
         gapReason = providers.some((provider) => provider.languages.includes(language) && provider.installOption)
           ? "file_only"
           : "no_trusted_provider_available";
-      } else if (facts.indexedFilePaths.size < facts.files.length) {
+      } else if (indexedFileCount < (eligibleFileCount ?? facts.files.length)) {
         gapReason = "partial_coverage";
       }
       return {
         language,
         discoveredFileCount: facts.files.length,
-        indexedFileCount: facts.indexedFilePaths.size,
+        eligibleFileCount,
+        indexedFileCount,
+        excludedFileCount,
+        exclusionReason: graphCoverage?.semanticExclusionReason ?? null,
         symbolCount: facts.symbols.length,
         fidelity,
         providerIds: facts.providerIds,

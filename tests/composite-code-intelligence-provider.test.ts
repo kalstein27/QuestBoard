@@ -71,6 +71,19 @@ function tsGraph(providerNodeId = "ts-run", providerRelationId = "ts-call"): Cod
         evidence: [{ location: { path: "src/main.ts", startLine: 2 }, label: "call" }],
       },
     ],
+    coverage: {
+      degraded: false,
+      providers: [{ providerId: "scip-typescript", status: "fresh", fidelity: "semantic-call", languages: ["typescript"], nodeCount: 2, relationCount: 1 }],
+      languages: [{
+        language: "typescript",
+        fileCount: 2,
+        semanticEligibleFileCount: 2,
+        semanticIndexedFileCount: 2,
+        fidelity: "semantic-call",
+        providerIds: ["scip-typescript"],
+        degraded: false,
+      }],
+    },
   };
 }
 
@@ -143,6 +156,26 @@ test("composite Code Map keeps mixed-language files while preserving semantic pr
   assert.equal(graph.coverage?.degraded, false);
   assert.equal(graph.coverage?.languages.find((entry) => entry.language === "typescript")?.fidelity, "semantic-call");
   assert.equal(graph.coverage?.languages.find((entry) => entry.language === "swift")?.fidelity, "file-only");
+});
+
+test("composite Code Map records repository files outside semantic provider project scope as intentional exclusions", async () => {
+  const scip = new MutableProvider("scip-typescript", ["typescript", "javascript"], "semantic-call", tsGraph());
+  const scopedInventory = new StaticInventory([
+    "src/main.ts",
+    "src/service.ts",
+    "tests/main.test.ts",
+  ]);
+  const provider = new CompositeCodeIntelligenceProvider([scip], scopedInventory, {
+    now: () => "2026-09-28T02:00:00.000Z",
+  });
+
+  const graph = await provider.indexProject(request);
+  const coverage = graph.coverage?.languages.find((entry) => entry.language === "typescript");
+  assert.equal(coverage?.fileCount, 3);
+  assert.equal(coverage?.semanticEligibleFileCount, 2);
+  assert.equal(coverage?.semanticIndexedFileCount, 2);
+  assert.equal(coverage?.semanticExcludedFileCount, 1);
+  assert.equal(coverage?.semanticExclusionReason, "provider_project_scope");
 });
 
 test("composite Code Map deduplicates exact facts, keeps first provider stable ids, and merges evidence/provenance", async () => {

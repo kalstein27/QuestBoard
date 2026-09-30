@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   assertValidCodeGraphSnapshot,
+  normalizeCodeLanguage,
   type CodeGraphSnapshot,
   type CodeNode,
   type CodeNodeKind,
@@ -392,6 +393,12 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     for (const info of document.symbols) infoBySymbol.set(scopedSymbolKey(document, info.symbol), info);
   }
 
+  const semanticFileCountByLanguage = new Map<string, number>();
+  for (const document of input.index.documents) {
+    const language = normalizeCodeLanguage(document.language);
+    semanticFileCountByLanguage.set(language, (semanticFileCountByLanguage.get(language) ?? 0) + 1);
+  }
+
   const definitions: DefinitionRecord[] = [];
   const nodeBySymbol = new Map<string, CodeNode>();
   for (const document of input.index.documents) {
@@ -507,6 +514,28 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     indexedAt: input.indexedAt,
     nodes: [...nodeBySymbol.values()],
     relations: [...relations.values()],
+    coverage: {
+      degraded: false,
+      providers: [{
+        providerId: "scip-typescript",
+        status: "fresh",
+        fidelity: "semantic-call",
+        languages: [...semanticFileCountByLanguage.keys()].sort(),
+        nodeCount: nodeBySymbol.size,
+        relationCount: relations.size,
+      }],
+      languages: [...semanticFileCountByLanguage.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([language, fileCount]) => ({
+          language,
+          fileCount,
+          semanticEligibleFileCount: fileCount,
+          semanticIndexedFileCount: fileCount,
+          fidelity: "semantic-call" as const,
+          providerIds: ["scip-typescript"],
+          degraded: false,
+        })),
+    },
   };
   assertValidCodeGraphSnapshot(snapshot);
   return snapshot;

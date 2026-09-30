@@ -1120,8 +1120,9 @@ function codeMapProviderPanel(map) {
   const report = map.providerCapabilities;
   if (!report?.providers?.length) return null;
   const gaps = report.languages?.filter((entry) => entry.gapReason) || [];
+  const scoped = report.languages?.filter((entry) => entry.excludedFileCount > 0 && !entry.gapReason) || [];
   const missing = report.providers.filter((provider) => !provider.available);
-  if (!gaps.length && !missing.length) return null;
+  if (!gaps.length && !scoped.length && !missing.length) return null;
 
   const panel = node("section", "code-map-provider-panel");
   panel.append(node("strong", "code-map-provider-title", "Language coverage"));
@@ -1132,6 +1133,17 @@ function codeMapProviderPanel(map) {
         "span",
         "code-map-provider-gap",
         `${entry.language}: ${entry.indexedFileCount}/${entry.discoveredFileCount} symbol-covered files · ${entry.gapReason.replaceAll("_", " ")}`,
+      ));
+    });
+    panel.append(list);
+  }
+  if (scoped.length) {
+    const list = node("div", "code-map-provider-gaps");
+    scoped.forEach((entry) => {
+      list.append(node(
+        "span",
+        "code-map-provider-gap",
+        `${entry.language}: ${entry.indexedFileCount}/${entry.eligibleFileCount} eligible files indexed · ${entry.excludedFileCount} outside provider project scope`,
       ));
     });
     panel.append(list);

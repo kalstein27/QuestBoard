@@ -82,6 +82,9 @@ test("normalizes SCIP definitions, references, and implementation relationships 
   assert.equal(graph.relations.some((relation) => relation.kind === "calls"), false);
   assert.ok(graph.relations.some((relation) => relation.kind === "implements"));
   assert.ok(graph.relations.some((relation) => relation.kind === "depends_on" || relation.kind === "reads"));
+  const typescriptCoverage = graph.coverage?.languages.find((entry) => entry.language === "typescript");
+  assert.equal(typescriptCoverage?.semanticEligibleFileCount, 5);
+  assert.equal(typescriptCoverage?.semanticIndexedFileCount, 5);
   assert.equal(JSON.stringify(graph).includes("scip-typescript npm"), true, "canonical SCIP identity is retained, not a backend row id");
 });
 

@@ -95,6 +95,56 @@ test("provider capability report names concrete mixed-language gaps instead of g
   }
 });
 
+test("provider capability distinguishes intentional compiler-project exclusions from real partial coverage", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const baseGraph = mixedGraph();
+  const graph: CodeGraphSnapshot = {
+    ...baseGraph,
+    nodes: [
+      ...baseGraph.nodes,
+      { id: "file:tests/main.test.ts", kind: "file", name: "main.test.ts", canonicalIdentity: "tests/main.test.ts", language: "typescript", location: { path: "tests/main.test.ts" }, provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }] },
+      { id: "file:vitest.config.ts", kind: "file", name: "vitest.config.ts", canonicalIdentity: "vitest.config.ts", language: "typescript", location: { path: "vitest.config.ts" }, provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }] },
+    ],
+    coverage: {
+      ...baseGraph.coverage!,
+      providers: [...baseGraph.coverage!.providers],
+      languages: baseGraph.coverage!.languages.map((entry) => ({ ...entry })),
+    },
+  };
+  const typescriptCoverage = graph.coverage!.languages.find((entry) => entry.language === "typescript")!;
+  Object.assign(typescriptCoverage, {
+    fileCount: 3,
+    semanticEligibleFileCount: 1,
+    semanticIndexedFileCount: 1,
+    semanticExcludedFileCount: 2,
+    semanticExclusionReason: "provider_project_scope",
+  });
+
+  const report = registry.report(graph);
+  const entry = report.languages.find((candidate) => candidate.language === "typescript")!;
+  assert.equal(entry.discoveredFileCount, 3);
+  assert.equal(entry.eligibleFileCount, 1);
+  assert.equal(entry.indexedFileCount, 1);
+  assert.equal(entry.excludedFileCount, 2);
+  assert.equal(entry.exclusionReason, "provider_project_scope");
+  assert.equal(entry.gapReason, null);
+
+  Object.assign(typescriptCoverage, {
+    semanticEligibleFileCount: 2,
+    semanticIndexedFileCount: 1,
+    semanticExcludedFileCount: 1,
+  });
+  const partial = registry.report(graph).languages.find((candidate) => candidate.language === "typescript")!;
+  assert.equal(partial.gapReason, "partial_coverage");
+});
+
 class LifecycleProvider implements CodeIntelligenceProvider {
   readonly providerId = "scip-typescript";
   readonly languages = ["typescript"];

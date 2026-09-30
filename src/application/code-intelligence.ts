@@ -76,6 +76,13 @@ export interface CodeProviderCoverage {
 export interface CodeLanguageCoverage {
   language: string;
   fileCount: number;
+  /** Files inside the semantic provider's configured compiler/project scope. */
+  semanticEligibleFileCount?: number;
+  /** Eligible files that the semantic provider actually indexed. */
+  semanticIndexedFileCount?: number;
+  /** Repository files intentionally outside the semantic provider project scope. */
+  semanticExcludedFileCount?: number;
+  semanticExclusionReason?: "provider_project_scope";
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
   /** True only when a configured provider that could contribute to this language is stale/failed. */

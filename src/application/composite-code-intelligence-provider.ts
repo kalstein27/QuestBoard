@@ -231,6 +231,7 @@ function maxFidelity(values: readonly (CodeFidelityLevel | undefined)[]): CodeFi
 function languageCoverage(
   graph: CodeGraphSnapshot,
   providers: readonly CodeProviderCoverage[],
+  contributions: readonly ProviderContribution[],
 ): CodeLanguageCoverage[] {
   const fileNodes = graph.nodes.filter((node) => node.kind === "file" && node.location?.path);
   const filesByLanguage = new Map<string, CodeNode[]>();
@@ -253,9 +254,25 @@ function languageCoverage(
         provider.status !== "fresh"
         && (provider.languages === undefined || provider.languages.includes(language)),
       );
+      const semanticScopes = contributions
+        .map((contribution) => contribution.graph.coverage?.languages.find((entry) => entry.language === language))
+        .filter((entry): entry is CodeLanguageCoverage => Boolean(entry?.semanticEligibleFileCount !== undefined));
+      const semanticEligibleFileCount = semanticScopes.length > 0
+        ? Math.max(...semanticScopes.map((entry) => entry.semanticEligibleFileCount ?? 0))
+        : undefined;
+      const semanticIndexedFileCount = semanticScopes.length > 0
+        ? Math.max(...semanticScopes.map((entry) => entry.semanticIndexedFileCount ?? entry.semanticEligibleFileCount ?? 0))
+        : undefined;
+      const semanticExcludedFileCount = semanticEligibleFileCount === undefined
+        ? undefined
+        : Math.max(0, files.length - semanticEligibleFileCount);
       return {
         language,
         fileCount: files.length,
+        ...(semanticEligibleFileCount !== undefined ? { semanticEligibleFileCount } : {}),
+        ...(semanticIndexedFileCount !== undefined ? { semanticIndexedFileCount } : {}),
+        ...(semanticExcludedFileCount !== undefined ? { semanticExcludedFileCount } : {}),
+        ...(semanticExcludedFileCount ? { semanticExclusionReason: "provider_project_scope" as const } : {}),
         fidelity,
         providerIds,
         degraded: affectedByProviderFailure,
@@ -266,11 +283,12 @@ function languageCoverage(
 function makeCoverage(
   graph: CodeGraphSnapshot,
   providers: readonly CodeProviderCoverage[],
+  contributions: readonly ProviderContribution[],
 ): CodeGraphCoverage {
   return {
     degraded: providers.some((provider) => provider.status !== "fresh"),
     providers,
-    languages: languageCoverage(graph, providers),
+    languages: languageCoverage(graph, providers, contributions),
   };
 }
 
@@ -369,7 +387,7 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
       { ...merged, indexedAt: this.#now() },
       inventory,
     );
-    const coverage = makeCoverage(withFiles, providerCoverage);
+    const coverage = makeCoverage(withFiles, providerCoverage, contributions);
     const snapshot: CodeGraphSnapshot = { ...withFiles, coverage };
     assertValidCodeGraphSnapshot(snapshot);
     return snapshot;
