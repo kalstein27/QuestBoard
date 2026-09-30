@@ -1,6 +1,7 @@
 import {
   CODE_NODE_KINDS,
   CODE_RELATION_KINDS,
+  normalizeCodeLanguage,
   type CodeGraphSnapshot,
   type CodeNode,
   type CodeNodeKind,
@@ -156,7 +157,7 @@ function normalizeText(value: string | undefined): string | undefined {
 }
 
 function normalizedNodeLanguage(node: CodeNode): string {
-  return node.language?.trim().toLocaleLowerCase() || "unknown";
+  return normalizeCodeLanguage(node.language);
 }
 
 function queryMatchRank(node: CodeNode, query: string): number {

@@ -53,6 +53,10 @@ export type CodeFactFreshness = (typeof CODE_FACT_FRESHNESS)[number];
 export const CODE_PROVIDER_COVERAGE_STATUSES = ["fresh", "stale", "failed"] as const;
 export type CodeProviderCoverageStatus = (typeof CODE_PROVIDER_COVERAGE_STATUSES)[number];
 
+export function normalizeCodeLanguage(value: string | undefined): string {
+  return value?.trim().toLowerCase() || "unknown";
+}
+
 export interface CodeFactProvenance {
   /** Stable provider/derivation identity. Never a backend-native node or edge id. */
   providerId: string;

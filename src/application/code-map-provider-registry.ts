@@ -1,5 +1,6 @@
 import {
   CODE_FIDELITY_LEVELS,
+  normalizeCodeLanguage,
   type CodeFidelityLevel,
   type CodeGraphSnapshot,
   type CodeRelationKind,
@@ -100,10 +101,6 @@ function maxFidelity(values: readonly CodeFidelityLevel[]): CodeFidelityLevel {
   );
 }
 
-function normalizedLanguage(value: string | undefined): string {
-  return value?.trim().toLowerCase() || "unknown";
-}
-
 export function codeProviderExecutableLabel(value: string | null | undefined): string | null {
   const normalized = value?.trim();
   if (!normalized) return null;
@@ -120,16 +117,16 @@ function publicProviderStatus(status: CodeProviderRuntimeStatus): CodeProviderRu
 }
 
 function languageFacts(graph: CodeGraphSnapshot, language: string) {
-  const files = graph.nodes.filter((node) => node.kind === "file" && normalizedLanguage(node.language) === language);
+  const files = graph.nodes.filter((node) => node.kind === "file" && normalizeCodeLanguage(node.language) === language);
   const filePaths = new Set(files.map((node) => node.location?.path).filter((path): path is string => Boolean(path)));
   const symbols = graph.nodes.filter((node) =>
     node.kind !== "file"
-    && normalizedLanguage(node.language) === language
+    && normalizeCodeLanguage(node.language) === language
     && (!node.location?.path || filePaths.has(node.location.path)),
   );
   const indexedFilePaths = new Set(symbols.map((node) => node.location?.path).filter((path): path is string => Boolean(path)));
   const nodeIds = new Set(graph.nodes
-    .filter((node) => normalizedLanguage(node.language) === language)
+    .filter((node) => normalizeCodeLanguage(node.language) === language)
     .map((node) => node.id));
   const relationKinds = [...new Set(graph.relations
     .filter((relation) => nodeIds.has(relation.from) || nodeIds.has(relation.to))
@@ -170,7 +167,7 @@ export class CodeMapProviderRegistry {
 
     const languages = [...new Set(graph.nodes
       .filter((node) => node.kind === "file")
-      .map((node) => normalizedLanguage(node.language)))].sort();
+      .map((node) => normalizeCodeLanguage(node.language)))].sort();
     const reports = languages.map((language): CodeLanguageCapabilityReport => {
       const facts = languageFacts(graph, language);
       const configuredForLanguage = providers.filter((provider) =>
