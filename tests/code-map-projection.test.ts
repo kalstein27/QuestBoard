@@ -70,6 +70,26 @@ function questBoardGraph(): CodeGraphSnapshot {
   };
 }
 
+function foreignLayoutGraph(): CodeGraphSnapshot {
+  return {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "foreign-layout",
+    rootPath: "/workspace/foreign-layout",
+    indexedAt: "2026-10-01T00:00:00.000Z",
+    nodes: [
+      { id: "http", kind: "function", name: "createHttpServer", canonicalIdentity: "pkg:transport/createHttpServer", location: { path: "lib/transport/http.ts", startLine: 10 } },
+      { id: "mcp", kind: "function", name: "dispatchModernMcpRequest", canonicalIdentity: "pkg:protocol/dispatchModernMcpRequest", location: { path: "lib/protocol/modern.ts", startLine: 20 } },
+      { id: "core", kind: "function", name: "runOperation", canonicalIdentity: "pkg:execution/runOperation", location: { path: "lib/execution/background.ts", startLine: 30 } },
+      { id: "same-file-helper", kind: "function", name: "sendResponse", canonicalIdentity: "pkg:transport/sendResponse", location: { path: "lib/transport/http.ts", startLine: 40 } },
+    ],
+    relations: [
+      { id: "http-core", from: "http", to: "core", kind: "calls", confidence: 1 },
+      { id: "mcp-core", from: "mcp", to: "core", kind: "calls", confidence: 1 },
+      { id: "http-helper", from: "http", to: "same-file-helper", kind: "calls", confidence: 1 },
+    ],
+  };
+}
+
 test("projects raw code intelligence into the six human-readable architecture nodes", () => {
   const projection = projectCodeArchitecture(questBoardGraph());
 
@@ -117,4 +137,22 @@ test("projection retains raw relation ids as drill-down evidence without showing
   const sqliteRepository = projection.nodes.find((node) => node.kind === "sqlite_repository");
   assert.equal(implementedBy.from, contract?.id);
   assert.equal(implementedBy.to, sqliteRepository?.id);
+});
+
+test("architecture projection recovers entrypoint-to-core structure outside QuestBoard folder conventions", () => {
+  const projection = projectCodeArchitecture(foreignLayoutGraph());
+
+  assert.deepEqual(
+    projection.nodes.map((node) => node.kind),
+    ["http_api", "agent_mcp", "application_service"],
+  );
+  const service = projection.nodes.find((node) => node.kind === "application_service");
+  assert.deepEqual(service?.memberNodeIds, ["core"]);
+  const invokes = projection.relations.filter((relation) => relation.kind === "invokes");
+  assert.equal(invokes.length, 2);
+  assert.deepEqual(
+    invokes.flatMap((relation) => relation.sourceRelationIds).sort(),
+    ["http-core", "mcp-core"],
+  );
+  assert.equal(invokes.some((relation) => relation.sourceRelationIds.includes("http-helper")), false);
 });

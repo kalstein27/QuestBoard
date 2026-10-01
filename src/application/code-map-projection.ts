@@ -61,51 +61,91 @@ function normalizedPath(node: CodeNode): string {
   return node.location?.path.replaceAll("\\", "/").toLowerCase() ?? "";
 }
 
-export function classifyCodeArchitectureNode(node: CodeNode): CodeArchitectureNodeKind | undefined {
-  const path = normalizedPath(node);
-  const name = node.name.toLowerCase();
+const ARCHITECTURE_SYMBOL_KINDS = new Set<CodeNode["kind"]>([
+  "module",
+  "namespace",
+  "class",
+  "interface",
+  "function",
+  "method",
+  "constructor",
+  "type",
+  "enum",
+]);
 
-  if (path.includes("/storage/sqlite/") || path.startsWith("src/storage/sqlite/")) {
+function architectureTokens(node: CodeNode): ReadonlySet<string> {
+  const text = `${node.location?.path ?? ""} ${node.name}`
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  return new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
+}
+
+function hasArchitectureToken(tokens: ReadonlySet<string>, values: readonly string[]): boolean {
+  return values.some((value) => tokens.has(value));
+}
+
+function isArchitectureSymbol(node: CodeNode): boolean {
+  return ARCHITECTURE_SYMBOL_KINDS.has(node.kind);
+}
+
+export function classifyCodeArchitectureNode(node: CodeNode): CodeArchitectureNodeKind | undefined {
+  const tokens = architectureTokens(node);
+  if (!isArchitectureSymbol(node)) return undefined;
+
+  if (
+    tokens.has("sqlite")
+    && hasArchitectureToken(tokens, ["repository", "storage", "store", "database", "db"])
+  ) {
     return "sqlite_repository";
   }
 
   if (
-    (path.includes("/application/") || path.startsWith("src/application/")) &&
-    (node.kind === "interface" || name.includes("repository")) &&
-    (name.includes("repository") || path.includes("repository"))
+    (node.kind === "interface" || node.kind === "type")
+    && hasArchitectureToken(tokens, ["repository", "store", "gateway", "port"])
   ) {
     return "repository_contract";
   }
 
-  if (path.includes("/application/") || path.startsWith("src/application/")) {
-    if (name.includes("service") || path.includes("service")) {
-      return "application_service";
-    }
+  if (hasArchitectureToken(tokens, ["mcp", "agent", "cli"])) {
+    return "agent_mcp";
   }
 
-  if (
-    (path.includes("/server/") || path.startsWith("src/server/")) &&
-    (path.includes("http") || name.includes("http") || name.includes("request"))
-  ) {
+  if (hasArchitectureToken(tokens, ["http", "route", "router"])) {
     return "http_api";
   }
 
-  if (
-    path.includes("/adapters/") ||
-    path.startsWith("src/adapters/")
-  ) {
-    if (
-      path.includes("agent") ||
-      path.includes("mcp") ||
-      path.includes("cli") ||
-      name.includes("agent") ||
-      name.includes("mcp")
-    ) {
-      return "agent_mcp";
-    }
+  if (hasArchitectureToken(tokens, ["service", "manager", "controller", "coordinator", "orchestrator"])) {
+    return "application_service";
   }
 
   return undefined;
+}
+
+function inferCodeArchitectureNodeKinds(graph: CodeGraphSnapshot): Map<string, CodeArchitectureNodeKind> {
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const kinds = new Map<string, CodeArchitectureNodeKind>();
+
+  for (const node of graph.nodes) {
+    const kind = classifyCodeArchitectureNode(node);
+    if (kind) kinds.set(node.id, kind);
+  }
+
+  for (const relation of graph.relations) {
+    if (relation.kind !== "calls") continue;
+    const fromKind = kinds.get(relation.from);
+    if (fromKind !== "http_api" && fromKind !== "agent_mcp") continue;
+    if (kinds.has(relation.to)) continue;
+    const from = nodesById.get(relation.from);
+    const to = nodesById.get(relation.to);
+    if (!from || !to || !isArchitectureSymbol(to)) continue;
+    const fromPath = normalizedPath(from);
+    const toPath = normalizedPath(to);
+    if (!fromPath || !toPath || fromPath === toPath) continue;
+    if (to.canonicalIdentity.includes(":local ")) continue;
+    kinds.set(to.id, "application_service");
+  }
+
+  return kinds;
 }
 
 function architectureRelationKind(
@@ -149,15 +189,12 @@ function architectureRelationKind(
 }
 
 export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitectureProjection {
-  const memberKinds = new Map<string, CodeArchitectureNodeKind>();
+  const memberKinds = inferCodeArchitectureNodeKinds(graph);
   const groupedMembers = new Map<CodeArchitectureNodeKind, string[]>();
 
-  for (const node of graph.nodes) {
-    const kind = classifyCodeArchitectureNode(node);
-    if (!kind) continue;
-    memberKinds.set(node.id, kind);
+  for (const [nodeId, kind] of memberKinds) {
     const members = groupedMembers.get(kind) ?? [];
-    members.push(node.id);
+    members.push(nodeId);
     groupedMembers.set(kind, members);
   }
 
