@@ -219,6 +219,81 @@ test("unknown-only inventory is semantic not-applicable rather than degraded", (
   assert.equal(report.languages[0]?.gapReason, null);
 });
 
+test("empty indexed inventory is semantic not-applicable and healthy", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "empty",
+    rootPath: "/workspace/empty",
+    indexedAt: "2026-10-01T00:00:00.000Z",
+    nodes: [],
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: [{ providerId: "scip-typescript", status: "fresh", fidelity: "semantic-call", languages: ["typescript", "javascript"], nodeCount: 0, relationCount: 0 }],
+      languages: [],
+    },
+  };
+
+  const report = registry.report(graph);
+  assert.equal(report.indexed, true);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.degraded, false);
+  assert.equal(report.semanticCoverage, "not_applicable");
+  assert.deepEqual(report.languages, []);
+});
+
+test("recognized language with zero provider-scope eligible files is semantic not-applicable", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "excluded-ts",
+    rootPath: "/workspace/excluded-ts",
+    indexedAt: "2026-10-01T00:00:00.000Z",
+    nodes: [
+      { id: "file:tests/only.test.ts", kind: "file", name: "only.test.ts", canonicalIdentity: "tests/only.test.ts", language: "typescript", location: { path: "tests/only.test.ts" }, provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }] },
+    ],
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: [{ providerId: "scip-typescript", status: "fresh", fidelity: "semantic-call", languages: ["typescript", "javascript"], nodeCount: 0, relationCount: 0 }],
+      languages: [{
+        language: "typescript",
+        fileCount: 1,
+        semanticEligibleFileCount: 0,
+        semanticIndexedFileCount: 0,
+        semanticExcludedFileCount: 1,
+        semanticExclusionReason: "provider_project_scope",
+        fidelity: "file-only",
+        providerIds: [],
+        degraded: false,
+      }],
+    },
+  };
+
+  const report = registry.report(graph);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.degraded, false);
+  assert.equal(report.semanticCoverage, "not_applicable");
+  assert.equal(report.languages[0]?.semanticCoverage, "not_applicable");
+  assert.equal(report.languages[0]?.excludedFileCount, 1);
+  assert.equal(report.languages[0]?.gapReason, null);
+});
+
 test("unindexed capability report keeps semantic coverage unknown while preserving provider health", () => {
   const registry = new CodeMapProviderRegistry(definitions, () => ({
     configured: true,

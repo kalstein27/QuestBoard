@@ -231,7 +231,7 @@ export class CodeMapProviderRegistry {
         graphCoverage?.fidelity ?? "file-only",
       ]);
       let gapReason: CodeLanguageGapReason | null = null;
-      if (language === "unknown") {
+      if (language === "unknown" || eligibleFileCount === 0) {
         gapReason = null;
       } else if (configuredForLanguage.some((provider) => !provider.available)) {
         gapReason = "provider_missing";
