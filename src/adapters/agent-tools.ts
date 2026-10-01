@@ -768,7 +768,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map",
-    description: "Query the indexed raw Code Map through a bounded read surface. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph.",
+    description: "Query the indexed raw Code Map through a bounded read surface. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -793,7 +793,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_code_map_status",
-    description: "Read bounded Code Map lifecycle status for one project, including indexing/provider state without returning the full graph.",
+    description: "Read bounded Code Map lifecycle status for one project, including indexing/provider state and derived architecture projection quality without returning the full graph. When projectionQuality.status is sparse, continue exploration through bounded raw Code Map queries rather than treating the project as unindexed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1641,6 +1641,7 @@ function codeMapAgentStatus(
           indexedAt: cached.graph.indexedAt,
           nodeCount: cached.graph.nodes.length,
           relationCount: cached.graph.relations.length,
+          projectionQuality: cached.projection.quality,
         }
       : {}),
     ...(snapshotState ?? {}),

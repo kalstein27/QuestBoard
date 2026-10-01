@@ -118,11 +118,18 @@ test("Code Map HTTP remains indexed and serves raw graph when architecture lens 
     assert.equal(indexed.body.graph.nodes[0]?.location.path, "src/runtime/background-operations.ts");
     assert.deepEqual(indexed.body.changedCodeNodeIds, ["service-node"]);
     assert.deepEqual(indexed.body.projection.nodes, []);
+    assert.deepEqual(indexed.body.projection.quality, {
+      status: "sparse",
+      reason: "no_groups",
+      groupCount: 0,
+      relationCount: 0,
+    });
 
     const cached = await json(path);
     assert.equal(cached.body.indexed, true);
     assert.equal(cached.body.graph.nodes.length, 1);
     assert.deepEqual(cached.body.projection.nodes, []);
+    assert.equal(cached.body.projection.quality.status, "sparse");
   } finally {
     await closeServer(server);
     repository.close();

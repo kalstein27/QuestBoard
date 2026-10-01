@@ -16,6 +16,7 @@ function projection(): CodeArchitectureProjection {
   return {
     projectId: "questboard",
     sourceIndexedAt: "2026-09-24T10:00:00.000Z",
+    quality: { status: "useful", groupCount: 2, relationCount: 1 },
     nodes: [
       {
         id: "code-map:node:http",

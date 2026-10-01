@@ -90,8 +90,24 @@ function foreignLayoutGraph(): CodeGraphSnapshot {
   };
 }
 
+function sparseProjectionGraph(): CodeGraphSnapshot {
+  return {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "sparse-layout",
+    rootPath: "/workspace/sparse-layout",
+    indexedAt: "2026-10-01T00:30:00.000Z",
+    nodes: [
+      { id: "http", kind: "function", name: "createHttpServer", canonicalIdentity: "pkg:createHttpServer", location: { path: "lib/http.ts", startLine: 10 } },
+      { id: "worker", kind: "function", name: "runWorker", canonicalIdentity: "pkg:runWorker", location: { path: "lib/worker.ts", startLine: 20 } },
+    ],
+    relations: [],
+  };
+}
+
 test("projects raw code intelligence into the six human-readable architecture nodes", () => {
   const projection = projectCodeArchitecture(questBoardGraph());
+
+  assert.deepEqual(projection.quality, { status: "useful", groupCount: 6, relationCount: 5 });
 
   assert.deepEqual(
     projection.nodes.map((node) => [node.kind, node.title]),
@@ -142,6 +158,8 @@ test("projection retains raw relation ids as drill-down evidence without showing
 test("architecture projection recovers entrypoint-to-core structure outside QuestBoard folder conventions", () => {
   const projection = projectCodeArchitecture(foreignLayoutGraph());
 
+  assert.deepEqual(projection.quality, { status: "useful", groupCount: 3, relationCount: 2 });
+
   assert.deepEqual(
     projection.nodes.map((node) => node.kind),
     ["http_api", "agent_mcp", "application_service"],
@@ -155,4 +173,17 @@ test("architecture projection recovers entrypoint-to-core structure outside Ques
     ["http-core", "mcp-core"],
   );
   assert.equal(invokes.some((relation) => relation.sourceRelationIds.includes("http-helper")), false);
+});
+
+test("architecture projection marks a deliberately sparse one-group lens explicitly", () => {
+  const projection = projectCodeArchitecture(sparseProjectionGraph());
+
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["http_api"]);
+  assert.equal(projection.relations.length, 0);
+  assert.deepEqual(projection.quality, {
+    status: "sparse",
+    reason: "single_group",
+    groupCount: 1,
+    relationCount: 0,
+  });
 });

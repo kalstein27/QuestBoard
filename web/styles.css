@@ -788,6 +788,15 @@ main { min-height: 0; overflow: hidden; }
 .code-map-architecture-lens { padding: 8px 9px; border: 1px solid #252d37; border-radius: 7px; background: #0e1217; }
 .code-map-architecture-summary { color: #788492; font-size: 9px; cursor: pointer; user-select: none; }
 .code-map-architecture-lens[open] > .code-map-architecture-summary { margin-bottom: 8px; color: #a8b1bd; }
+.code-map-architecture-lens.sparse { border-color: #303946; }
+.code-map-architecture-fallback { margin-bottom: 8px; padding: 8px; display: grid; gap: 5px; border: 1px solid #29323d; border-radius: 6px; background: #11161c; }
+.code-map-architecture-fallback-title { color: #bac3ce; font-size: 9px; }
+.code-map-architecture-fallback-copy, .code-map-architecture-fallback-empty, .code-map-architecture-id-note { color: #727f8e; font-size: 8px; line-height: 1.45; }
+.code-map-entrypoint-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.code-map-entrypoint { min-width: 0; padding: 6px 7px; display: grid; gap: 2px; border: 1px solid #29323d; border-radius: 5px; background: #0e1319; text-align: left; cursor: pointer; }
+.code-map-entrypoint:hover, .code-map-entrypoint:focus-visible { border-color: #465466; outline: none; }
+.code-map-entrypoint-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7ced7; font-size: 8px; }
+.code-map-entrypoint-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #667382; font-size: 7px; }
 .code-map-architecture-stage { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 6px; }
 .code-map-architecture-card { min-width: 0; padding: 8px; display: grid; gap: 3px; border: 1px solid #262e38; border-radius: 6px; background: #11161c; }
 .code-map-architecture-relations { margin-top: 6px; display: grid; gap: 3px; }

@@ -21,6 +21,12 @@ export const CODE_ARCHITECTURE_RELATION_KINDS = [
 
 export type CodeArchitectureRelationKind = (typeof CODE_ARCHITECTURE_RELATION_KINDS)[number];
 
+export const CODE_ARCHITECTURE_PROJECTION_QUALITY_STATUSES = ["useful", "sparse"] as const;
+export type CodeArchitectureProjectionQualityStatus = (typeof CODE_ARCHITECTURE_PROJECTION_QUALITY_STATUSES)[number];
+
+export const CODE_ARCHITECTURE_SPARSE_REASONS = ["no_groups", "single_group", "no_relations"] as const;
+export type CodeArchitectureSparseReason = (typeof CODE_ARCHITECTURE_SPARSE_REASONS)[number];
+
 export interface CodeArchitectureNode {
   id: string;
   kind: CodeArchitectureNodeKind;
@@ -36,9 +42,17 @@ export interface CodeArchitectureRelation {
   sourceRelationIds: readonly string[];
 }
 
+export interface CodeArchitectureProjectionQuality {
+  status: CodeArchitectureProjectionQualityStatus;
+  groupCount: number;
+  relationCount: number;
+  reason?: CodeArchitectureSparseReason;
+}
+
 export interface CodeArchitectureProjection {
   projectId: string;
   sourceIndexedAt: string;
+  quality: CodeArchitectureProjectionQuality;
   nodes: readonly CodeArchitectureNode[];
   relations: readonly CodeArchitectureRelation[];
 }
@@ -188,6 +202,18 @@ function architectureRelationKind(
   return undefined;
 }
 
+function projectionQuality(
+  nodes: readonly CodeArchitectureNode[],
+  relations: readonly CodeArchitectureRelation[],
+): CodeArchitectureProjectionQuality {
+  const groupCount = nodes.length;
+  const relationCount = relations.length;
+  if (groupCount === 0) return { status: "sparse", reason: "no_groups", groupCount, relationCount };
+  if (groupCount === 1) return { status: "sparse", reason: "single_group", groupCount, relationCount };
+  if (relationCount === 0) return { status: "sparse", reason: "no_relations", groupCount, relationCount };
+  return { status: "useful", groupCount, relationCount };
+}
+
 export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitectureProjection {
   const memberKinds = inferCodeArchitectureNodeKinds(graph);
   const groupedMembers = new Map<CodeArchitectureNodeKind, string[]>();
@@ -273,6 +299,7 @@ export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitect
   return {
     projectId: graph.projectId,
     sourceIndexedAt: graph.indexedAt,
+    quality: projectionQuality(nodes, relations),
     nodes,
     relations,
   };

@@ -87,6 +87,32 @@ test("coverage health and semantic capability stay distinct while architecture r
   assert.match(css, /\.code-map-architecture-lens/);
 });
 
+test("sparse Architecture lens exposes bounded raw call-root entrypoints without mixing ID spaces", () => {
+  const sandbox: any = {
+    window: { addEventListener() {} },
+    location: { search: "" },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    URLSearchParams,
+  };
+  runInNewContext(`${app}\n;globalThis.__entrypoints = codeMapRawEntrypoints({ nodes: [
+    { id: "root", kind: "function", name: "boot", canonicalIdentity: "pkg:boot", location: { path: "src/boot.ts" } },
+    { id: "service", kind: "function", name: "runService", canonicalIdentity: "pkg:runService", location: { path: "src/service.ts" } },
+    { id: "leaf", kind: "function", name: "persist", canonicalIdentity: "pkg:persist", location: { path: "src/storage.ts" } },
+    { id: "local-root", kind: "function", name: "localRoot", canonicalIdentity: "scip:src/local.ts:local 1", location: { path: "src/local.ts" } }
+  ], relations: [
+    { id: "root-service", from: "root", to: "service", kind: "calls" },
+    { id: "service-leaf", from: "service", to: "leaf", kind: "calls" },
+    { id: "local-leaf", from: "local-root", to: "leaf", kind: "calls" }
+  ] }, 8);`, sandbox);
+  assert.equal(sandbox.__entrypoints.length, 1);
+  assert.equal(sandbox.__entrypoints[0]?.id, "root");
+  assert.match(app, /projection\.quality\?\.status === "sparse"/);
+  assert.match(app, /Raw entrypoints/);
+  assert.match(app, /Raw source nodes use code:node:\* IDs/);
+  assert.match(app, /Investigation sync uses code-map:node:\* architecture IDs/);
+  assert.match(css, /\.code-map-architecture-fallback/);
+});
+
 test("Code Map indexing failure preserves a visible last-good raw source snapshot state", () => {
   assert.match(app, /codeMapIndexError/);
   assert.match(app, /last-good snapshot/);

@@ -1090,13 +1090,81 @@ function revealCodeMapNode(nodeId) {
   });
 }
 
+function codeMapRawEntrypoints(graph, limit = 8) {
+  const eligibleKinds = new Set(["function", "method", "class", "constructor"]);
+  const nodes = graph?.nodes || [];
+  const nodeById = new Map(nodes.map((item) => [item.id, item]));
+  const incomingCalls = new Map();
+  const crossFileOutgoing = new Map();
+  const stableSymbol = (item) => Boolean(
+    item
+    && eligibleKinds.has(item.kind)
+    && !String(item.canonicalIdentity || "").includes(":local "),
+  );
+
+  (graph?.relations || []).forEach((relation) => {
+    if (relation.kind !== "calls") return;
+    incomingCalls.set(relation.to, (incomingCalls.get(relation.to) || 0) + 1);
+    const from = nodeById.get(relation.from);
+    const to = nodeById.get(relation.to);
+    if (!stableSymbol(from) || !stableSymbol(to)) return;
+    const fromPath = from.location?.path || "";
+    const toPath = to.location?.path || "";
+    if (!fromPath || !toPath || fromPath === toPath) return;
+    crossFileOutgoing.set(from.id, (crossFileOutgoing.get(from.id) || 0) + 1);
+  });
+
+  return nodes
+    .filter((item) => stableSymbol(item)
+      && (incomingCalls.get(item.id) || 0) === 0
+      && (crossFileOutgoing.get(item.id) || 0) > 0)
+    .sort((left, right) =>
+      (crossFileOutgoing.get(right.id) || 0) - (crossFileOutgoing.get(left.id) || 0)
+      || (left.location?.path || "").localeCompare(right.location?.path || "")
+      || left.name.localeCompare(right.name))
+    .slice(0, Math.max(1, limit));
+}
+
+function codeMapSparseArchitectureFallback(map) {
+  if (map.projection?.quality?.status !== "sparse") return null;
+  const panel = node("section", "code-map-architecture-fallback");
+  panel.append(
+    node("strong", "code-map-architecture-fallback-title", "Raw entrypoints"),
+    node("span", "code-map-architecture-fallback-copy", "Architecture projection is sparse. Start from raw call-root candidates instead of treating the Code Map as empty."),
+  );
+  const candidates = codeMapRawEntrypoints(map.graph, 8);
+  if (candidates.length) {
+    const list = node("div", "code-map-entrypoint-list");
+    candidates.forEach((item) => {
+      const button = node("button", "code-map-entrypoint");
+      button.type = "button";
+      button.dataset.codeMapNodeId = item.id;
+      button.append(
+        node("strong", "code-map-entrypoint-title", item.name),
+        node("span", "code-map-entrypoint-meta", `${item.kind}${item.location?.path ? ` · ${item.location.path}` : ""}`),
+      );
+      button.addEventListener("click", () => selectCodeMapDetail("node", item.id));
+      list.append(button);
+    });
+    panel.append(list);
+  } else {
+    panel.append(node("span", "code-map-architecture-fallback-empty", "No cross-file call-root candidate was found. Use raw Source explorer search and follow callers / callees from a matching symbol."));
+  }
+  panel.append(node("span", "code-map-architecture-id-note", "Raw source nodes use code:node:* IDs. Investigation sync uses code-map:node:* architecture IDs; they are not interchangeable."));
+  return panel;
+}
+
 function codeMapArchitectureLens(map) {
   const projection = map.projection;
-  if (!projection?.nodes?.length) return null;
+  if (!projection) return null;
+  const sparse = projection.quality?.status === "sparse";
   const details = document.createElement("details");
-  details.className = "code-map-architecture-lens";
-  const summary = node("summary", "code-map-architecture-summary", `Architecture lens · ${projection.nodes.length} groups · ${projection.relations.length} relations`);
+  details.className = `code-map-architecture-lens${sparse ? " sparse" : ""}`;
+  details.open = sparse;
+  const summary = node("summary", "code-map-architecture-summary", `Architecture lens${sparse ? " · sparse" : ""} · ${projection.nodes.length} groups · ${projection.relations.length} relations`);
   details.append(summary);
+  const fallback = codeMapSparseArchitectureFallback(map);
+  if (fallback) details.append(fallback);
   const stage = node("div", "code-map-architecture-stage");
   projection.nodes.forEach((item) => {
     const card = node("article", "code-map-architecture-card");
@@ -1112,7 +1180,8 @@ function codeMapArchitectureLens(map) {
   projection.relations.forEach((relation) => {
     relations.append(node("div", "code-map-architecture-relation", `${nodeById.get(relation.from)?.title || relation.from} · ${relation.kind.replaceAll("_", " ")} → ${nodeById.get(relation.to)?.title || relation.to}`));
   });
-  details.append(stage, relations);
+  if (projection.nodes.length) details.append(stage);
+  if (projection.relations.length) details.append(relations);
   return details;
 }
 

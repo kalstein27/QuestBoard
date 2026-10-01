@@ -140,6 +140,12 @@ test("agent Code Map lifecycle starts bounded jobs, reuses in-flight refresh, an
     assert.equal(after.codeMap.nodeCount, 2);
     assert.equal(after.codeMap.relationCount, 1);
     assert.equal(after.codeMap.indexedAt, "2026-09-29T08:00:01.000Z");
+    assert.deepEqual(after.codeMap.projectionQuality, {
+      status: "sparse",
+      reason: "no_groups",
+      groupCount: 0,
+      relationCount: 0,
+    });
 
     const third = executeQuestBoardAgentTool(runtime, "questboard_refresh_code_map", {
       projectId: project.id,
