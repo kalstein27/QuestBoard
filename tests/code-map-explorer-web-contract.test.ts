@@ -75,9 +75,12 @@ test("technical inspector keeps source identity and provider/manual provenance v
   assert.match(css, /\.code-map-manual-inspector-row\.stale/);
 });
 
-test("coverage gaps stay first-class and architecture remains only an optional compatibility lens", () => {
+test("coverage health and semantic capability stay distinct while architecture remains optional", () => {
   assert.match(app, /codeMapProviderPanel/);
   assert.match(app, /Language coverage/);
+  assert.match(app, /Health:/);
+  assert.match(app, /Semantic coverage:/);
+  assert.match(app, /semantic analysis not applicable/);
   assert.match(app, /codeMapArchitectureLens/);
   assert.match(app, /Architecture lens/);
   assert.match(app, /document\.createElement\("details"\)/);

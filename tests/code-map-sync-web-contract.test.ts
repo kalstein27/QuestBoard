@@ -42,8 +42,11 @@ test("Code Map Web surfaces binding badges and Flow focus without raw provenance
   assert.doesNotMatch(html, /sourceRelationIds|memberNodeIds|codeRelationId/);
 });
 
-test("Code Map Web surfaces provider coverage gaps and only prepares approval-gated install requests", () => {
+test("Code Map Web separates health from semantic coverage and only prepares approval-gated install requests", () => {
   assert.match(app, /codeMapProviderPanel/);
+  assert.match(app, /Health:/);
+  assert.match(app, /Semantic coverage:/);
+  assert.match(app, /provider\.configured && !provider\.available/);
   assert.match(app, /Install provider…/);
   assert.match(app, /code-map\/providers\/\$\{encodeURIComponent\(providerId\)\}\/install-request/);
   assert.match(app, /Installation has not run/);

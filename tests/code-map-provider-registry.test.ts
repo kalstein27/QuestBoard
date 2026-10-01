@@ -80,7 +80,11 @@ test("provider capability report names concrete mixed-language gaps instead of g
   const report = registry.report(mixedGraph());
 
   assert.equal(report.indexed, true);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.degraded, false);
+  assert.equal(report.semanticCoverage, "partial");
   assert.equal(report.providers[0]?.executable, "scip-typescript");
+  assert.equal(report.languages.find((entry) => entry.language === "typescript")?.semanticCoverage, "complete");
   assert.equal(report.languages.find((entry) => entry.language === "typescript")?.gapReason, null);
   assert.deepEqual(report.languages.find((entry) => entry.language === "typescript")?.providerIds, ["scip-typescript"]);
   for (const language of ["swift", "shellscript", "powershell"]) {
@@ -90,6 +94,7 @@ test("provider capability report names concrete mixed-language gaps instead of g
     assert.equal(entry.indexedFileCount, 0);
     assert.equal(entry.symbolCount, 0);
     assert.equal(entry.fidelity, "file-only");
+    assert.equal(entry.semanticCoverage, "unavailable");
     assert.equal(entry.gapReason, "no_trusted_provider_available");
     assert.deepEqual(entry.providerIds, []);
   }
@@ -142,7 +147,92 @@ test("provider capability distinguishes intentional compiler-project exclusions 
     semanticExcludedFileCount: 1,
   });
   const partial = registry.report(graph).languages.find((candidate) => candidate.language === "typescript")!;
+  const partialReport = registry.report(graph);
+  assert.equal(partialReport.health, "degraded");
+  assert.equal(partialReport.degraded, true);
+  assert.equal(partialReport.semanticCoverage, "partial");
+  assert.equal(partial.semanticCoverage, "partial");
   assert.equal(partial.gapReason, "partial_coverage");
+});
+
+test("unsupported recognized languages are capability gaps without degrading Code Map health", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const base = mixedGraph();
+  const swiftOnly: CodeGraphSnapshot = {
+    ...base,
+    nodes: base.nodes.filter((node) => node.language === "swift"),
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: base.coverage!.providers,
+      languages: base.coverage!.languages.filter((entry) => entry.language === "swift"),
+    },
+  };
+
+  const report = registry.report(swiftOnly);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.degraded, false);
+  assert.equal(report.semanticCoverage, "unavailable");
+  assert.equal(report.languages[0]?.semanticCoverage, "unavailable");
+  assert.equal(report.languages[0]?.gapReason, "no_trusted_provider_available");
+});
+
+test("unknown-only inventory is semantic not-applicable rather than degraded", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "docs-only",
+    rootPath: "/workspace/docs-only",
+    indexedAt: "2026-10-01T00:00:00.000Z",
+    nodes: [
+      { id: "file:README.md", kind: "file", name: "README.md", canonicalIdentity: "README.md", location: { path: "README.md" }, provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }] },
+      { id: "file:config.json", kind: "file", name: "config.json", canonicalIdentity: "config.json", location: { path: "config.json" }, provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }] },
+    ],
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: [{ providerId: "scip-typescript", status: "fresh", fidelity: "semantic-call", languages: ["typescript", "javascript"], nodeCount: 0, relationCount: 0 }],
+      languages: [{ language: "unknown", fileCount: 2, fidelity: "file-only", providerIds: [], degraded: false }],
+    },
+  };
+
+  const report = registry.report(graph);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.degraded, false);
+  assert.equal(report.semanticCoverage, "not_applicable");
+  assert.equal(report.languages[0]?.language, "unknown");
+  assert.equal(report.languages[0]?.semanticCoverage, "not_applicable");
+  assert.equal(report.languages[0]?.gapReason, null);
+});
+
+test("unindexed capability report keeps semantic coverage unknown while preserving provider health", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const report = registry.report();
+  assert.equal(report.indexed, false);
+  assert.equal(report.health, "healthy");
+  assert.equal(report.semanticCoverage, null);
+  assert.equal(report.degraded, false);
 });
 
 class LifecycleProvider implements CodeIntelligenceProvider {

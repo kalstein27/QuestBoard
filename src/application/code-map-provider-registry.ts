@@ -9,6 +9,12 @@ import {
 export const CODE_PROVIDER_HEALTH_STATES = ["ready", "missing_executable", "degraded"] as const;
 export type CodeProviderHealthState = (typeof CODE_PROVIDER_HEALTH_STATES)[number];
 
+export const CODE_MAP_HEALTH_STATES = ["healthy", "degraded"] as const;
+export type CodeMapHealthState = (typeof CODE_MAP_HEALTH_STATES)[number];
+
+export const CODE_SEMANTIC_COVERAGE_STATES = ["complete", "partial", "unavailable", "not_applicable"] as const;
+export type CodeSemanticCoverageState = (typeof CODE_SEMANTIC_COVERAGE_STATES)[number];
+
 export const CODE_LANGUAGE_GAP_REASONS = [
   "provider_missing",
   "provider_degraded",
@@ -61,6 +67,7 @@ export interface CodeLanguageCapabilityReport {
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
   observedRelationKinds: readonly CodeRelationKind[];
+  semanticCoverage: CodeSemanticCoverageState;
   gapReason: CodeLanguageGapReason | null;
   installOptions: readonly CodeProviderInstallOption[];
 }
@@ -69,6 +76,9 @@ export interface CodeMapProviderCapabilityReport {
   providers: readonly CodeProviderRegistryEntry[];
   languages: readonly CodeLanguageCapabilityReport[];
   indexed: boolean;
+  health: CodeMapHealthState;
+  semanticCoverage: CodeSemanticCoverageState | null;
+  /** Backward-compatible alias for health === "degraded". */
   degraded: boolean;
 }
 
@@ -142,6 +152,37 @@ function languageFacts(graph: CodeGraphSnapshot, language: string) {
   return { files, symbols, indexedFilePaths, relationKinds, providerIds, fidelity };
 }
 
+function semanticCoverageForLanguage(
+  language: string,
+  indexedFileCount: number,
+  eligibleFileCount: number | null,
+  symbolCount: number,
+  gapReason: CodeLanguageGapReason | null,
+): CodeSemanticCoverageState {
+  if (language === "unknown") return "not_applicable";
+  if (eligibleFileCount === 0) return "not_applicable";
+  if (eligibleFileCount !== null) {
+    if (indexedFileCount >= eligibleFileCount) return "complete";
+    if (indexedFileCount > 0) return "partial";
+    return "unavailable";
+  }
+  if (gapReason === "partial_coverage") return "partial";
+  if (indexedFileCount > 0 || symbolCount > 0) return "complete";
+  return "unavailable";
+}
+
+function summarizeSemanticCoverage(reports: readonly CodeLanguageCapabilityReport[]): CodeSemanticCoverageState {
+  const applicable = reports.filter((entry) => entry.semanticCoverage !== "not_applicable");
+  if (applicable.length === 0) return "not_applicable";
+  if (applicable.every((entry) => entry.semanticCoverage === "complete")) return "complete";
+  if (applicable.every((entry) => entry.semanticCoverage === "unavailable")) return "unavailable";
+  return "partial";
+}
+
+function gapDegradesHealth(reason: CodeLanguageGapReason | null): boolean {
+  return reason === "provider_missing" || reason === "provider_degraded" || reason === "partial_coverage";
+}
+
 export class CodeMapProviderRegistry {
   readonly #definitions: readonly CodeProviderDefinition[];
   readonly #statusResolver: ProviderStatusResolver;
@@ -160,11 +201,14 @@ export class CodeMapProviderRegistry {
   report(graph?: CodeGraphSnapshot): CodeMapProviderCapabilityReport {
     const providers = this.entries();
     if (!graph) {
+      const degraded = providers.some((provider) => provider.configured && !provider.available);
       return {
         providers,
         languages: [],
         indexed: false,
-        degraded: providers.some((provider) => provider.configured && !provider.available),
+        health: degraded ? "degraded" : "healthy",
+        semanticCoverage: null,
+        degraded,
       };
     }
 
@@ -187,7 +231,9 @@ export class CodeMapProviderRegistry {
         graphCoverage?.fidelity ?? "file-only",
       ]);
       let gapReason: CodeLanguageGapReason | null = null;
-      if (configuredForLanguage.some((provider) => !provider.available)) {
+      if (language === "unknown") {
+        gapReason = null;
+      } else if (configuredForLanguage.some((provider) => !provider.available)) {
         gapReason = "provider_missing";
       } else if (graphCoverage?.degraded) {
         gapReason = "provider_degraded";
@@ -209,16 +255,27 @@ export class CodeMapProviderRegistry {
         fidelity,
         providerIds: facts.providerIds,
         observedRelationKinds: facts.relationKinds,
+        semanticCoverage: semanticCoverageForLanguage(
+          language,
+          indexedFileCount,
+          eligibleFileCount,
+          facts.symbols.length,
+          gapReason,
+        ),
         gapReason,
         installOptions,
       };
     });
 
+    const degraded = Boolean(graph.coverage?.degraded) || reports.some((entry) => gapDegradesHealth(entry.gapReason));
+
     return {
       providers,
       languages: reports,
       indexed: true,
-      degraded: Boolean(graph.coverage?.degraded) || reports.some((entry) => entry.gapReason !== null),
+      health: degraded ? "degraded" : "healthy",
+      semanticCoverage: summarizeSemanticCoverage(reports),
+      degraded,
     };
   }
 

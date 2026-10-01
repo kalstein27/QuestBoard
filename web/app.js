@@ -1121,18 +1121,23 @@ function codeMapProviderPanel(map) {
   if (!report?.providers?.length) return null;
   const gaps = report.languages?.filter((entry) => entry.gapReason) || [];
   const scoped = report.languages?.filter((entry) => entry.excludedFileCount > 0 && !entry.gapReason) || [];
-  const missing = report.providers.filter((provider) => !provider.available);
-  if (!gaps.length && !scoped.length && !missing.length) return null;
+  const notApplicable = report.languages?.filter((entry) => entry.semanticCoverage === "not_applicable" && entry.discoveredFileCount > 0) || [];
+  const missing = report.providers.filter((provider) => provider.configured && !provider.available);
+  const health = report.health || (report.degraded ? "degraded" : "healthy");
+  const semanticCoverage = report.semanticCoverage ?? (report.indexed ? "unknown" : "not indexed");
+  if (!gaps.length && !scoped.length && !notApplicable.length && !missing.length && health === "healthy" && semanticCoverage === "complete") return null;
 
   const panel = node("section", "code-map-provider-panel");
   panel.append(node("strong", "code-map-provider-title", "Language coverage"));
+  panel.append(node("span", "code-map-provider-health", `Health: ${health} · Semantic coverage: ${semanticCoverage.replaceAll("_", " ")}`));
   if (gaps.length) {
     const list = node("div", "code-map-provider-gaps");
     gaps.forEach((entry) => {
+      const denominator = entry.eligibleFileCount ?? entry.discoveredFileCount;
       list.append(node(
         "span",
         "code-map-provider-gap",
-        `${entry.language}: ${entry.indexedFileCount}/${entry.discoveredFileCount} symbol-covered files · ${entry.gapReason.replaceAll("_", " ")}`,
+        `${entry.language}: semantic ${entry.semanticCoverage || "unavailable"} · ${entry.indexedFileCount}/${denominator} files · ${entry.gapReason.replaceAll("_", " ")}`,
       ));
     });
     panel.append(list);
@@ -1144,6 +1149,17 @@ function codeMapProviderPanel(map) {
         "span",
         "code-map-provider-gap",
         `${entry.language}: ${entry.indexedFileCount}/${entry.eligibleFileCount} eligible files indexed · ${entry.excludedFileCount} outside provider project scope`,
+      ));
+    });
+    panel.append(list);
+  }
+  if (notApplicable.length) {
+    const list = node("div", "code-map-provider-gaps");
+    notApplicable.forEach((entry) => {
+      list.append(node(
+        "span",
+        "code-map-provider-gap",
+        `${entry.language}: ${entry.discoveredFileCount} inventory files · semantic analysis not applicable`,
       ));
     });
     panel.append(list);
