@@ -94,6 +94,13 @@ function architectureTokens(node: CodeNode): ReadonlySet<string> {
   return new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
 }
 
+function externalArchitectureTokens(node: CodeNode): ReadonlySet<string> {
+  const text = `${node.canonicalIdentity} ${node.name}`
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  return new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
+}
+
 function hasArchitectureToken(tokens: ReadonlySet<string>, values: readonly string[]): boolean {
   return values.some((value) => tokens.has(value));
 }
@@ -159,6 +166,17 @@ function inferCodeArchitectureNodeKinds(graph: CodeGraphSnapshot): Map<string, C
     kinds.set(to.id, "application_service");
   }
 
+
+  for (const relation of graph.relations) {
+    if (relation.kind !== "instantiates") continue;
+    if (kinds.get(relation.from) !== "sqlite_repository" || kinds.has(relation.to)) continue;
+    const target = nodesById.get(relation.to);
+    if (!target || target.location) continue;
+    const tokens = externalArchitectureTokens(target);
+    if (!tokens.has("sqlite")) continue;
+    kinds.set(target.id, "sqlite");
+  }
+
   return kinds;
 }
 
@@ -197,6 +215,14 @@ function architectureRelationKind(
     ["implements", "overrides", "depends_on"].includes(relation.kind)
   ) {
     return { kind: "implemented_by" };
+  }
+
+  if (
+    relation.kind === "instantiates" &&
+    fromKind === "sqlite_repository" &&
+    toKind === "sqlite"
+  ) {
+    return { kind: "persists_to" };
   }
 
   return undefined;

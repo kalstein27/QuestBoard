@@ -16,10 +16,12 @@ const symbols = {
   service: "scip ts qb 0 service/QuestBoardService#createTask().",
   contract: "scip ts qb 0 repository/QuestBoardRepository#",
   sqlite: "scip ts qb 0 sqlite/SqliteQuestBoardRepository#",
+  database: "scip ts @types/node 0 node:sqlite/DatabaseSync#",
 };
 
 function scipProjection() {
   const index = parseScipJsonIndex({
+    externalSymbols: [{ symbol: symbols.database, displayName: "DatabaseSync", kind: "Class" }],
     documents: [
       {
         relativePath: "src/server/http-api.ts",
@@ -58,7 +60,10 @@ function scipProjection() {
           kind: "Class",
           relationships: [{ symbol: symbols.contract, isImplementation: true }],
         }],
-        occurrences: [{ symbol: symbols.sqlite, symbolRoles: 1, range: [1, 6, 32], enclosingRange: [1, 0, 100, 1] }],
+        occurrences: [
+          { symbol: symbols.sqlite, symbolRoles: 1, range: [1, 6, 32], enclosingRange: [1, 0, 100, 1] },
+          { symbol: symbols.database, symbolRoles: 0, range: [10, 8, 20] },
+        ],
       },
     ],
   });
@@ -69,6 +74,7 @@ function scipProjection() {
     sourceTextByPath: new Map([
       ["src/server/http-api.ts", sourceWithCreateTaskCall],
       ["src/adapters/agent-tools.ts", sourceWithCreateTaskCall],
+      ["src/storage/sqlite/sqlite-quest-board-repository.ts", Array.from({ length: 12 }, (_, line) => line === 10 ? "    new DatabaseSync();" : "").join("\n")],
     ]),
   }));
 }
@@ -82,17 +88,19 @@ function gitNexusProjection() {
       { uid: "service", kind: "Method", name: "createTask", filePath: "src/application/quest-board-service.ts", startLine: 20 },
       { uid: "contract", kind: "Interface", name: "QuestBoardRepository", filePath: "src/application/quest-board-repository.ts", startLine: 1 },
       { uid: "sqlite", kind: "Class", name: "SqliteQuestBoardRepository", filePath: "src/storage/sqlite/sqlite-quest-board-repository.ts", startLine: 1 },
+      { uid: "database", kind: "Class", name: "SQLite" },
     ],
     relations: [
       { fromUid: "http", toUid: "service", type: "CALLS" },
       { fromUid: "agent", toUid: "service", type: "CALLS" },
       { fromUid: "service", toUid: "contract", type: "TYPE_REF" },
       { fromUid: "sqlite", toUid: "contract", type: "IMPLEMENTS" },
+      { fromUid: "sqlite", toUid: "database", type: "INSTANTIATES" },
     ],
   }));
 }
 
-test("SCIP and GitNexus agree on macro nodes and invoke edges when SCIP has source call evidence", () => {
+test("SCIP and GitNexus agree on evidence-backed architecture including instantiation", () => {
   const scip = scipProjection();
   const gitNexus = gitNexusProjection();
 
@@ -103,12 +111,12 @@ test("SCIP and GitNexus agree on macro nodes and invoke edges when SCIP has sour
   );
   assert.deepEqual(
     gitNexus.relations.map((relation) => relation.kind).sort(),
-    ["depends_on_contract", "implemented_by", "invokes", "invokes"].sort(),
+    ["depends_on_contract", "implemented_by", "invokes", "invokes", "persists_to"].sort(),
   );
   assert.deepEqual(
     scip.relations.map((relation) => relation.kind).sort(),
-    ["depends_on_contract", "implemented_by", "invokes", "invokes"].sort(),
-    "SCIP promotes only references backed by source call syntax",
+    ["depends_on_contract", "implemented_by", "invokes", "invokes", "persists_to"].sort(),
+    "SCIP promotes only references backed by source call/new syntax",
   );
   assert.equal(gitNexus.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
   assert.equal(scip.relations.every((relation) => relation.sourceRelationIds.length > 0), true);

@@ -352,6 +352,23 @@ function isCallOccurrence(source: string, lineStarts: readonly number[], range: 
   return source[offset] === "(";
 }
 
+function isInstantiationOccurrence(source: string, lineStarts: readonly number[], range: ScipRange): boolean {
+  const startLine = lineStarts[range.startLine];
+  const endLine = lineStarts[range.endLine];
+  if (startLine === undefined || endLine === undefined) return false;
+  const startOffset = startLine + range.startCharacter;
+  const endOffset = endLine + range.endCharacter;
+  if (startOffset < 0 || endOffset < startOffset || endOffset > source.length) return false;
+  let before = startOffset;
+  while (before > 0 && /\s/.test(source[before - 1]!)) before -= 1;
+  if (source.slice(Math.max(0, before - 3), before) !== "new") return false;
+  const keywordStart = before - 3;
+  if (keywordStart > 0 && /[A-Za-z0-9_$]/.test(source[keywordStart - 1]!)) return false;
+  let after = endOffset;
+  while (after < source.length && /\s/.test(source[after]!)) after += 1;
+  return source[after] === "(";
+}
+
 interface DefinitionRecord {
   symbol: string;
   document: ScipDocument;
@@ -433,6 +450,29 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     }
   }
 
+  const externalInfoBySymbol = new Map(input.index.externalSymbols.map((info) => [info.symbol, info]));
+  const externalNodeBySymbol = new Map<string, CodeNode>();
+  for (const document of input.index.documents) {
+    for (const occurrence of document.occurrences) {
+      if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) !== 0) continue;
+      if (nodeBySymbol.has(scopedSymbolKey(document, occurrence.symbol))) continue;
+      if (externalNodeBySymbol.has(occurrence.symbol)) continue;
+      if (occurrence.symbol.startsWith("local ")) continue;
+      const info = externalInfoBySymbol.get(occurrence.symbol);
+      const canonicalIdentity = `scip-external:${occurrence.symbol}`;
+      externalNodeBySymbol.set(occurrence.symbol, {
+        id: stableId("node", canonicalIdentity),
+        kind: normalizeKind(info, occurrence.symbol),
+        name: info?.displayName
+          ?? documentedDisplayName(documentationSignatureLine(info), occurrence.symbol)
+          ?? fallbackDisplayName(occurrence.symbol),
+        canonicalIdentity,
+        ...(info?.signature ? { signature: info.signature } : {}),
+        provenance: [{ providerId: "scip-typescript", fidelity: "semantic-reference", freshness: "fresh" }],
+      });
+    }
+  }
+
   const definitionsByDocument = new Map<ScipDocument, DefinitionRecord[]>();
   for (const definition of definitions) {
     const items = definitionsByDocument.get(definition.document) ?? [];
@@ -494,17 +534,20 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const lineStarts = source ? lineStartOffsets(source) : undefined;
     for (const occurrence of document.occurrences) {
       if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) !== 0 || !occurrence.range) continue;
-      const target = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id;
+      const target = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
+        ?? externalNodeBySymbol.get(occurrence.symbol)?.id;
       if (!target) continue;
       const owners = documentDefinitions
         .filter((definition) => definition.occurrence.enclosingRange && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))
         .sort((left, right) => rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!));
       const owner = owners[0]?.nodeId;
       if (!owner) continue;
-      const relationKind = source && lineStarts && isCallOccurrence(source, lineStarts, occurrence.range)
-        ? "calls"
-        : relationKindForRoles(occurrence.symbolRoles);
-      addRelation(relations, owner, target, relationKind, relationKind === "calls" ? 1 : 0.9);
+      const relationKind = source && lineStarts && isInstantiationOccurrence(source, lineStarts, occurrence.range)
+        ? "instantiates"
+        : source && lineStarts && isCallOccurrence(source, lineStarts, occurrence.range)
+          ? "calls"
+          : relationKindForRoles(occurrence.symbolRoles);
+      addRelation(relations, owner, target, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9);
     }
   }
 
@@ -513,7 +556,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     projectId: input.projectId,
     rootPath: input.rootPath,
     indexedAt: input.indexedAt,
-    nodes: [...nodeBySymbol.values()],
+    nodes: [...nodeBySymbol.values(), ...externalNodeBySymbol.values()],
     relations: [...relations.values()],
     coverage: {
       degraded: false,
@@ -522,7 +565,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         status: "fresh",
         fidelity: "semantic-call",
         languages: [...semanticFileCountByLanguage.keys()].sort(),
-        nodeCount: nodeBySymbol.size,
+        nodeCount: nodeBySymbol.size + externalNodeBySymbol.size,
         relationCount: relations.size,
       }],
       languages: [...semanticFileCountByLanguage.entries()]

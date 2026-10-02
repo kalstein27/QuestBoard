@@ -155,6 +155,49 @@ test("SCIP source supplement promotes only syntactic call occurrences to calls",
   assert.ok(graph.relations.some((relation) => relation.from === callerId && relation.to === propertyId && relation.kind === "depends_on"));
 });
 
+test("SCIP materializes referenced external symbols and promotes only new-expression occurrences to instantiates", () => {
+  const owner = "scip-typescript npm questboard 0.0.0 src/storage/sqlite.ts/SqliteRepository#constructor().";
+  const databaseSync = "scip-typescript npm @types/node 0.0.0 node:sqlite/DatabaseSync#";
+  const index = parseScipJsonIndex({
+    externalSymbols: [{ symbol: databaseSync, displayName: "DatabaseSync", kind: "Class" }],
+    documents: [{
+      relativePath: "src/storage/sqlite.ts",
+      language: "typescript",
+      symbols: [{ symbol: owner, displayName: "constructor", kind: "Constructor" }],
+      occurrences: [
+        { symbol: owner, symbolRoles: 1, range: [1, 2, 13], enclosingRange: [1, 0, 5, 1] },
+        { symbol: databaseSync, symbolRoles: 2, range: [0, 9, 21] },
+        { symbol: databaseSync, symbolRoles: 0, range: [2, 12, 24] },
+        { symbol: databaseSync, symbolRoles: 0, range: [3, 8, 20] },
+        { symbol: databaseSync, symbolRoles: 0, range: [4, 2, 14] },
+      ],
+    }],
+  });
+  const graph = normalizeScipGraph({
+    projectId: "questboard",
+    rootPath: "/workspace/questboard",
+    indexedAt: "2026-10-02T00:00:00.000Z",
+    index,
+    sourceTextByPath: new Map([["src/storage/sqlite.ts", [
+      'import { DatabaseSync } from "node:sqlite";',
+      "constructor() {",
+      "  const db: DatabaseSync =",
+      "    new DatabaseSync(path);",
+      "  DatabaseSync;",
+      "}",
+    ].join("\n")]]),
+  });
+  const external = graph.nodes.find((node) => node.canonicalIdentity === `scip-external:${databaseSync}`);
+  const ownerNode = graph.nodes.find((node) => node.canonicalIdentity === `scip:${owner}`);
+  assert.ok(external && ownerNode);
+  assert.equal(external.name, "DatabaseSync");
+  assert.equal(external.location, undefined);
+  assert.deepEqual(external.provenance, [{ providerId: "scip-typescript", fidelity: "semantic-reference", freshness: "fresh" }]);
+  const ownerToExternal = graph.relations.filter((relation) => relation.from === ownerNode.id && relation.to === external.id);
+  assert.equal(ownerToExternal.filter((relation) => relation.kind === "instantiates").length, 1);
+  assert.equal(ownerToExternal.filter((relation) => relation.kind === "calls").length, 0);
+});
+
 test("SCIP projects only macro nodes and relations backed by raw evidence", () => {
   const graph = normalizeScipGraph({
     projectId: "questboard",

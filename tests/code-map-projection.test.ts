@@ -126,6 +126,31 @@ test("projects only raw-evidence-backed human-readable architecture nodes", () =
   assert.equal(projection.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
 });
 
+test("projects SQLite persistence only when a sqlite repository instantiates an external SQLite symbol", () => {
+  const graph = questBoardGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    {
+      id: "external-database-sync",
+      kind: "class",
+      name: "DatabaseSync",
+      canonicalIdentity: "scip-external:scip-typescript npm @types/node 0.0.0 node:sqlite/DatabaseSync#",
+      provenance: [{ providerId: "scip-typescript", fidelity: "semantic-reference", freshness: "fresh" }],
+    },
+  ];
+  graph.relations = [
+    ...graph.relations,
+    { id: "sqlite-database", from: "sqlite-repository", to: "external-database-sync", kind: "instantiates", confidence: 1 },
+  ];
+
+  const projection = projectCodeArchitecture(graph);
+  assert.deepEqual(projection.quality, { status: "useful", groupCount: 6, relationCount: 5 });
+  assert.equal(projection.nodes.some((node) => node.kind === "sqlite"), true);
+  const persistsTo = projection.relations.find((relation) => relation.kind === "persists_to");
+  assert.ok(persistsTo);
+  assert.deepEqual(persistsTo.sourceRelationIds, ["sqlite-database"]);
+});
+
 test("architecture projection keeps macro ids stable when raw graph ids change", () => {
   const first = projectCodeArchitecture(questBoardGraph());
   const changed = questBoardGraph();
