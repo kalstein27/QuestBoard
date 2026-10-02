@@ -239,6 +239,7 @@ test("migrates legacy Tasks into the minimal continuity contract without inventi
     assert.deepEqual(service.resumeTask("legacy-task"), {
       taskId: "legacy-task",
       projectId: "legacy-project",
+      revision: 1,
       status: "ready",
       goal: "Preserve existing task meaning",
       now: "Task status: ready",
@@ -306,6 +307,7 @@ test("builds a bounded Resume Capsule from normalized Task state without expandi
     assert.deepEqual(service.resumeTask(task.id), {
       taskId: task.id,
       projectId: project.id,
+      revision: 1,
       status: "blocked",
       goal: "Return enough state for the next worker to act",
       now: "The canonical continuity state is persisted",
@@ -500,6 +502,7 @@ test("checkpoint atomically updates minimal continuity with explicit clear and e
     }, chatgpt);
     assert.equal(preserved.blocked, "Waiting for checkpoint semantics");
     assert.equal(preserved.guardrail, "Do not add a second workflow state");
+    assert.equal(preserved.revision, 2);
     assert.equal(service.getTask(task.id).revision, 2);
     assert.equal(service.listTaskActivity(task.id).length, 1);
 
@@ -512,6 +515,7 @@ test("checkpoint atomically updates minimal continuity with explicit clear and e
     }, chatgpt);
     assert.equal(set.blocked, "A narrower blocker");
     assert.equal(set.guardrail, "Reuse continuity_json and Activity");
+    assert.equal(set.revision, 3);
     assert.equal(service.getTask(task.id).revision, 3);
     assert.equal(service.listTaskActivity(task.id).length, 2);
     assert.equal(service.listTaskActivity(task.id).at(-1)?.type, "note_added");
@@ -525,6 +529,7 @@ test("checkpoint atomically updates minimal continuity with explicit clear and e
     }, chatgpt);
     assert.equal(Object.hasOwn(cleared, "blocked"), false);
     assert.equal(Object.hasOwn(cleared, "guardrail"), false);
+    assert.equal(cleared.revision, 4);
     assert.deepEqual(cleared, service.resumeTask(task.id));
     assert.equal(service.getTask(task.id).revision, 4);
     assert.equal(service.listTaskActivity(task.id).length, 3);
@@ -669,6 +674,7 @@ test("hides concurrency plumbing while preserving idempotency and stale-claim sa
   const repository = new SqliteQuestBoardRepository();
   const diagnostics: ConcurrencyDiagnosticEvent[] = [];
   const service = new QuestBoardService(repository, undefined, undefined, (event) => diagnostics.push(event));
+  service.setDiagnosticContext({ daemonGenerationId: "daemon-test-generation", databaseId: repository.databaseId });
   try {
     const project = service.createProject({ name: "Invisible concurrency" }, human);
     const task = service.createTask({ projectId: project.id, title: "Update without a lock token", status: "ready" }, human);
@@ -694,11 +700,17 @@ test("hides concurrency plumbing while preserving idempotency and stale-claim sa
     );
     assert.equal(service.getTaskClaim(task.id)?.id, secondClaim.id);
 
+    service.getTask(task.id, { diagnoseRead: true });
+
     const events = diagnostics.map((event) => event.event);
     assert.ok(events.includes("mutation.replayed"));
     assert.ok(events.includes("mutation.request.conflict"));
     assert.ok(events.includes("claim.release.stale"));
     assert.ok(events.includes("task.update.applied"));
+    const readEvent = diagnostics.find((event) => event.event === "task.read");
+    assert.equal(readEvent?.actualRevision, 2);
+    assert.equal(readEvent?.daemonGenerationId, "daemon-test-generation");
+    assert.equal(readEvent?.databaseId, repository.databaseId);
   } finally {
     repository.close();
   }

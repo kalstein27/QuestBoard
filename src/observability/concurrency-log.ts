@@ -10,6 +10,8 @@ export interface ConcurrencyDiagnosticEvent {
   expectedRevision?: number | undefined;
   actualRevision?: number | undefined;
   attempt?: number | undefined;
+  daemonGenerationId?: string | undefined;
+  databaseId?: string | undefined;
   detail?: string | undefined;
 }
 

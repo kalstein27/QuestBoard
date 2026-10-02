@@ -103,6 +103,7 @@ export interface ReleaseTaskOptions extends MutationOptions {
 export interface TaskResumeCapsule {
   taskId: string;
   projectId: string;
+  revision: number;
   status: TaskStatus;
   goal: string;
   now: string;
@@ -267,12 +268,18 @@ type Now = () => string;
 type IdFactory = () => string;
 
 export class QuestBoardService {
+  private diagnosticContext: { daemonGenerationId?: string; databaseId?: string } = {};
+
   constructor(
     private readonly repository: QuestBoardRepository,
     private readonly now: Now = () => new Date().toISOString(),
     private readonly newId: IdFactory = randomUUID,
     private readonly diagnostics: ConcurrencyDiagnosticSink = NOOP_CONCURRENCY_DIAGNOSTIC_SINK,
   ) {}
+
+  setDiagnosticContext(context: { daemonGenerationId?: string; databaseId?: string }): void {
+    this.diagnosticContext = { ...context };
+  }
 
   createProject(input: CreateProjectInput, actor: ActorRef, options: MutationOptions = {}): Project {
     return this.runMutation("project.create", actor, options, input, undefined, () => {
@@ -365,9 +372,17 @@ export class QuestBoardService {
     });
   }
 
-  getTask(taskId: string): Task {
+  getTask(taskId: string, options: { diagnoseRead?: boolean } = {}): Task {
     const task = this.repository.getTask(taskId);
     if (!task) throw new EntityNotFoundError("Task", taskId);
+    if (options.diagnoseRead) {
+      this.log({
+        event: "task.read",
+        operation: "task.get",
+        taskId,
+        actualRevision: task.revision,
+      });
+    }
     return task;
   }
 
@@ -377,6 +392,7 @@ export class QuestBoardService {
     return {
       taskId: task.id,
       projectId: task.projectId,
+      revision: task.revision,
       status: task.status,
       goal: task.goal,
       now: task.now,
@@ -448,6 +464,7 @@ export class QuestBoardService {
           return {
             taskId: updated.id,
             projectId: updated.projectId,
+            revision: updated.revision,
             status: updated.status,
             goal: updated.goal,
             now: updated.now,
@@ -1441,7 +1458,7 @@ export class QuestBoardService {
   }
 
   private log(event: Omit<ConcurrencyDiagnosticEvent, "at">): void {
-    this.diagnostics({ at: this.now(), ...event });
+    this.diagnostics({ at: this.now(), ...this.diagnosticContext, ...event });
   }
 
   private resolveRelationEndpoint(

@@ -1003,7 +1003,7 @@ async function handleRequest(
   if (taskMatch) {
     const taskId = decodePathPart(taskMatch[1]);
     if (method === "GET") {
-      sendJson(response, 200, { task: service.getTask(taskId) });
+      sendJson(response, 200, { task: service.getTask(taskId, { diagnoseRead: true }) });
       return;
     }
     if (method === "PATCH") {

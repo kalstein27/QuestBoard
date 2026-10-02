@@ -85,6 +85,28 @@ test("one daemon serves Web/API while multiple MCP stdio proxies share the same 
     const sharedTasks = readStructuredContent(tasks).tasks as Array<{ id: string }>;
     assert.deepEqual(sharedTasks.map((task) => task.id), [taskId]);
 
+    const checkpointed = await a.request("tools/call", {
+      name: "questboard_checkpoint_task",
+      arguments: {
+        taskId,
+        now: "Proxy A checkpoint is durable",
+        next: "Proxy B must observe the same-or-newer revision",
+        actor,
+      },
+    });
+    const checkpointRevision = readStructuredContent(checkpointed).resume.revision as number;
+    assert.equal(checkpointRevision, 2);
+
+    const readAfterWrite = await b.request("tools/call", {
+      name: "questboard_get_task",
+      arguments: { taskId },
+    });
+    const observedRevision = readStructuredContent(readAfterWrite).task.revision as number;
+    assert.ok(
+      observedRevision >= checkpointRevision,
+      `read-after-write revision regressed: checkpoint=${checkpointRevision}, observed=${observedRevision}`,
+    );
+
     const cli = spawnQuestBoardCli(tempRoot, port, ["projects"]);
     let cliStdout = "";
     cli.stdout.setEncoding("utf8");

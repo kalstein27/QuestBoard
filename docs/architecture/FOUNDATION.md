@@ -111,7 +111,7 @@ MCP tool errors are returned as tool-level `isError` results with stable neutral
 
 ## Concurrency diagnostics
 
-The daemon installs the process concurrency diagnostic sink because it owns all service/database mutation work. It writes structured JSONL to stderr for mutation receipt/replay/conflict, Task CAS retry/conflict/apply, and Claim acquire/release/conflict/stale-release events. MCP/CLI proxy processes do not duplicate those service diagnostics. Mutation payload bodies are not logged. Set `QUESTBOARD_CONCURRENCY_LOG=0` on the daemon to disable this stream.
+The daemon installs the process concurrency diagnostic sink because it owns all service/database mutation work. It writes structured JSONL to stderr for mutation receipt/replay/conflict, Task CAS retry/conflict/apply, boundary Task reads, and Claim acquire/release/conflict/stale-release events. Daemon-side events carry the opaque database id and one process-generation id so a read-after-write anomaly can be attributed to the exact serving generation without logging Task payload bodies. MCP/CLI proxy processes do not duplicate those service diagnostics. Set `QUESTBOARD_CONCURRENCY_LOG=0` on the daemon to disable this stream.
 
 ## Boundary deliberately deferred
 

@@ -43,10 +43,11 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
 
     const resumed = executeQuestBoardAgentTool(service, "questboard_resume_task", {
       taskId: created.task.id,
-    }) as { resume: { taskId: string; projectId: string; status: string; goal: string; now: string; next: string } };
+    }) as { resume: { taskId: string; projectId: string; revision: number; status: string; goal: string; now: string; next: string } };
     assert.deepEqual(resumed.resume, {
       taskId: created.task.id,
       projectId: project.id,
+      revision: 1,
       status: "ready",
       goal: "Expose one continuity state across agent adapters",
       now: "Shared adapter boundary exists",
@@ -87,7 +88,8 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
       activity: { type: "note_added", summary: "Neutral checkpoint tool verified" },
       requestId: "agent:checkpoint:0001",
       actor: agent,
-    }) as { resume: { now: string; next: string; guardrail?: string } };
+    }) as { resume: { revision: number; now: string; next: string; guardrail?: string } };
+    assert.equal(checkpointed.resume.revision, 3);
     assert.equal(checkpointed.resume.now, "Checkpoint tool writes canonical continuity");
     assert.equal(checkpointed.resume.next, "Read the same capsule from resume");
     assert.equal(checkpointed.resume.guardrail, "Keep adapters thin");

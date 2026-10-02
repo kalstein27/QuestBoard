@@ -1137,7 +1137,7 @@ export function executeQuestBoardAgentTool(
     }
     case "questboard_get_task": {
       const taskId = requireString(args, "taskId");
-      return { task: service.getTask(taskId), claim: service.getTaskClaim(taskId) ?? null };
+      return { task: service.getTask(taskId, { diagnoseRead: true }), claim: service.getTaskClaim(taskId) ?? null };
     }
     case "questboard_resume_task":
       return { resume: service.resumeTask(requireString(args, "taskId")) };

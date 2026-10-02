@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { QuestBoardService } from "../application/quest-board-service.js";
@@ -30,7 +31,9 @@ const daemonIdentity = pinQuestBoardDaemonIdentity({
   workspacePath,
   databasePath: canonicalDatabasePath,
 });
+const daemonGenerationId = randomUUID();
 const service = new QuestBoardService(repository, undefined, undefined, createStderrConcurrencyDiagnosticSink());
+service.setDiagnosticContext({ daemonGenerationId, databaseId: repository.databaseId });
 const codeMapEnv = withManagedServiceCodeMapDefault(process.env, managedServiceMode);
 const codeMapRuntime = createConfiguredCodeMapRuntime(codeMapEnv, repository);
 const codeMapInvestigationSyncService = codeMapRuntime.service

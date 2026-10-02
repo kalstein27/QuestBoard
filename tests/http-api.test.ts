@@ -74,12 +74,13 @@ test("serves the vendor-neutral localhost Task workflow over HTTP", async () => 
     const taskId = taskCreated.body.task.id;
 
     const initialResume = await jsonRequest<{
-      resume: { taskId: string; projectId: string; status: string; goal: string; now: string; next: string; blocked?: string; guardrail?: string };
+      resume: { taskId: string; projectId: string; revision: number; status: string; goal: string; now: string; next: string; blocked?: string; guardrail?: string };
     }>(`${baseUrl}/tasks/${taskId}/resume`);
     assert.equal(initialResume.response.status, 200);
     assert.deepEqual(initialResume.body.resume, {
       taskId,
       projectId,
+      revision: 1,
       status: "ready",
       goal: "Keep the Task continuity contract vendor-neutral",
       now: "HTTP Task creation is under verification",
