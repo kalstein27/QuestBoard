@@ -155,7 +155,7 @@ test("SCIP source supplement promotes only syntactic call occurrences to calls",
   assert.ok(graph.relations.some((relation) => relation.from === callerId && relation.to === propertyId && relation.kind === "depends_on"));
 });
 
-test("SCIP reproduces all six macro nodes while conservatively exposing lower invoke-edge coverage", () => {
+test("SCIP projects only macro nodes and relations backed by raw evidence", () => {
   const graph = normalizeScipGraph({
     projectId: "questboard",
     rootPath: "/workspace/questboard",
@@ -166,12 +166,13 @@ test("SCIP reproduces all six macro nodes while conservatively exposing lower in
 
   assert.deepEqual(
     projection.nodes.map((node) => node.kind),
-    ["http_api", "agent_mcp", "application_service", "repository_contract", "sqlite_repository", "sqlite"],
+    ["http_api", "agent_mcp", "application_service", "repository_contract", "sqlite_repository"],
   );
   assert.ok(projection.relations.some((relation) => relation.kind === "implemented_by"));
   assert.ok(projection.relations.some((relation) => relation.kind === "depends_on_contract"));
-  assert.ok(projection.relations.some((relation) => relation.kind === "persists_to"));
+  assert.equal(projection.relations.some((relation) => relation.kind === "persists_to"), false);
   assert.equal(projection.relations.some((relation) => relation.kind === "invokes"), false);
+  assert.equal(projection.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
 });
 
 test("SCIP parser accepts typed camelCase ranges and snake_case fields", () => {

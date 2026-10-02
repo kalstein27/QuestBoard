@@ -104,10 +104,10 @@ function sparseProjectionGraph(): CodeGraphSnapshot {
   };
 }
 
-test("projects raw code intelligence into the six human-readable architecture nodes", () => {
+test("projects only raw-evidence-backed human-readable architecture nodes", () => {
   const projection = projectCodeArchitecture(questBoardGraph());
 
-  assert.deepEqual(projection.quality, { status: "useful", groupCount: 6, relationCount: 5 });
+  assert.deepEqual(projection.quality, { status: "useful", groupCount: 5, relationCount: 4 });
 
   assert.deepEqual(
     projection.nodes.map((node) => [node.kind, node.title]),
@@ -117,13 +117,13 @@ test("projects raw code intelligence into the six human-readable architecture no
       ["application_service", "Application Service"],
       ["repository_contract", "Repository Contract"],
       ["sqlite_repository", "SQLite Repository"],
-      ["sqlite", "SQLite"],
     ],
   );
   assert.deepEqual(
     projection.relations.map((relation) => relation.kind).sort(),
-    ["depends_on_contract", "implemented_by", "invokes", "invokes", "persists_to"].sort(),
+    ["depends_on_contract", "implemented_by", "invokes", "invokes"].sort(),
   );
+  assert.equal(projection.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
 });
 
 test("architecture projection keeps macro ids stable when raw graph ids change", () => {

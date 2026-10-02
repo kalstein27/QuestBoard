@@ -224,10 +224,6 @@ export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitect
     groupedMembers.set(kind, members);
   }
 
-  if (groupedMembers.has("sqlite_repository")) {
-    groupedMembers.set("sqlite", []);
-  }
-
   const nodes: CodeArchitectureNode[] = CODE_ARCHITECTURE_NODE_KINDS.flatMap((kind) => {
     const members = groupedMembers.get(kind);
     if (!members) return [];
@@ -272,18 +268,6 @@ export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitect
         sourceRelationIds: [relation.id],
       });
     }
-  }
-
-  const sqliteRepository = nodeByKind.get("sqlite_repository");
-  const sqlite = nodeByKind.get("sqlite");
-  if (sqliteRepository && sqlite) {
-    const key = `${sqliteRepository.id}:persists_to:${sqlite.id}`;
-    relationEvidence.set(key, {
-      from: sqliteRepository.id,
-      to: sqlite.id,
-      kind: "persists_to",
-      sourceRelationIds: [],
-    });
   }
 
   const relations: CodeArchitectureRelation[] = [...relationEvidence.entries()]

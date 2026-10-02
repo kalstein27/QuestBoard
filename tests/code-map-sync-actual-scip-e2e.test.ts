@@ -34,7 +34,7 @@ const chromeCandidates = [
   "/usr/bin/chromium-browser",
 ].filter((candidate): candidate is string => Boolean(candidate));
 
-test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", { timeout: 120_000 }, async (t) => {
+test("actual SCIP indexes only evidence-backed architecture, Web syncs to Investigation, and MCP/HTTP agree", { timeout: 120_000 }, async (t) => {
   const tempRoot = mkdtempSync(join(tmpdir(), "questboard-actual-scip-sync-"));
   const repository = new SqliteQuestBoardRepository(join(tempRoot, "questboard.sqlite"));
   const service = new QuestBoardService(repository);
@@ -77,8 +77,12 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     const indexed = await json(codeMapUrl, { method: "POST" });
     assert.equal(indexed.response.status, 200, JSON.stringify(indexed.body));
     assert.equal(indexed.body.provider, "scip-typescript");
-    assert.equal(indexed.body.projection.nodes.length, 6);
-    assert.equal(indexed.body.projection.relations.length, 5);
+    assert.equal(indexed.body.projection.nodes.length, 5);
+    assert.equal(indexed.body.projection.relations.length, 4);
+    assert.equal(
+      indexed.body.projection.relations.every((relation: { sourceRelationIds: string[] }) => relation.sourceRelationIds.length > 0),
+      true,
+    );
     const groupedNode = (indexed.body.graph.nodes as Array<{ id: string; name: string }>).find((node) => node.name === "createQuestBoardHttpServer");
     assert.ok(groupedNode, "actual SCIP graph should expose createQuestBoardHttpServer for Work Group aggregation proof");
     const javascriptNode = (indexed.body.graph.nodes as Array<{ name: string; location?: { path?: string } }>).find(
@@ -123,8 +127,8 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
       body: JSON.stringify({ includeRelations: true, recreateDetached: false }),
     });
     assert.equal(preview.response.status, 200, JSON.stringify(preview.body));
-    assert.equal(preview.body.preview.counts.nodes.create, 6);
-    assert.equal(preview.body.preview.counts.relations.create, 5);
+    assert.equal(preview.body.preview.counts.nodes.create, 5);
+    assert.equal(preview.body.preview.counts.relations.create, 4);
     const projectionFingerprint = preview.body.preview.projectionFingerprint as string;
 
     const chromePath = chromeCandidates.find(existsSync);
@@ -182,7 +186,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const sourceExplorer = document.querySelector('.code-map-source-panel');
         const nodes = document.querySelectorAll('.code-map-architecture-card').length;
         const relations = document.querySelectorAll('.code-map-architecture-relation').length;
-        if (sourceExplorer && nodes === 6 && relations === 5 && sync && !sync.classList.contains('hidden')) {
+        if (sourceExplorer && nodes === 5 && relations === 4 && sync && !sync.classList.contains('hidden')) {
           return { sourceExplorer: true, nodes, relations, status: document.querySelector('#code-map-status')?.textContent || '' };
         }
         await sleep(100);
@@ -191,7 +195,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     })()`);
     assert.deepEqual(
       { sourceExplorer: codeMapRender.sourceExplorer, nodes: codeMapRender.nodes, relations: codeMapRender.relations },
-      { sourceExplorer: true, nodes: 6, relations: 5 },
+      { sourceExplorer: true, nodes: 5, relations: 4 },
     );
     assert.match(codeMapRender.status, /scip-typescript/);
 
@@ -468,15 +472,15 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const dialog = document.querySelector('#code-map-sync-dialog');
         const rows = document.querySelectorAll('.code-map-sync-row').length;
         const values = [...document.querySelectorAll('.code-map-sync-stat-value')].map((item) => item.textContent);
-        if (dialog?.open && rows === 11 && values[0] === '6' && values[1] === '5') {
+        if (dialog?.open && rows === 9 && values[0] === '5' && values[1] === '4') {
           return { rows, values };
         }
         await sleep(100);
       }
       throw new Error('Code Map sync preview timeout');
     })()`);
-    assert.equal(browserPreview.rows, 11);
-    assert.deepEqual(browserPreview.values.slice(0, 2), ["6", "5"]);
+    assert.equal(browserPreview.rows, 9);
+    assert.deepEqual(browserPreview.values.slice(0, 2), ["5", "4"]);
 
     await cdp.evaluate(`document.querySelector('#code-map-sync-apply').click(); true`);
     const browserResult = await cdp.evaluate(`(async () => {
@@ -493,8 +497,8 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
       }
       throw new Error('Code Map sync apply timeout');
     })()`);
-    assert.equal(browserResult.values[0], "6");
-    assert.equal(browserResult.values[1], "5");
+    assert.equal(browserResult.values[0], "5");
+    assert.equal(browserResult.values[1], "4");
 
     await cdp.evaluate(`document.querySelector('#code-map-sync-open-investigation').click(); true`);
     const focusedAfterNavigation = await cdp.evaluate(`(async () => {
@@ -504,7 +508,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const title = document.querySelector('#workspace-title')?.textContent || '';
         const nodes = document.querySelectorAll('.investigation-graph-node').length;
         const focused = document.querySelectorAll('.investigation-graph-node.code-map-sync-focus').length;
-        if (title === 'Flow' && nodes === 6 && focused > 0) return focused;
+        if (title === 'Flow' && nodes === 5 && focused > 0) return focused;
         await sleep(50);
       }
       return 0;
@@ -519,7 +523,7 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         const items = document.querySelectorAll('.investigation-item').length;
         const flows = document.querySelectorAll('.investigation-flow-line').length;
         const badges = document.querySelectorAll('.code-map-binding-badge').length;
-        if (title === 'Flow' && nodes === 6 && items === 5 && flows === 5 && badges >= 11) {
+        if (title === 'Flow' && nodes === 5 && items === 4 && flows === 4 && badges >= 9) {
           return { title, nodes, items, flows, badges };
         }
         await sleep(100);
@@ -533,9 +537,9 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
         items: investigationRender.items,
         flows: investigationRender.flows,
       },
-      { title: "Flow", nodes: 6, items: 5, flows: 5 },
+      { title: "Flow", nodes: 5, items: 4, flows: 4 },
     );
-    assert.ok(investigationRender.badges >= 11);
+    assert.ok(investigationRender.badges >= 9);
 
     const syncedForCodeLens = service.getInvestigationGraph(project.id);
     const linkedFlowItem = syncedForCodeLens.items[0];
@@ -572,15 +576,15 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     assert.deepEqual(flowItemFocus, { title: "Flow", itemFocused: true, groupFocused: true });
 
     const graph = await json(`${baseUrl}/projects/${encodeURIComponent(project.id)}/investigation/graph`);
-    assert.equal(graph.body.nodes.length, 6);
-    assert.equal(graph.body.items.length, 5);
-    assert.equal(graph.body.itemLinks.length, 5);
+    assert.equal(graph.body.nodes.length, 5);
+    assert.equal(graph.body.items.length, 4);
+    assert.equal(graph.body.itemLinks.length, 4);
 
     const mcpPreview = await mcpToolCall(baseUrl, "actual-scip-sync-session", 1, "questboard_preview_code_map_investigation_sync", {
       projectId: project.id,
     });
-    assert.equal(mcpPreview.preview.counts.nodes.unchanged, 6);
-    assert.equal(mcpPreview.preview.counts.relations.unchanged, 5);
+    assert.equal(mcpPreview.preview.counts.nodes.unchanged, 5);
+    assert.equal(mcpPreview.preview.counts.relations.unchanged, 4);
     assert.equal(mcpPreview.preview.projectionFingerprint, projectionFingerprint);
 
     const mcpApply = await mcpToolCall(baseUrl, "actual-scip-sync-session", 2, "questboard_apply_code_map_investigation_sync", {
@@ -592,20 +596,20 @@ test("actual SCIP indexes 6/5, Web syncs to Investigation, and MCP/HTTP agree", 
     assert.equal(mcpApply.result.counts.createdNodes, 0);
     assert.equal(mcpApply.result.counts.createdRelationItems, 0);
     assert.equal(mcpApply.result.counts.createdRelationLinks, 0);
-    assert.equal(mcpApply.result.counts.unchangedNodes, 6);
-    assert.equal(mcpApply.result.counts.unchangedRelations, 5);
+    assert.equal(mcpApply.result.counts.unchangedNodes, 5);
+    assert.equal(mcpApply.result.counts.unchangedRelations, 4);
 
     const httpPreviewAfterMcp = await json(previewUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ includeRelations: true }),
     });
-    assert.equal(httpPreviewAfterMcp.body.preview.counts.nodes.unchanged, 6);
-    assert.equal(httpPreviewAfterMcp.body.preview.counts.relations.unchanged, 5);
+    assert.equal(httpPreviewAfterMcp.body.preview.counts.nodes.unchanged, 5);
+    assert.equal(httpPreviewAfterMcp.body.preview.counts.relations.unchanged, 4);
     const finalGraph = await json(`${baseUrl}/projects/${encodeURIComponent(project.id)}/investigation/graph`);
-    assert.equal(finalGraph.body.nodes.length, 6);
-    assert.equal(finalGraph.body.items.length, 5);
-    assert.equal(finalGraph.body.itemLinks.length, 5);
+    assert.equal(finalGraph.body.nodes.length, 5);
+    assert.equal(finalGraph.body.items.length, 4);
+    assert.equal(finalGraph.body.itemLinks.length, 4);
   } finally {
     if (cdp) {
       await cdp.call("Browser.close").catch(() => undefined);

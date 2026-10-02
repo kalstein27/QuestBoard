@@ -99,15 +99,17 @@ test("SCIP and GitNexus agree on macro nodes and invoke edges when SCIP has sour
   assert.deepEqual(
     scip.nodes.map((node) => node.kind),
     gitNexus.nodes.map((node) => node.kind),
-    "both providers should recover the same six human architecture nodes",
+    "both providers should recover the same evidence-backed human architecture nodes",
   );
   assert.deepEqual(
     gitNexus.relations.map((relation) => relation.kind).sort(),
-    ["depends_on_contract", "implemented_by", "invokes", "invokes", "persists_to"].sort(),
+    ["depends_on_contract", "implemented_by", "invokes", "invokes"].sort(),
   );
   assert.deepEqual(
     scip.relations.map((relation) => relation.kind).sort(),
-    ["depends_on_contract", "implemented_by", "invokes", "invokes", "persists_to"].sort(),
+    ["depends_on_contract", "implemented_by", "invokes", "invokes"].sort(),
     "SCIP promotes only references backed by source call syntax",
   );
+  assert.equal(gitNexus.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
+  assert.equal(scip.relations.every((relation) => relation.sourceRelationIds.length > 0), true);
 });
