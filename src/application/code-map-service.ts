@@ -19,6 +19,10 @@ import {
   type CodeFileInventory,
 } from "./code-map-hierarchy.js";
 import {
+  inspectCodeMapPreflight,
+  type CodeMapPreflightReport,
+} from "./code-map-preflight.js";
+import {
   CodeMapQueryError,
   queryCodeGraph,
   type CodeMapQueryInput,
@@ -26,6 +30,7 @@ import {
 } from "./code-map-query.js";
 import {
   CodeMapProviderRegistry,
+  CodeProviderLifecycleError,
   type CodeMapProviderCapabilityReport,
   type CodeProviderInstallRequest,
 } from "./code-map-provider-registry.js";
@@ -246,6 +251,7 @@ function persistedEnvelopeOrReason(
 export class CodeMapService {
   readonly #provider: CodeIntelligenceProvider;
   readonly #fileInventory: CodeFileInventory | undefined;
+  readonly #preflightInventory: CodeFileInventory | undefined;
   readonly #providerRegistry: CodeMapProviderRegistry | undefined;
   readonly #manualRelations: CodeMapManualRelationReader | undefined;
   readonly #persistence: CodeMapPersistenceConfig | undefined;
@@ -263,9 +269,11 @@ export class CodeMapService {
     providerRegistry?: CodeMapProviderRegistry,
     manualRelations?: CodeMapManualRelationReader,
     persistence?: CodeMapPersistenceConfig,
+    preflightInventory?: CodeFileInventory,
   ) {
     this.#provider = provider;
     this.#fileInventory = fileInventory;
+    this.#preflightInventory = preflightInventory ?? fileInventory;
     this.#providerRegistry = providerRegistry;
     this.#manualRelations = manualRelations;
     this.#persistence = persistence;
@@ -295,17 +303,55 @@ export class CodeMapService {
     return this.#hydrationDiagnostics.get(projectId);
   }
 
+  async preflight(projectId: string): Promise<CodeMapPreflightReport> {
+    const cached = this.getCached(projectId)?.graph;
+    const rootPath = cached?.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    return inspectCodeMapPreflight(rootPath, this.#preflightInventory);
+  }
+
   providerCapabilities(projectId: string): CodeMapProviderCapabilityReport | undefined {
     const cached = this.getCached(projectId)?.graph;
     const rootPath = cached?.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
     return this.#providerRegistry?.report(cached, rootPath);
   }
 
-  requestProviderInstall(projectId: string, providerId: string): CodeProviderInstallRequest {
+  async providerCapabilitiesWithPreflight(
+    projectId: string,
+    canonicalRootPath?: string,
+  ): Promise<CodeMapProviderCapabilityReport | undefined> {
+    if (!this.#providerRegistry) return undefined;
+    const cached = this.getCached(projectId)?.graph;
+    const rootPath = cached?.rootPath ?? canonicalRootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    if (cached) return this.#providerRegistry.report(cached, rootPath);
+    const preflight = await inspectCodeMapPreflight(rootPath, this.#preflightInventory);
+    return this.#providerRegistry.report(undefined, rootPath, preflight);
+  }
+
+  async requestProviderInstall(
+    projectId: string,
+    providerId: string,
+    canonicalRootPath?: string,
+  ): Promise<CodeProviderInstallRequest> {
     if (!this.#providerRegistry) {
       throw new Error("Code Map provider registry is not available in this runtime");
     }
-    const rootPath = this.getCached(projectId)?.graph.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    const capabilities = await this.providerCapabilitiesWithPreflight(projectId, canonicalRootPath);
+    const projectProvider = capabilities?.providers.find((provider) => provider.providerId === providerId);
+    if (projectProvider?.requirement === "not_needed") {
+      throw new CodeProviderLifecycleError(
+        "code_map_provider_not_needed",
+        `Code Map provider ${providerId} is not needed for the languages detected in this project`,
+      );
+    }
+    if (projectProvider?.requirement === "unknown") {
+      throw new CodeProviderLifecycleError(
+        "code_map_provider_requirement_unknown",
+        `Code Map provider ${providerId} requirement cannot be determined until project language inventory is available`,
+      );
+    }
+    const rootPath = this.getCached(projectId)?.graph.rootPath
+      ?? canonicalRootPath
+      ?? this.#persistence?.rootPathForProject?.(projectId);
     return this.#providerRegistry.requestInstall(projectId, providerId, rootPath);
   }
 

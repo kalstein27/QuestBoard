@@ -80,6 +80,7 @@ function createCompositeService(
     providerRegistry,
     manualRelations,
     persistence,
+    new FileSystemCodeFileInventory(),
   );
 }
 

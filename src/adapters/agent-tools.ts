@@ -48,7 +48,11 @@ import {
   CodeScopeBindingError,
   type CodeScopeBindingService,
 } from "../application/code-scope-binding.js";
-import { CodeProviderLifecycleError } from "../application/code-map-provider-registry.js";
+import {
+  CodeProviderLifecycleError,
+  type CodeMapProviderCapabilityReport,
+} from "../application/code-map-provider-registry.js";
+import { recommendCodeMapNextAction } from "../application/code-map-next-action.js";
 import { AGENT_FOCUS_SURFACES, AGENT_NAVIGATION_INTENTS, type AgentFocusService } from "../application/agent-focus.js";
 import {
   CODE_MAP_HIERARCHY_DIRECTIONS,
@@ -768,7 +772,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map",
-    description: "Query the indexed raw Code Map through a bounded read surface. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
+    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -793,7 +797,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_code_map_status",
-    description: "Read bounded Code Map lifecycle status for one project, including indexing/provider state and derived architecture projection quality without returning the full graph. When projectionQuality.status is sparse, continue exploration through bounded raw Code Map queries rather than treating the project as unindexed.",
+    description: "Canonical first read for Code Map lifecycle work. Reports indexed/freshness state, detected language summary, provider requirement/availability, projection quality, and one machine-actionable recommendedNextAction without returning the full graph. Follow recommendedNextAction; use questboard_get_code_map_provider_capabilities only when detailed language coverage or install options are needed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -805,7 +809,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_refresh_code_map",
-    description: "Start or reuse one background full Code Map refresh for the canonical Project rootPath and return a bounded job receipt immediately. Provider installation is never triggered.",
+    description: "Start or reuse one background full Code Map refresh for the canonical Project rootPath when status recommends refresh. Returns a bounded receipt immediately with lastGoodSnapshotAvailable and recommendedNextAction, normally questboard_get_code_map_refresh_status. Never installs providers and never accepts a caller-supplied rootPath override.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -817,7 +821,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_code_map_refresh_status",
-    description: "Read the latest bounded Code Map refresh job receipt for one project, including running/succeeded/failed terminal state.",
+    description: "Read the latest bounded Code Map refresh receipt and follow its recommendedNextAction. While running, call this tool again rather than replaying refresh. On succeeded, re-read questboard_get_code_map_status. On failed, inspect the bounded error and lastGoodSnapshotAvailable, then re-read status so a preserved snapshot can remain queryable.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -829,7 +833,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_code_map_provider_capabilities",
-    description: "Read the shared Code Map provider registry and per-language coverage gaps. Reports trusted install options without installing anything.",
+    description: "Detailed provider drill-down. Before the first index it preflights project languages; after indexing it reports per-language discovered/eligible/indexed/excluded counts, semantic gaps, provider requirement (required/not_needed/unknown), availability, and trusted install options. It never installs anything. Follow recommendedNextAction and request installation only for a provider reported as required.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -841,7 +845,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_request_code_map_provider_install",
-    description: "Return a trusted, approval-required external-host install request for one Code Map provider. This tool never executes package or executable installation and never triggers indexing.",
+    description: "Return a trusted approval-required external-host install plan only for a provider needed by this project. QuestBoard cannot execute the installation, and this tool never installs packages or triggers indexing. not_needed and unknown requirements are rejected. After the external host completes the approved install, call the returned nextAfterExternalInstall tool to re-check provider availability before refresh.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1417,26 +1421,79 @@ export function executeQuestBoardAgentTool(
         ),
       };
     case "questboard_get_code_map_status":
-      return {
-        codeMap: codeMapAgentStatus(context, service, requireString(args, "projectId")),
-      };
+      return codeMapAgentStatus(context, service, requireString(args, "projectId"))
+        .then((codeMap) => ({ codeMap }));
     case "questboard_refresh_code_map":
       return refreshCodeMapForAgent(context, service, requireString(args, "projectId"));
-    case "questboard_get_code_map_refresh_status":
+    case "questboard_get_code_map_refresh_status": {
+      const projectId = requireString(args, "projectId");
+      const project = service.getProject(projectId);
+      const codeMap = requireCodeMapService(context);
+      const refresh = codeMap.refreshJob(projectId);
+      const cached = codeMap.getCached(projectId);
       return {
-        refresh: requireCodeMapService(context).refreshJob(requireString(args, "projectId")) ?? null,
+        refresh: refresh
+          ? {
+              ...refresh,
+              lastGoodSnapshotAvailable: Boolean(cached),
+              recommendedNextAction: recommendCodeMapNextAction({
+                projectId,
+                surface: "refresh",
+                enabled: true,
+                rootPathConfigured: Boolean(project.rootPath),
+                indexed: Boolean(cached),
+                refresh,
+              }),
+            }
+          : null,
+        ...(!refresh
+          ? {
+              recommendedNextAction: recommendCodeMapNextAction({
+                projectId,
+                surface: "refresh",
+                enabled: true,
+                rootPathConfigured: Boolean(project.rootPath),
+                indexed: Boolean(cached),
+              }),
+            }
+          : {}),
       };
-    case "questboard_get_code_map_provider_capabilities":
-      return {
-        capabilities: requireCodeMapService(context).providerCapabilities(requireString(args, "projectId")),
-      };
-    case "questboard_request_code_map_provider_install":
-      return {
-        installRequest: requireCodeMapService(context).requestProviderInstall(
-          requireString(args, "projectId"),
+    }
+    case "questboard_get_code_map_provider_capabilities": {
+      const projectId = requireString(args, "projectId");
+      const project = service.getProject(projectId);
+      const codeMap = requireCodeMapService(context);
+      return codeMap
+        .providerCapabilitiesWithPreflight(projectId, project.rootPath)
+        .then((capabilities) => ({
+          capabilities: capabilities
+            ? {
+                ...capabilities,
+                recommendedNextAction: recommendCodeMapNextAction({
+                  projectId,
+                  surface: "capabilities",
+                  enabled: true,
+                  rootPathConfigured: Boolean(project.rootPath),
+                  indexed: Boolean(codeMap.getCached(projectId)),
+                  ...(codeMap.snapshotLifecycleState(projectId) ?? {}),
+                  providerCapabilities: capabilities,
+                  ...(codeMap.refreshJob(projectId) ? { refresh: codeMap.refreshJob(projectId)! } : {}),
+                }),
+              }
+            : capabilities,
+        }));
+    }
+    case "questboard_request_code_map_provider_install": {
+      const projectId = requireString(args, "projectId");
+      const project = service.getProject(projectId);
+      return requireCodeMapService(context)
+        .requestProviderInstall(
+          projectId,
           requireString(args, "providerId"),
-        ),
-      };
+          project.rootPath,
+        )
+        .then((installRequest) => ({ installRequest }));
+    }
     case "questboard_list_code_scope_bindings":
       return {
         codeScopeBindings: requireCodeScopeBindingService(context).list(
@@ -1624,17 +1681,54 @@ function normalizeAgentToolRuntime(runtime: QuestBoardAgentToolRuntime): QuestBo
   return { service: runtime };
 }
 
-function codeMapAgentStatus(
+function codeMapProviderStatusSummary(report: CodeMapProviderCapabilityReport): Record<string, unknown> {
+  return {
+    providerHealth: report.health,
+    semanticCoverage: report.semanticCoverage,
+    languageDetection: report.providers.some((provider) => provider.requirement === "unknown")
+      ? "unknown"
+      : "ready",
+    detectedLanguages: report.languages
+      .filter((language) => language.discoveredFileCount > 0)
+      .map((language) => ({
+        language: language.language,
+        discoveredFileCount: language.discoveredFileCount,
+      })),
+    providers: report.providers.map((provider) => ({
+      providerId: provider.providerId,
+      available: provider.available,
+      health: provider.health,
+      requirement: provider.requirement,
+      requirementReason: provider.requirementReason,
+      matchingLanguages: provider.matchingLanguages,
+    })),
+  };
+}
+
+async function codeMapAgentStatus(
   context: QuestBoardAgentToolContext,
   service: QuestBoardService,
   projectId: string,
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const project = service.getProject(projectId);
   const codeMap = context.codeMapService;
   const cached = codeMap?.getCached(projectId);
   const snapshotState = codeMap?.snapshotLifecycleState(projectId);
   const hydrationDiagnostic = codeMap?.hydrationDiagnostic(projectId);
-  const providerCapabilities = codeMap?.providerCapabilities(projectId);
+  const providerCapabilities = codeMap
+    ? await codeMap.providerCapabilitiesWithPreflight(projectId, project.rootPath)
+    : undefined;
+  const refresh = codeMap?.refreshJob(projectId);
+  const recommendedNextAction = recommendCodeMapNextAction({
+    projectId,
+    surface: "status",
+    enabled: Boolean(codeMap),
+    rootPathConfigured: Boolean(project.rootPath),
+    indexed: Boolean(cached),
+    ...(snapshotState ?? {}),
+    ...(providerCapabilities ? { providerCapabilities } : {}),
+    ...(refresh ? { refresh } : {}),
+  });
   return {
     projectId,
     enabled: Boolean(codeMap),
@@ -1652,7 +1746,8 @@ function codeMapAgentStatus(
       : {}),
     ...(snapshotState ?? {}),
     ...(hydrationDiagnostic ?? {}),
-    ...(providerCapabilities ? { providerCapabilities } : {}),
+    ...(providerCapabilities ? codeMapProviderStatusSummary(providerCapabilities) : {}),
+    recommendedNextAction,
   };
 }
 
@@ -1679,6 +1774,15 @@ function refreshCodeMapForAgent(
       phase: refresh.phase,
       startedAt: refresh.startedAt,
       updatedAt: refresh.updatedAt,
+      lastGoodSnapshotAvailable: Boolean(codeMap.getCached(projectId)),
+      recommendedNextAction: recommendCodeMapNextAction({
+        projectId,
+        surface: "refresh",
+        enabled: true,
+        rootPathConfigured: true,
+        indexed: Boolean(codeMap.getCached(projectId)),
+        refresh,
+      }),
     },
   };
 }

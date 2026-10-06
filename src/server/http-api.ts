@@ -46,6 +46,7 @@ import {
   type CodeScopeBindingService,
 } from "../application/code-scope-binding.js";
 import { CodeMapQueryError } from "../application/code-map-query.js";
+import { CodeProviderLifecycleError } from "../application/code-map-provider-registry.js";
 import { AGENT_FOCUS_SURFACES, AGENT_NAVIGATION_INTENTS, type AgentFocusService } from "../application/agent-focus.js";
 import {
   CodeMapInvestigationSyncError,
@@ -342,7 +343,7 @@ async function handleRequest(
   if (codeMapProviderInstallMatch && method === "POST") {
     const projectId = decodePathPart(codeMapProviderInstallMatch[1]);
     service.getProject(projectId);
-    sendJson(response, 200, executeQuestBoardAgentTool(
+    sendJson(response, 200, await executeQuestBoardAgentTool(
       {
         service,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
@@ -357,7 +358,7 @@ async function handleRequest(
   if (codeMapProvidersMatch && method === "GET") {
     const projectId = decodePathPart(codeMapProvidersMatch[1]);
     service.getProject(projectId);
-    sendJson(response, 200, executeQuestBoardAgentTool(
+    sendJson(response, 200, await executeQuestBoardAgentTool(
       {
         service,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
@@ -1358,6 +1359,11 @@ function sendError(response: ServerResponse, error: unknown): void {
       "code_map_sync_invalid_selection",
       "code_map_sync_raw_node_selection_unsupported",
     ].includes(error.code) ? 400 : 409;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
+  if (error instanceof CodeProviderLifecycleError) {
+    const statusCode = error.code === "code_map_provider_unknown" ? 404 : 409;
     sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
     return;
   }

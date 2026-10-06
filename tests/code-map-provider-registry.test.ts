@@ -84,6 +84,9 @@ test("provider capability report names concrete mixed-language gaps instead of g
   assert.equal(report.degraded, false);
   assert.equal(report.semanticCoverage, "partial");
   assert.equal(report.providers[0]?.executable, "scip-typescript");
+  assert.equal(report.providers[0]?.requirement, "required");
+  assert.equal(report.providers[0]?.requirementReason, "detected_supported_language");
+  assert.deepEqual(report.providers[0]?.matchingLanguages, ["typescript"]);
   assert.equal(report.languages.find((entry) => entry.language === "typescript")?.semanticCoverage, "complete");
   assert.equal(report.languages.find((entry) => entry.language === "typescript")?.gapReason, null);
   assert.deepEqual(report.languages.find((entry) => entry.language === "typescript")?.providerIds, ["scip-typescript"]);
@@ -180,6 +183,8 @@ test("unsupported recognized languages are capability gaps without degrading Cod
   assert.equal(report.health, "healthy");
   assert.equal(report.degraded, false);
   assert.equal(report.semanticCoverage, "unavailable");
+  assert.equal(report.providers[0]?.requirement, "not_needed");
+  assert.equal(report.providers[0]?.requirementReason, "supported_language_not_detected");
   assert.equal(report.languages[0]?.semanticCoverage, "unavailable");
   assert.equal(report.languages[0]?.gapReason, "no_trusted_provider_available");
 });
@@ -353,10 +358,16 @@ test("trusted install requests are approval-only and external installation plus 
   assert.equal(before.languages.find((entry) => entry.language === "typescript")?.gapReason, "provider_missing");
   assert.equal(before.languages.find((entry) => entry.language === "typescript")?.symbolCount, 0);
 
-  const request = service.requestProviderInstall("project-1", "scip-typescript");
+  const request = await service.requestProviderInstall("project-1", "scip-typescript");
   assert.equal(request.approvalRequired, true);
   assert.equal(request.executionBoundary, "external-host");
+  assert.equal(request.executionAvailableInQuestBoard, false);
   assert.equal(request.indexingTriggered, false);
+  assert.deepEqual(request.nextAfterExternalInstall, {
+    tool: "questboard_get_code_map_provider_capabilities",
+    args: { projectId: "project-1" },
+    reason: "verify_provider_availability_before_refresh",
+  });
   assert.deepEqual(request.install, installOption);
   assert.equal(provider.semantic, false, "request generation must not install or reindex anything");
 
@@ -383,23 +394,59 @@ test("HTTP UI-facing discovery and agent tools share the same trusted install op
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
   const project = service.createProject({ name: "Provider lifecycle", rootPath: "/workspace/project" }, human);
+  await codeMapService.refresh({ projectId: project.id, rootPath: project.rootPath! });
   const context = { service, codeMapService };
   const server = createQuestBoardHttpServer(service, { codeMapService });
 
   try {
-    const agentCapabilities = executeQuestBoardAgentTool(context, "questboard_get_code_map_provider_capabilities", { projectId: project.id }) as any;
-    const agentInstall = executeQuestBoardAgentTool(context, "questboard_request_code_map_provider_install", { projectId: project.id, providerId: "scip-typescript" }) as any;
+    const agentCapabilities = await executeQuestBoardAgentTool(
+      context,
+      "questboard_get_code_map_provider_capabilities",
+      { projectId: project.id },
+    ) as any;
+    const agentInstall = await executeQuestBoardAgentTool(
+      context,
+      "questboard_request_code_map_provider_install",
+      { projectId: project.id, providerId: "scip-typescript" },
+    ) as any;
 
     await listen(server);
     const address = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${address.port}/projects/${encodeURIComponent(project.id)}/code-map/providers`;
+    const httpStatus = await fetch(
+      `http://127.0.0.1:${address.port}/projects/${encodeURIComponent(project.id)}/code-map/status`,
+    ).then((response) => response.json()) as any;
     const httpCapabilities = await fetch(baseUrl).then((response) => response.json()) as any;
     const httpInstall = await fetch(`${baseUrl}/scip-typescript/install-request`, { method: "POST" }).then((response) => response.json()) as any;
 
+    assert.equal(httpStatus.codeMap.indexed, true);
+    assert.equal(httpStatus.codeMap.languageDetection, "ready");
+    assert.ok(httpStatus.codeMap.detectedLanguages.some(
+      (entry: any) => entry.language === "typescript" && entry.discoveredFileCount === 1,
+    ));
+    assert.deepEqual(httpStatus.codeMap.providers, [{
+      providerId: "scip-typescript",
+      available: false,
+      health: "missing_executable",
+      requirement: "required",
+      requirementReason: "detected_supported_language",
+      matchingLanguages: ["typescript"],
+    }]);
+    assert.equal("providerCapabilities" in httpStatus.codeMap, false);
     assert.deepEqual(httpCapabilities.capabilities.providers, agentCapabilities.capabilities.providers);
     assert.deepEqual(httpInstall.installRequest.install, agentInstall.installRequest.install);
     assert.equal(httpInstall.installRequest.approvalRequired, true);
     assert.equal(httpInstall.installRequest.executionBoundary, "external-host");
+    assert.equal(httpInstall.installRequest.executionAvailableInQuestBoard, false);
+    assert.deepEqual(
+      httpInstall.installRequest.nextAfterExternalInstall,
+      agentInstall.installRequest.nextAfterExternalInstall,
+    );
+    assert.deepEqual(httpInstall.installRequest.nextAfterExternalInstall, {
+      tool: "questboard_get_code_map_provider_capabilities",
+      args: { projectId: project.id },
+      reason: "verify_provider_availability_before_refresh",
+    });
   } finally {
     await closeServer(server);
     repository.close();

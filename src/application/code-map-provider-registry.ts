@@ -5,6 +5,7 @@ import {
   type CodeGraphSnapshot,
   type CodeRelationKind,
 } from "./code-intelligence.js";
+import type { CodeMapPreflightReport } from "./code-map-preflight.js";
 
 export const CODE_PROVIDER_HEALTH_STATES = ["ready", "missing_executable", "degraded"] as const;
 export type CodeProviderHealthState = (typeof CODE_PROVIDER_HEALTH_STATES)[number];
@@ -56,6 +57,22 @@ export interface CodeProviderRuntimeStatus {
 
 export interface CodeProviderRegistryEntry extends CodeProviderDefinition, CodeProviderRuntimeStatus {}
 
+export const CODE_PROVIDER_REQUIREMENTS = ["required", "not_needed", "unknown"] as const;
+export type CodeProviderRequirement = (typeof CODE_PROVIDER_REQUIREMENTS)[number];
+
+export const CODE_PROVIDER_REQUIREMENT_REASONS = [
+  "detected_supported_language",
+  "supported_language_not_detected",
+  "language_inventory_unavailable",
+] as const;
+export type CodeProviderRequirementReason = (typeof CODE_PROVIDER_REQUIREMENT_REASONS)[number];
+
+export interface CodeProviderProjectCapability extends CodeProviderRegistryEntry {
+  requirement: CodeProviderRequirement;
+  requirementReason: CodeProviderRequirementReason;
+  matchingLanguages: readonly string[];
+}
+
 export interface CodeLanguageCapabilityReport {
   language: string;
   discoveredFileCount: number;
@@ -73,7 +90,7 @@ export interface CodeLanguageCapabilityReport {
 }
 
 export interface CodeMapProviderCapabilityReport {
-  providers: readonly CodeProviderRegistryEntry[];
+  providers: readonly CodeProviderProjectCapability[];
   languages: readonly CodeLanguageCapabilityReport[];
   indexed: boolean;
   health: CodeMapHealthState;
@@ -88,12 +105,23 @@ export interface CodeProviderInstallRequest {
   install: CodeProviderInstallOption;
   approvalRequired: true;
   executionBoundary: "external-host";
+  executionAvailableInQuestBoard: false;
   indexingTriggered: false;
+  nextAfterExternalInstall: {
+    tool: "questboard_get_code_map_provider_capabilities";
+    args: { projectId: string };
+    reason: "verify_provider_availability_before_refresh";
+  };
 }
 
 export class CodeProviderLifecycleError extends Error {
   constructor(
-    readonly code: "code_map_provider_unknown" | "code_map_provider_install_unavailable" | "code_map_provider_already_available",
+    readonly code:
+      | "code_map_provider_unknown"
+      | "code_map_provider_install_unavailable"
+      | "code_map_provider_already_available"
+      | "code_map_provider_not_needed"
+      | "code_map_provider_requirement_unknown",
     message: string,
   ) {
     super(message);
@@ -183,6 +211,116 @@ function gapDegradesHealth(reason: CodeLanguageGapReason | null): boolean {
   return reason === "provider_missing" || reason === "provider_degraded" || reason === "partial_coverage";
 }
 
+function projectLanguages(
+  graph: CodeGraphSnapshot | undefined,
+  preflight: CodeMapPreflightReport | undefined,
+): readonly string[] | undefined {
+  if (preflight?.status === "ready") {
+    return preflight.languages
+      .filter((entry) => entry.discoveredFileCount > 0)
+      .map((entry) => normalizeCodeLanguage(entry.language));
+  }
+  if (graph) {
+    return [...new Set(graph.nodes
+      .filter((node) => node.kind === "file")
+      .map((node) => normalizeCodeLanguage(node.language))
+      .filter((language) => language !== "unknown"))].sort();
+  }
+  return undefined;
+}
+
+function providerProjectCapability(
+  provider: CodeProviderRegistryEntry,
+  languages: readonly string[] | undefined,
+): CodeProviderProjectCapability {
+  if (!languages) {
+    return {
+      ...provider,
+      requirement: "unknown",
+      requirementReason: "language_inventory_unavailable",
+      matchingLanguages: [],
+    };
+  }
+  const supported = new Set(provider.languages.map((language) => normalizeCodeLanguage(language)));
+  const matchingLanguages = languages.filter((language) => supported.has(language)).sort();
+  if (matchingLanguages.length > 0) {
+    return {
+      ...provider,
+      requirement: "required",
+      requirementReason: "detected_supported_language",
+      matchingLanguages,
+    };
+  }
+  return {
+    ...provider,
+    requirement: "not_needed",
+    requirementReason: "supported_language_not_detected",
+    matchingLanguages: [],
+  };
+}
+
+function preflightLanguageReports(
+  preflight: CodeMapPreflightReport | undefined,
+  providers: readonly CodeProviderProjectCapability[],
+): CodeLanguageCapabilityReport[] {
+  if (preflight?.status !== "ready") return [];
+
+  const discovered = [
+    ...preflight.languages.map((entry) => ({
+      language: normalizeCodeLanguage(entry.language),
+      discoveredFileCount: entry.discoveredFileCount,
+    })),
+    ...(preflight.unknownFileCount > 0
+      ? [{ language: "unknown", discoveredFileCount: preflight.unknownFileCount }]
+      : []),
+  ].sort((left, right) => left.language.localeCompare(right.language));
+
+  return discovered.map(({ language, discoveredFileCount }): CodeLanguageCapabilityReport => {
+    const configuredForLanguage = providers.filter((provider) =>
+      provider.configured && provider.languages.map(normalizeCodeLanguage).includes(language));
+    const installOptions = providers
+      .filter((provider) =>
+        provider.languages.map(normalizeCodeLanguage).includes(language)
+        && !provider.available
+        && provider.installOption)
+      .map((provider) => provider.installOption!);
+    let gapReason: CodeLanguageGapReason | null = null;
+    if (language === "unknown") {
+      gapReason = null;
+    } else if (configuredForLanguage.some((provider) => !provider.available)) {
+      gapReason = "provider_missing";
+    } else if (providers.some((provider) =>
+      provider.languages.map(normalizeCodeLanguage).includes(language))) {
+      gapReason = "file_only";
+    } else {
+      gapReason = "no_trusted_provider_available";
+    }
+
+    const eligibleFileCount = language === "unknown" ? 0 : null;
+    return {
+      language,
+      discoveredFileCount,
+      eligibleFileCount,
+      indexedFileCount: 0,
+      excludedFileCount: 0,
+      exclusionReason: null,
+      symbolCount: 0,
+      fidelity: "file-only",
+      providerIds: [],
+      observedRelationKinds: [],
+      semanticCoverage: semanticCoverageForLanguage(
+        language,
+        0,
+        eligibleFileCount,
+        0,
+        gapReason,
+      ),
+      gapReason,
+      installOptions,
+    };
+  });
+}
+
 export class CodeMapProviderRegistry {
   readonly #definitions: readonly CodeProviderDefinition[];
   readonly #statusResolver: ProviderStatusResolver;
@@ -198,13 +336,22 @@ export class CodeMapProviderRegistry {
     return this.#definitions.map((definition) => ({ ...definition, ...publicProviderStatus(this.#statusResolver(definition, rootPath)) }));
   }
 
-  report(graph?: CodeGraphSnapshot, rootPath?: string): CodeMapProviderCapabilityReport {
-    const providers = this.entries(graph?.rootPath ?? rootPath);
+  report(
+    graph?: CodeGraphSnapshot,
+    rootPath?: string,
+    preflight?: CodeMapPreflightReport,
+  ): CodeMapProviderCapabilityReport {
+    const projectLanguageInventory = projectLanguages(graph, preflight);
+    const providers = this.entries(graph?.rootPath ?? rootPath)
+      .map((provider) => providerProjectCapability(provider, projectLanguageInventory));
     if (!graph) {
-      const degraded = providers.some((provider) => provider.configured && !provider.available);
+      const reports = preflightLanguageReports(preflight, providers);
+      const degraded = preflight?.status === "ready"
+        ? reports.some((entry) => gapDegradesHealth(entry.gapReason))
+        : providers.some((provider) => provider.configured && !provider.available);
       return {
         providers,
-        languages: [],
+        languages: reports,
         indexed: false,
         health: degraded ? "degraded" : "healthy",
         semanticCoverage: null,
@@ -302,7 +449,13 @@ export class CodeMapProviderRegistry {
       install: provider.installOption,
       approvalRequired: true,
       executionBoundary: "external-host",
+      executionAvailableInQuestBoard: false,
       indexingTriggered: false,
+      nextAfterExternalInstall: {
+        tool: "questboard_get_code_map_provider_capabilities",
+        args: { projectId },
+        reason: "verify_provider_availability_before_refresh",
+      },
     };
   }
 }

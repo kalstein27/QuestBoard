@@ -4,6 +4,8 @@ export * from "./observability/concurrency-log.js";
 export * from "./application/code-intelligence.js";
 export * from "./application/composite-code-intelligence-provider.js";
 export * from "./application/code-map-hierarchy.js";
+export * from "./application/code-map-preflight.js";
+export * from "./application/code-map-next-action.js";
 export * from "./application/code-map-query.js";
 export * from "./application/code-map-provider-registry.js";
 export * from "./application/code-map-augmentation.js";
