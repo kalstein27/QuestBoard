@@ -7,10 +7,7 @@ import { CompositeCodeIntelligenceProvider } from "../application/composite-code
 import { CodeMapService } from "../application/code-map-service.js";
 import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import { FileSystemCodeFileInventory } from "../adapters/code-intelligence/file-inventory.js";
-import {
-  GitNexusCodeIntelligenceProvider,
-} from "../adapters/code-intelligence/gitnexus-provider.js";
-import { ExecFileGitNexusCliRunner } from "../adapters/code-intelligence/gitnexus-indexer.js";
+import { ScipPhpProvider } from "../adapters/code-intelligence/scip-php-provider.js";
 import {
   ExecFileScipProcessRunner,
   ScipTypeScriptCodeIntelligenceProvider,
@@ -24,7 +21,7 @@ import {
 } from "../adapters/code-intelligence/code-map-persistence.js";
 import { assertCodeMapStorageRootOutsideProject } from "../adapters/code-intelligence/code-map-persistence.js";
 
-export type QuestBoardCodeMapProvider = "gitnexus" | "scip-typescript";
+export type QuestBoardCodeMapProvider = "scip-php" | "scip-typescript";
 
 export interface QuestBoardCodeMapConfig {
   /** First configured provider retained for legacy diagnostics/config consumers. */
@@ -89,7 +86,7 @@ function createCompositeService(
 function providerMetadata(provider: QuestBoardCodeMapProvider): { languages?: readonly string[]; fidelity: CodeFidelityLevel } {
   return provider === "scip-typescript"
     ? { languages: ["typescript", "javascript"], fidelity: "semantic-call" }
-    : { fidelity: "semantic-call" };
+    : { languages: ["php"], fidelity: "semantic-call" };
 }
 
 function semanticFactsProvider(
@@ -127,7 +124,7 @@ function semanticFactsProvider(
 
 function parseProvider(value: string): QuestBoardCodeMapProvider {
   const normalized = value.trim().toLowerCase();
-  if (normalized !== "gitnexus" && normalized !== "scip-typescript") {
+  if (normalized !== "scip-php" && normalized !== "scip-typescript") {
     throw new TypeError(`Unsupported Code Map provider: ${normalized || value}`);
   }
   return normalized;
@@ -135,26 +132,33 @@ function parseProvider(value: string): QuestBoardCodeMapProvider {
 
 function configuredProviderNames(env: NodeJS.ProcessEnv): { providers: QuestBoardCodeMapProvider[]; plural: boolean } {
   const pluralValue = env.QUESTBOARD_CODE_MAP_PROVIDERS?.trim();
+  const singleValue = env.QUESTBOARD_CODE_MAP_PROVIDER?.trim();
   const rawProviders = pluralValue
     ? pluralValue.split(",").map((value) => value.trim()).filter(Boolean)
-    : [env.QUESTBOARD_CODE_MAP_PROVIDER?.trim() || "scip-typescript"];
+    : singleValue
+      ? [singleValue]
+      : ["scip-typescript", "scip-php"];
   if (rawProviders.length < 1) throw new TypeError("QUESTBOARD_CODE_MAP_PROVIDERS must include at least one provider");
   const providers = rawProviders.map(parseProvider);
   if (new Set(providers).size !== providers.length) {
     throw new TypeError("QUESTBOARD_CODE_MAP_PROVIDERS must not contain duplicate providers");
   }
-  return { providers, plural: Boolean(pluralValue) };
+  return { providers, plural: Boolean(pluralValue) || !singleValue };
 }
 
 function providerExecutable(
   provider: QuestBoardCodeMapProvider,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  rootPath?: string,
 ): string {
   return provider === "scip-typescript"
     ? env.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE?.trim()
       || join(cwd, "node_modules", ".bin", process.platform === "win32" ? "scip-typescript.cmd" : "scip-typescript")
-    : env.QUESTBOARD_GITNEXUS_EXECUTABLE?.trim() || "gitnexus";
+    : env.QUESTBOARD_SCIP_PHP_EXECUTABLE?.trim()
+      || (rootPath
+        ? join(rootPath, "vendor", "bin", process.platform === "win32" ? "scip-php.bat" : "scip-php")
+        : "vendor/bin/scip-php");
 }
 
 const CODE_MAP_PROVIDER_DEFINITIONS: readonly CodeProviderDefinition[] = [
@@ -177,10 +181,22 @@ const CODE_MAP_PROVIDER_DEFINITIONS: readonly CodeProviderDefinition[] = [
     },
   },
   {
-    providerId: "gitnexus",
-    languages: [],
+    providerId: "scip-php",
+    languages: ["php"],
     fidelity: "semantic-call",
-    version: null,
+    version: "dev-main#71a5b117ec4c5dd2af302e363410e604e5df309e",
+    installOption: {
+      providerId: "scip-php",
+      sourceType: "composer",
+      source: "davidrjenni/scip-php",
+      version: "dev-main#71a5b117ec4c5dd2af302e363410e604e5df309e",
+      executable: "vendor/bin/scip-php",
+      trust: "project-pinned",
+      requiresApproval: true,
+      executionBoundary: "external-host",
+      permissions: ["network", "project-dependency-install"],
+      reindexMode: "full",
+    },
   },
 ];
 
@@ -222,9 +238,9 @@ export function createQuestBoardCodeMapProviderRegistry(
   cwd = process.cwd(),
 ): CodeMapProviderRegistry {
   const configured = new Set(config.providers ?? [config.provider]);
-  return new CodeMapProviderRegistry(CODE_MAP_PROVIDER_DEFINITIONS, (definition) => {
+  return new CodeMapProviderRegistry(CODE_MAP_PROVIDER_DEFINITIONS, (definition, rootPath) => {
     const provider = definition.providerId as QuestBoardCodeMapProvider;
-    const requestedExecutable = providerExecutable(provider, env, cwd);
+    const requestedExecutable = providerExecutable(provider, env, cwd, rootPath);
     const executable = findQuestBoardCodeMapExecutable(requestedExecutable, env);
     return {
       configured: configured.has(provider),
@@ -313,12 +329,14 @@ export function createConfiguredCodeMapService(
     ], providerRegistry, manualRelations, persistence);
   }
 
-  const runner = new ExecFileGitNexusCliRunner({ executable: config.executable });
-  const provider = new GitNexusCodeIntelligenceProvider(runner, {
+  const provider = new ScipPhpProvider(new ExecFileScipProcessRunner(), {
     storageRoot: config.storageRoot,
+    ...(env.QUESTBOARD_SCIP_PHP_EXECUTABLE?.trim()
+      ? { indexerExecutable: env.QUESTBOARD_SCIP_PHP_EXECUTABLE.trim() }
+      : {}),
   });
   return createCompositeService([
-    withProviderMetadata(provider, { fidelity: "semantic-call" }, config.storageRoot),
+    withProviderMetadata(provider, { languages: ["php"], fidelity: "semantic-call" }, config.storageRoot),
   ], providerRegistry, manualRelations, persistence);
 }
 
@@ -374,18 +392,14 @@ export function createConfiguredCodeMapRuntime(
   const providerRegistry = createQuestBoardCodeMapProviderRegistry(config, env);
   const resolvedProviders = configuredProviders.map((provider) => {
     const requestedExecutable = providerExecutable(provider, env, process.cwd());
-    return {
-      provider,
-      requestedExecutable,
-      executable: findQuestBoardCodeMapExecutable(requestedExecutable, env),
-    };
+    const executable = findQuestBoardCodeMapExecutable(requestedExecutable, env);
+    const projectLocal = provider === "scip-php" && !env.QUESTBOARD_SCIP_PHP_EXECUTABLE?.trim();
+    return { provider, requestedExecutable, executable, projectLocal };
   });
   const missingExecutables = resolvedProviders
-    .filter((entry) => !entry.executable)
+    .filter((entry) => !entry.executable && !entry.projectLocal)
     .map((entry) => codeProviderExecutableLabel(entry.requestedExecutable) ?? "configured executable");
-  const activeProviders = resolvedProviders.filter(
-    (entry): entry is typeof entry & { executable: string } => Boolean(entry.executable),
-  );
+  const activeProviders = resolvedProviders.filter((entry) => Boolean(entry.executable) || entry.projectLocal);
 
   let service: CodeMapService;
   if (activeProviders.length === 0) {
@@ -404,10 +418,10 @@ export function createConfiguredCodeMapRuntime(
       resolvedEnv.QUESTBOARD_CODE_MAP_PROVIDER = activeProviders[0]!.provider;
     }
     for (const entry of activeProviders) {
-      if (entry.provider === "scip-typescript") {
+      if (entry.provider === "scip-typescript" && entry.executable) {
         resolvedEnv.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE = entry.executable;
-      } else {
-        resolvedEnv.QUESTBOARD_GITNEXUS_EXECUTABLE = entry.executable;
+      } else if (entry.provider === "scip-php") {
+        resolvedEnv.QUESTBOARD_SCIP_PHP_EXECUTABLE = entry.executable ?? entry.requestedExecutable;
       }
     }
     const configuredService = createConfiguredCodeMapService(resolvedEnv, providerRegistry, manualRelations, persistence);

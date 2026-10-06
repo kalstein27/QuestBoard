@@ -14,6 +14,7 @@ test("managed service enables Code Map by default without changing ordinary runt
   const managedEnv = withManagedServiceCodeMapDefault({}, true);
   assert.equal(managedEnv.QUESTBOARD_CODE_MAP, "1");
   assert.equal(resolveQuestBoardCodeMapConfig(managedEnv)?.provider, "scip-typescript");
+  assert.deepEqual(resolveQuestBoardCodeMapConfig(managedEnv)?.providers, ["scip-typescript", "scip-php"]);
 });
 
 test("managed service preserves an explicit Code Map disable override", () => {
@@ -29,6 +30,7 @@ test("Code Map config uses SCIP TypeScript as the default provider", () => {
   });
 
   assert.equal(config?.provider, "scip-typescript");
+  assert.deepEqual(config?.providers, ["scip-typescript", "scip-php"]);
   assert.match(config?.executable ?? "", /node_modules[/\\]\.bin[/\\]scip-typescript(?:\.cmd)?$/);
   assert.equal(config?.storageRoot, "/tmp/qb-code-map");
 });
@@ -36,17 +38,17 @@ test("Code Map config uses SCIP TypeScript as the default provider", () => {
 test("Code Map config composes an ordered zero-or-more semantic provider set", () => {
   const env = {
     QUESTBOARD_CODE_MAP: "1",
-    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,gitnexus",
+    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,scip-php",
     QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-composite",
     QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: "/opt/tools/scip-typescript",
-    QUESTBOARD_GITNEXUS_EXECUTABLE: "/opt/tools/gitnexus",
+    QUESTBOARD_SCIP_PHP_EXECUTABLE: "/opt/tools/scip-php",
   };
   const config = resolveQuestBoardCodeMapConfig(env);
 
   assert.deepEqual(config, {
     provider: "scip-typescript",
     executable: "/opt/tools/scip-typescript",
-    providers: ["scip-typescript", "gitnexus"],
+    providers: ["scip-typescript", "scip-php"],
     storageRoot: "/tmp/qb-composite",
   });
   const service = createConfiguredCodeMapService(env);
@@ -56,17 +58,17 @@ test("Code Map config composes an ordered zero-or-more semantic provider set", (
 test("Code Map runtime keeps healthy semantic providers when another configured provider is missing", () => {
   const runtime = createConfiguredCodeMapRuntime({
     QUESTBOARD_CODE_MAP: "1",
-    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,gitnexus",
+    QUESTBOARD_CODE_MAP_PROVIDERS: "scip-typescript,scip-php",
     QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-composite-partial",
     QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: process.execPath,
-    QUESTBOARD_GITNEXUS_EXECUTABLE: "/definitely/missing/gitnexus",
+    QUESTBOARD_SCIP_PHP_EXECUTABLE: "/definitely/missing/scip-php",
   });
 
   assert.ok(runtime.service);
   assert.equal(runtime.service.providerId, "scip-typescript");
   assert.equal(runtime.availability.available, true);
   assert.equal(runtime.availability.reason, "missing_executable");
-  assert.deepEqual(runtime.availability.missingExecutables, ["gitnexus"]);
+  assert.deepEqual(runtime.availability.missingExecutables, ["scip-php"]);
   assert.doesNotMatch(runtime.availability.message ?? "", /\/definitely\/missing/);
 });
 
@@ -74,6 +76,7 @@ test("Code Map runtime keeps healthy semantic providers when another configured 
 test("Code Map runtime degrades to file-only when the configured semantic indexer is missing", () => {
   const runtime = createConfiguredCodeMapRuntime({
     QUESTBOARD_CODE_MAP: "1",
+    QUESTBOARD_CODE_MAP_PROVIDER: "scip-typescript",
     QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-code-map-missing",
     QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE: "/definitely/missing/scip-typescript",
   });
@@ -89,14 +92,20 @@ test("Code Map runtime degrades to file-only when the configured semantic indexe
   assert.doesNotMatch(runtime.availability.message ?? "", /\/definitely\/missing/);
 });
 
-test("GitNexus remains an explicit optional provider", () => {
+test("SCIP PHP is an explicit project-local semantic provider", () => {
   const config = resolveQuestBoardCodeMapConfig({
     QUESTBOARD_CODE_MAP: "1",
-    QUESTBOARD_CODE_MAP_PROVIDER: "gitnexus",
-    QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-gitnexus",
+    QUESTBOARD_CODE_MAP_PROVIDER: "scip-php",
+    QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-scip-php",
   });
-  assert.equal(config?.provider, "gitnexus");
-  assert.equal(config?.executable, "gitnexus");
+  assert.equal(config?.provider, "scip-php");
+  assert.equal(config?.executable, "vendor/bin/scip-php");
+  const service = createConfiguredCodeMapService({
+    QUESTBOARD_CODE_MAP: "1",
+    QUESTBOARD_CODE_MAP_PROVIDER: "scip-php",
+    QUESTBOARD_CODE_MAP_STORAGE_ROOT: "/tmp/qb-scip-php",
+  });
+  assert.equal(service?.providerId, "scip-php");
 });
 
 test("Code Map config supports an explicit SCIP TypeScript indexer override", () => {

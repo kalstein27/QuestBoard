@@ -3,6 +3,7 @@ import {
   CODE_GRAPH_SCHEMA_VERSION,
   assertValidCodeGraphSnapshot,
   normalizeCodeLanguage,
+  type CodeFidelityLevel,
   type CodeGraphSnapshot,
   type CodeNode,
   type CodeNodeKind,
@@ -66,6 +67,8 @@ export interface NormalizeScipGraphInput {
   indexedAt: string;
   index: ScipJsonIndex;
   sourceTextByPath?: ReadonlyMap<string, string>;
+  providerId?: string;
+  fidelity?: CodeFidelityLevel;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -405,6 +408,8 @@ function addRelation(
 }
 
 export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSnapshot {
+  const providerId = input.providerId?.trim() || "scip-typescript";
+  const fidelity = input.fidelity ?? "semantic-call";
   const infoBySymbol = new Map<string, ScipSymbolInformation>();
   for (const info of input.index.externalSymbols) infoBySymbol.set(info.symbol, info);
   for (const document of input.index.documents) {
@@ -468,7 +473,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           ?? fallbackDisplayName(occurrence.symbol),
         canonicalIdentity,
         ...(info?.signature ? { signature: info.signature } : {}),
-        provenance: [{ providerId: "scip-typescript", fidelity: "semantic-reference", freshness: "fresh" }],
+        provenance: [{ providerId, fidelity: "semantic-reference", freshness: "fresh" }],
       });
     }
   }
@@ -561,9 +566,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     coverage: {
       degraded: false,
       providers: [{
-        providerId: "scip-typescript",
+        providerId,
         status: "fresh",
-        fidelity: "semantic-call",
+        fidelity,
         languages: [...semanticFileCountByLanguage.keys()].sort(),
         nodeCount: nodeBySymbol.size + externalNodeBySymbol.size,
         relationCount: relations.size,
@@ -575,8 +580,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           fileCount,
           semanticEligibleFileCount: fileCount,
           semanticIndexedFileCount: fileCount,
-          fidelity: "semantic-call" as const,
-          providerIds: ["scip-typescript"],
+          fidelity,
+          providerIds: [providerId],
           degraded: false,
         })),
     },

@@ -98,6 +98,7 @@ export interface ScipGraphLoadInput {
   indexPath: string;
   request: CodeIndexRequest;
   indexedAt: string;
+  providerId: string;
 }
 
 export interface ScipGraphLoader {
@@ -170,7 +171,7 @@ async function bundledScipDecoder(): Promise<BundledScipDecoder> {
   return await bundledScipDecoderPromise;
 }
 
-class BundledScipIndexReader implements ScipIndexReader {
+export class BundledScipIndexReader implements ScipIndexReader {
   async read(indexPath: string): Promise<ScipJsonIndex> {
     const decoder = await bundledScipDecoder();
     const raw = decoder.Index.deserializeBinary(readFileSync(indexPath)).toObject();
@@ -186,6 +187,7 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
     indexedAt: input.indexedAt,
     index,
     sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
+    providerId: input.providerId,
   });
 }
 
@@ -212,7 +214,7 @@ export class WorkerScipGraphLoader implements ScipGraphLoader {
   }
 }
 
-function indexDirectory(storageRoot: string, request: CodeIndexRequest): string {
+export function indexDirectory(storageRoot: string, request: CodeIndexRequest): string {
   const digest = createHash("sha256")
     .update(`${request.projectId}\0${request.rootPath}`)
     .digest("hex")
@@ -249,7 +251,7 @@ async function writeJavaScriptOverlayProject(
 }
 
 
-function readIndexedSourceText(rootPath: string, index: ScipJsonIndex): ReadonlyMap<string, string> {
+export function readIndexedSourceText(rootPath: string, index: ScipJsonIndex): ReadonlyMap<string, string> {
   const root = resolve(rootPath);
   const sources = new Map<string, string>();
   for (const document of index.documents) {
@@ -305,7 +307,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
     );
     const indexedAt = this.#now();
     if (this.#graphLoader) {
-      return await this.#graphLoader.load({ indexPath, request, indexedAt });
+      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId });
     }
     const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
@@ -314,6 +316,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
       indexedAt,
       index,
       sourceTextByPath: readIndexedSourceText(request.rootPath, index),
+      providerId: this.providerId,
     });
   }
 }

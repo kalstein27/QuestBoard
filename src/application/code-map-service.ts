@@ -296,14 +296,17 @@ export class CodeMapService {
   }
 
   providerCapabilities(projectId: string): CodeMapProviderCapabilityReport | undefined {
-    return this.#providerRegistry?.report(this.getCached(projectId)?.graph);
+    const cached = this.getCached(projectId)?.graph;
+    const rootPath = cached?.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    return this.#providerRegistry?.report(cached, rootPath);
   }
 
   requestProviderInstall(projectId: string, providerId: string): CodeProviderInstallRequest {
     if (!this.#providerRegistry) {
       throw new Error("Code Map provider registry is not available in this runtime");
     }
-    return this.#providerRegistry.requestInstall(projectId, providerId);
+    const rootPath = this.getCached(projectId)?.graph.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    return this.#providerRegistry.requestInstall(projectId, providerId, rootPath);
   }
 
   refreshJob(projectId: string): CodeMapRefreshJobReceipt | undefined {

@@ -26,7 +26,7 @@ export type CodeLanguageGapReason = (typeof CODE_LANGUAGE_GAP_REASONS)[number];
 
 export interface CodeProviderInstallOption {
   providerId: string;
-  sourceType: "npm";
+  sourceType: "npm" | "composer";
   source: string;
   version: string;
   executable: string;
@@ -101,7 +101,7 @@ export class CodeProviderLifecycleError extends Error {
   }
 }
 
-type ProviderStatusResolver = (definition: CodeProviderDefinition) => CodeProviderRuntimeStatus;
+type ProviderStatusResolver = (definition: CodeProviderDefinition, rootPath?: string) => CodeProviderRuntimeStatus;
 
 function fidelityRank(value: CodeFidelityLevel): number {
   return CODE_FIDELITY_LEVELS.indexOf(value);
@@ -194,12 +194,12 @@ export class CodeMapProviderRegistry {
     this.#statusResolver = statusResolver;
   }
 
-  entries(): CodeProviderRegistryEntry[] {
-    return this.#definitions.map((definition) => ({ ...definition, ...publicProviderStatus(this.#statusResolver(definition)) }));
+  entries(rootPath?: string): CodeProviderRegistryEntry[] {
+    return this.#definitions.map((definition) => ({ ...definition, ...publicProviderStatus(this.#statusResolver(definition, rootPath)) }));
   }
 
-  report(graph?: CodeGraphSnapshot): CodeMapProviderCapabilityReport {
-    const providers = this.entries();
+  report(graph?: CodeGraphSnapshot, rootPath?: string): CodeMapProviderCapabilityReport {
+    const providers = this.entries(graph?.rootPath ?? rootPath);
     if (!graph) {
       const degraded = providers.some((provider) => provider.configured && !provider.available);
       return {
@@ -279,8 +279,8 @@ export class CodeMapProviderRegistry {
     };
   }
 
-  requestInstall(projectId: string, providerId: string): CodeProviderInstallRequest {
-    const provider = this.entries().find((entry) => entry.providerId === providerId);
+  requestInstall(projectId: string, providerId: string, rootPath?: string): CodeProviderInstallRequest {
+    const provider = this.entries(rootPath).find((entry) => entry.providerId === providerId);
     if (!provider) {
       throw new CodeProviderLifecycleError("code_map_provider_unknown", `Unknown Code Map provider: ${providerId}`);
     }

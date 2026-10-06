@@ -2,25 +2,39 @@
 
 A local-first work-continuity board for humans working with AI agents.
 
-QuestBoard keeps a shared goal, current work position, next action, and minimum supporting context so work can resume cheaply after a chat, context, model, or agent boundary. The visible UI stays deliberately simple; deeper Activity, Evidence, Flow, and Code context is available only when it helps the next action. The core remains agent/vendor-neutral.
+QuestBoard keeps the smallest shared state needed to answer three questions across chat, model, agent, or context boundaries:
 
-QuestBoard deliberately does **not** replace Git/version control, Jira-style planning, Confluence-style long-form documentation, bug trackers, or an IDE. It links only the minimum references needed to keep human-AI implementation work moving.
+- **Goal** — what are we trying to accomplish?
+- **Now** — where did the work actually reach?
+- **Next** — what is the most useful next action?
+
+The visible UI stays deliberately simple while deeper Activity, Evidence, Flow, and Code context remains available on demand. The core stays agent/vendor-neutral.
+
+QuestBoard deliberately does **not** replace Git/version control, Jira-style planning, Confluence-style long-form documentation, bug trackers, or an IDE. It links only the minimum context needed to keep human-AI implementation work moving.
+
+## Mental model
+
+- **Quest** is the canonical Task surface. It owns durable Goal / Now / Next continuity and workflow state.
+- **Flow** is a visual execution map. Its Work Group hierarchy and Investigation graph are intentionally separate from canonical Task hierarchy.
+- **Code** is a bounded technical source explorer backed by a provider-neutral Code Map. Raw `code:node:*` identities stay separate from derived architecture-projection `code-map:node:*` identities.
+- **Agent Follow** is ephemeral presence, not durable work state. It can show where an agent is working and optionally follow meaningful navigation while user interaction always wins through Pause / Follow / Return controls.
 
 ## Project status
 
-QuestBoard is a **pre-release MVP**. The current repository includes:
+QuestBoard is a **pre-release MVP moving toward a v0.1.0 public milestone**. The current repository includes:
 
 - an agent-neutral TypeScript domain and application service;
 - SQLite persistence using Node's built-in `node:sqlite`;
 - a local/private-network HTTP API and dependency-free Web UI;
-- Quest, Investigation/Flow, and contextual Code Map views;
-- a JSON-oriented CLI;
-- a lightweight dependency-free MCP stdio proxy;
-- Task, Claim, Activity, Artifact, Relation, and board-position persistence;
+- Quest, Flow, Code, and Agent Follow surfaces;
+- SCIP-backed TypeScript/JavaScript/PHP Code Map indexing with bounded query/navigation contracts;
+- persistent Task ↔ CodeScope continuity and explicit manual Code Map augmentation;
+- a JSON-oriented CLI and lightweight dependency-free MCP stdio proxy;
+- Task, Claim, Activity, Artifact, Relation, Investigation, Flow Work Group, and board-position persistence;
 - internal optimistic concurrency, idempotent mutation receipts, stale-Claim release protection, and concurrency diagnostics;
-- multi-worker race tests.
+- browser/SCIP acceptance coverage and multi-worker race tests.
 
-The main remaining product work is to reduce resume cost: make current goal/state/next action clearer, simplify Flow/Investigation into meaningful checkpoints, keep Code Map contextual rather than IDE-like, and prove cross-session/cross-agent resume with low token/action cost. Agent onboarding guidance is documented in [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md). See [`docs/QUESTBOARD-PROJECT-PLAN.ko.md`](docs/QUESTBOARD-PROJECT-PLAN.ko.md) for the product direction and scope boundaries.
+The current product direction is continuity-first: keep the human-facing workflow small, preserve strong internal recovery/context links, and avoid replacing specialist tools. Start with the [documentation map](docs/README.md), the [product direction](docs/QUESTBOARD-PROJECT-PLAN.ko.md), or the [agent onboarding guide](docs/AGENT-ONBOARDING.md).
 
 ## Requirements
 
@@ -29,12 +43,12 @@ The main remaining product work is to reduce resume cost: make current goal/stat
 - macOS, Linux, or another platform supported by Node 24 and `node:sqlite`
 - Tailscale only if you want Tailnet-only access from another device
 
-QuestBoard's foundation uses Node built-ins; Code Map adds the pinned `@sourcegraph/scip-typescript` runtime dependency behind the code-intelligence adapter boundary. TypeScript and Node type definitions remain development dependencies.
+QuestBoard's foundation uses Node built-ins; Code Map keeps the pinned `@sourcegraph/scip-typescript` runtime dependency behind the code-intelligence adapter boundary and can additionally use a target Composer project's project-local `scip-php`. TypeScript and Node type definitions remain development dependencies.
 
 ## Install
 
 ```bash
-git clone <repo-url> QuestBoard
+git clone https://github.com/kalstein27/QuestBoard.git
 cd QuestBoard
 npm ci
 npm run build
@@ -48,19 +62,19 @@ npm run verify
 
 `npm run verify` runs type checking, Web JavaScript syntax validation, the full test suite, and the dedicated multi-worker race test.
 
-## Quick start: shared daemon + Web/API
+## Quick start: local Web/API
 
-Build and start the long-lived daemon. The canonical scripts use Tailnet mode by default:
+For a first run, start the long-lived daemon on localhost:
 
 ```bash
 npm run build
-npm run daemon
+npm run daemon:local
 ```
 
-Open the Tailscale IPv4 address printed by the daemon, for example:
+Then open:
 
 ```text
-http://100.x.y.z:4317
+http://127.0.0.1:4317
 ```
 
 The default database is:
@@ -71,7 +85,7 @@ The default database is:
 
 On first start, that database receives a stable UUID and the daemon pins it to the local QuestBoard identity profile. MCP/CLI clients validate the daemon protocol and pinned database UUID before attaching, so a different QuestBoard database listening on the same endpoint is rejected instead of being used silently.
 
-`npm run daemon` and `npm start` bind specifically to the active Tailscale IPv4 address by default. Use `npm run daemon:local` or `npm run start:local` for localhost-only operation. The Web UI lets you create Projects and Tasks, move Tasks through the seven workflow states, Claim/Release work, add Activity notes, attach evidence Artifacts, create Relations, and switch between Quest and Investigation views.
+The Web UI exposes Quest, Flow, and Code workspaces plus Agent Follow presence controls. Use `npm run daemon` when you intentionally want the canonical Tailnet-bound mode; it binds to the machine's active Tailscale IPv4. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before enabling access from another device.
 
 ### Configuration
 
@@ -87,19 +101,19 @@ On first start, that database receives a stable UUID and the daemon pins it to t
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
 | `QUESTBOARD_CODE_MAP` | Set to `1` or `true` to enable Code Map indexing; managed-service mode defaults it on when unset | disabled normally; enabled in managed-service mode |
-| `QUESTBOARD_CODE_MAP_PROVIDER` | Code intelligence provider: `scip-typescript` or optional `gitnexus` | `scip-typescript` |
+| `QUESTBOARD_CODE_MAP_PROVIDER` | Optional single-provider override: `scip-typescript` or `scip-php` | unset |
+| `QUESTBOARD_CODE_MAP_PROVIDERS` | Ordered semantic provider set | `scip-typescript,scip-php` |
 | `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
 | `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | Optional override for the bundled `scip-typescript` indexer executable | local `node_modules/.bin/scip-typescript` |
-| `QUESTBOARD_GITNEXUS_EXECUTABLE` | Optional GitNexus executable path/name | `gitnexus` |
+| `QUESTBOARD_SCIP_PHP_EXECUTABLE` | Optional SCIP PHP executable override | target project's `vendor/bin/scip-php` |
 
 ### Code Map provider setup
 
-Code Map is opt-in for ordinary daemon launches, while ChatGPT2Codex managed-service mode enables it by default unless `QUESTBOARD_CODE_MAP` is explicitly set to a disabling value. When enabled its default provider is **SCIP TypeScript**. QuestBoard declares `@sourcegraph/scip-typescript` as the Code Map adapter's pinned runtime dependency, so a normal `npm install` / `npm ci` or managed-MCP install provisions the indexer automatically. QuestBoard reads the generated `.scip` file through the decoder shipped in that same package, so a separate `scip` CLI install, global PATH setup, or post-install Code Map toggle is not required. `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` remains available only as an explicit override.
+Code Map is opt-in for ordinary daemon launches, while ChatGPT2Codex managed-service mode enables it by default unless `QUESTBOARD_CODE_MAP` is explicitly set to a disabling value. The default semantic set is **SCIP TypeScript + SCIP PHP**. QuestBoard declares `@sourcegraph/scip-typescript` as a pinned runtime dependency, while PHP indexing intentionally uses the target Composer project's own `vendor/bin/scip-php`. QuestBoard reads both providers' `.scip` output through the same provider-neutral decoder/normalizer path.
 
-If the bundled indexer is unexpectedly missing, QuestBoard still starts normally and Code Map remains usable at file-only fidelity. The shared provider registry reports the missing executable and per-language coverage gaps; Web/HTTP and agent/MCP discovery expose the same trusted `@sourcegraph/scip-typescript@0.4.0` install option. Requesting that option only produces an approval-required external-host install plan and never runs package installation or indexing by itself. Generated Code Map indexes live outside the repository under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`.
+If a semantic indexer is unavailable, QuestBoard still starts normally and preserves file-only coverage. TypeScript provisioning remains self-contained. PHP semantic indexing requires the target project to have `composer.json`, `composer.lock`, installed `vendor/autoload.php`, and the trusted `davidrjenni/scip-php` development dependency that provides `vendor/bin/scip-php`. Provider-install requests are approval-only external-host plans and never install dependencies or start indexing by themselves. Generated Code Map indexes are retained under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`; the temporary root `index.scip` produced by SCIP PHP is copied out and removed, and a pre-existing project `index.scip` is never overwritten.
 
-GitNexus remains available as an explicit optional compatibility and regression-comparison provider by setting `QUESTBOARD_CODE_MAP_PROVIDER=gitnexus` and making `gitnexus` available on `PATH` (or configuring `QUESTBOARD_GITNEXUS_EXECUTABLE`). It is not required for the default Code Map flow.
-Older GitNexus PoC measurements are retained as historical comparison evidence, while current operational setup and default-provider behavior follow this section and use SCIP TypeScript unless `gitnexus` is selected explicitly.
+Use `QUESTBOARD_CODE_MAP_PROVIDER` only when intentionally forcing one provider. Mixed TypeScript/JavaScript/PHP repositories should normally keep the default plural provider set so unsupported or unprepared languages remain explicit coverage gaps instead of disappearing from the file hierarchy.
 
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
@@ -195,24 +209,14 @@ By default the daemon/Web endpoint is the machine's active Tailscale IPv4 on por
 
 Multiple MCP stdio proxies and the CLI can attach to the same daemon concurrently. Closing an MCP session closes only that proxy; the daemon, Web UI, database connection, and other sessions remain alive. `QUESTBOARD_DB_PATH`, `QUESTBOARD_HOST`, `QUESTBOARD_PORT`, and Tailnet binding configure the daemon. `QUESTBOARD_DAEMON_URL` overrides MCP/CLI endpoint auto-discovery when needed. See [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md) before exposing the daemon beyond the Tailnet.
 
-The adapter exposes:
+The adapter exposes the shared agent-tool catalog rather than a separate MCP-only feature set. It includes:
 
-- `questboard_list_projects`
-- `questboard_create_project`
-- `questboard_list_tasks`
-- `questboard_get_task`
-- `questboard_create_task`
-- `questboard_update_task`
-- `questboard_get_claim`
-- `questboard_claim_task`
-- `questboard_release_task`
-- `questboard_list_activity`
-- `questboard_add_activity`
-- `questboard_list_artifacts`
-- `questboard_get_artifact`
-- `questboard_add_artifact`
-- `questboard_list_relations`
-- `questboard_add_relation`
+- Project and Task workflow tools such as `questboard_list_projects`, `questboard_list_tasks`, `questboard_resume_task`, and `questboard_checkpoint_task`;
+- Claim, Activity, Artifact, Relation, Investigation, and Flow Work Group tools;
+- bounded Code Map lifecycle/query, Task ↔ CodeScope, manual-relation, and Investigation-sync tools;
+- ephemeral Agent Follow presence through `questboard_get_agent_focus`, `questboard_set_agent_focus`, and `questboard_clear_agent_focus`.
+
+Use MCP `tools/list` as the authoritative live catalog for exact tool names and schemas.
 
 Mutating tools require a neutral actor object:
 
@@ -304,11 +308,15 @@ QuestBoard is designed as a local-first coordination service.
 
 ## GitHub/publication notes
 
-This repository intentionally keeps runtime data and local tooling state out of Git through `.gitignore`. Before a public release, choose and add the project license that matches the intended distribution policy. No license is selected in the repository yet.
+This repository intentionally keeps runtime data and local tooling state out of Git through `.gitignore`.
+
+**No open-source license is currently granted.** The repository is publicly readable, but no standard license for reuse, modification, or redistribution has been selected. This is intentional for now and should not be interpreted as a missing license file that downstream users may replace with an assumed license.
 
 ## Documentation
 
+- [`docs/README.md`](docs/README.md): documentation map and current-truth entry points
 - [`AGENTS.md`](AGENTS.md): repository rules and quick-start contract for coding agents
 - [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md): neutral agent connection and handoff guide
 - [`docs/architecture/FOUNDATION.md`](docs/architecture/FOUNDATION.md): implementation architecture and invariants
 - [`docs/QUESTBOARD-PROJECT-PLAN.ko.md`](docs/QUESTBOARD-PROJECT-PLAN.ko.md): product direction and staged plan
+- [`docs/NETWORK-ACCESS.md`](docs/NETWORK-ACCESS.md): localhost, LAN, Tailnet, and public-Internet exposure guidance

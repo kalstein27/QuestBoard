@@ -57,7 +57,6 @@ test("code intelligence contract stays vendor-neutral and accepts a normalized g
   assert.doesNotThrow(() => assertValidCodeGraphSnapshot(snapshot));
   assert.ok(CODE_NODE_KINDS.includes("interface"));
   assert.ok(CODE_RELATION_KINDS.includes("calls"));
-  assert.equal(JSON.stringify(snapshot).toLowerCase().includes("gitnexus"), false);
 });
 
 test("code graph validation rejects duplicate ids, dangling relations, and invalid confidence", () => {
