@@ -21,10 +21,10 @@ test("Agent Focus is ephemeral, session-scoped, and never writes Task Activity",
     const task = service.createTask({ projectId: project.id, title: "Focused task" }, actor);
     const flowNode = service.createInvestigationNode({ projectId: project.id, title: "Focused flow" }, actor);
     const baselineActivity = service.listTaskActivity(task.id).length;
-    let tick = 0;
+    let nowMs = Date.parse("2026-09-29T00:00:00.000Z");
     const focus = new AgentFocusService(
       repository,
-      () => `2026-09-29T00:00:0${++tick}.000Z`,
+      () => new Date(nowMs += 1_000).toISOString(),
       60_000,
       (_projectId, codeNodeId) => codeNodeId === "code:node:1",
     );

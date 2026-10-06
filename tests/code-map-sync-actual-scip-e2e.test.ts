@@ -148,6 +148,7 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
       [
         "--headless=new",
         "--disable-gpu",
+        "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
         "--remote-debugging-address=127.0.0.1",
@@ -155,11 +156,16 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
         `--user-data-dir=${userDataDir}`,
         baseUrl,
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "ignore", "pipe"] },
     );
 
     const devToolsPortFile = join(userDataDir, "DevToolsActivePort");
-    await waitUntil(() => existsSync(devToolsPortFile), 15_000, "Chrome DevToolsActivePort");
+    let chromeStderr = "";
+    chrome.stderr?.setEncoding("utf8");
+    chrome.stderr?.on("data", (chunk: string) => {
+      chromeStderr = `${chromeStderr}${chunk}`.slice(-16_000);
+    });
+    await waitForChromeDevToolsPort(chrome, devToolsPortFile, 30_000, () => chromeStderr);
     const [debugPort] = readFileSync(devToolsPortFile, "utf8").trim().split(/\r?\n/);
     assert.ok(debugPort);
     const targets = await fetch(`http://127.0.0.1:${debugPort}/json/list`).then((response) => response.json()) as Array<{
@@ -839,6 +845,27 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number, label: str
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
   throw new Error(`${label} timeout`);
+}
+
+async function waitForChromeDevToolsPort(
+  child: ChildProcess,
+  devToolsPortFile: string,
+  timeoutMs: number,
+  stderr: () => string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(devToolsPortFile)) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `Chrome exited before DevToolsActivePort (exitCode=${child.exitCode ?? "null"}, signal=${child.signalCode ?? "null"})\n${stderr() || "(no Chrome stderr)"}`,
+      );
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(
+    `Chrome DevToolsActivePort timeout after ${timeoutMs}ms (exitCode=${child.exitCode ?? "null"}, signal=${child.signalCode ?? "null"})\n${stderr() || "(no Chrome stderr)"}`,
+  );
 }
 
 async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
