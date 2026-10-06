@@ -124,7 +124,6 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
       projectId: project.id,
       sessionId: "actual-scip-agent",
       taskId: groupChild.id,
-      workGroupId: visualFlowGroup.id,
       codeScopeId: groupedNode.id,
     });
 
@@ -174,6 +173,16 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
     cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
     await cdp.call("Runtime.enable");
     await cdp.call("Page.enable");
+    await cdp.evaluate(`(() => {
+      window.__questboardAcceptanceErrors = [];
+      window.addEventListener('error', (event) => {
+        window.__questboardAcceptanceErrors.push(String(event.error?.stack || event.message || 'window error'));
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        window.__questboardAcceptanceErrors.push(String(event.reason?.stack || event.reason || 'unhandled rejection'));
+      });
+      return true;
+    })()`);
 
     await cdp.evaluate(`(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -269,7 +278,7 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
 
     const agentFollowBrowser = await cdp.evaluate(`(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const deadline = Date.now() + 10000;
+      let deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         const control = document.querySelector('#agent-focus-control');
         const status = document.querySelector('#agent-focus-status')?.textContent || '';
@@ -280,22 +289,29 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
         }
         await sleep(100);
       }
+
+      deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         const follow = document.querySelector('#agent-focus-follow');
         const title = document.querySelector('#workspace-title')?.textContent || '';
         const inspector = document.querySelector('#code-map-inspector-title')?.textContent || '';
         if (follow?.classList.contains('active') && title === 'Code' && inspector === 'createQuestBoardHttpServer') {
-          document.querySelector('#agent-focus-free')?.click();
+          const pause = document.querySelector('#agent-focus-free');
+          pause?.click();
           document.querySelector('[data-board-view="quest"]')?.click();
           await sleep(100);
+          const pausedStatus = document.querySelector('#agent-focus-status')?.textContent || '';
           const returnButton = document.querySelector('#agent-focus-return');
-          if (returnButton && !returnButton.classList.contains('hidden')) {
+          if (pause?.textContent === 'Paused' && pausedStatus.includes('Paused') && returnButton && !returnButton.classList.contains('hidden')) {
             returnButton.click();
-            while (Date.now() < deadline) {
+            const returnDeadline = Date.now() + 15000;
+            while (Date.now() < returnDeadline) {
               const returnedTitle = document.querySelector('#workspace-title')?.textContent || '';
               const returnedInspector = document.querySelector('#code-map-inspector-title')?.textContent || '';
-              if (returnedTitle === 'Code' && returnedInspector === 'createQuestBoardHttpServer') {
-                return { status: document.querySelector('#agent-focus-status')?.textContent || '', returnedTitle, returnedInspector };
+              const returnedStatus = document.querySelector('#agent-focus-status')?.textContent || '';
+              const returnedFollowActive = document.querySelector('#agent-focus-follow')?.classList.contains('active') || false;
+              if (returnedTitle === 'Code' && returnedInspector === 'createQuestBoardHttpServer' && returnedStatus.includes('Paused') && !returnedFollowActive) {
+                return { status: returnedStatus, returnedTitle, returnedInspector, paused: true };
               }
               await sleep(100);
             }
@@ -303,11 +319,99 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
         }
         await sleep(100);
       }
-      throw new Error('Agent Focus Follow/Free/Return timeout');
+      throw new Error('Agent Focus Follow/Pause/Return timeout: ' + JSON.stringify({ status: document.querySelector('#agent-focus-status')?.textContent || '', followActive: document.querySelector('#agent-focus-follow')?.classList.contains('active') || false, pauseLabel: document.querySelector('#agent-focus-free')?.textContent || '', returnHidden: document.querySelector('#agent-focus-return')?.classList.contains('hidden') ?? true, title: document.querySelector('#workspace-title')?.textContent || '', inspector: document.querySelector('#code-map-inspector-title')?.textContent || '' }));
     })()`);
     assert.match(agentFollowBrowser.status, /actual-scip-agent/);
     assert.equal(agentFollowBrowser.returnedTitle, "Code");
     assert.equal(agentFollowBrowser.returnedInspector, "createQuestBoardHttpServer");
+
+    const followBeforeInspect = await cdp.evaluate(`(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      document.querySelector('#agent-focus-follow')?.click();
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const title = document.querySelector('#workspace-title')?.textContent || '';
+        const inspector = document.querySelector('#code-map-inspector-title')?.textContent || '';
+        const active = document.querySelector('#agent-focus-follow')?.classList.contains('active') || false;
+        if (active && title === 'Code' && inspector === 'createQuestBoardHttpServer') return { title, inspector, active };
+        await sleep(100);
+      }
+      throw new Error('Follow resume before inspect timeout');
+    })()`);
+    assert.equal(followBeforeInspect.active, true);
+    focusService.set({
+      projectId: project.id,
+      sessionId: "actual-scip-agent",
+      sequence: 2,
+      activeSurface: "flow",
+      workGroupId: visualFlowGroup.id,
+      navigationIntent: "inspect",
+    });
+    const backgroundInspect = await cdp.evaluate(`(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1900));
+      return {
+        title: document.querySelector('#workspace-title')?.textContent || '',
+        inspector: document.querySelector('#code-map-inspector-title')?.textContent || '',
+        status: document.querySelector('#agent-focus-status')?.textContent || '',
+        followActive: document.querySelector('#agent-focus-follow')?.classList.contains('active') || false,
+        controlHidden: document.querySelector('#agent-focus-control')?.classList.contains('hidden') || false,
+      };
+    })()`);
+    assert.equal(backgroundInspect.title, "Code");
+    assert.equal(backgroundInspect.inspector, "createQuestBoardHttpServer");
+    assert.match(backgroundInspect.status, /actual-scip-agent/);
+    assert.equal(backgroundInspect.followActive, true);
+    assert.equal(backgroundInspect.controlHidden, false);
+
+    await cdp.call("Emulation.setDeviceMetricsOverride", { width: 834, height: 1194, deviceScaleFactor: 1, mobile: false });
+    await cdp.call("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+    const ipadFollow = await cdp.evaluate(`(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      document.querySelector('#agent-focus-follow')?.click();
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const inspector = document.querySelector('#code-map-inspector');
+        const control = document.querySelector('#agent-focus-control');
+        const workspace = document.querySelector('.workspace');
+        const rect = inspector?.getBoundingClientRect();
+        const controlRect = control?.getBoundingClientRect();
+        const workspaceRect = workspace?.getBoundingClientRect();
+        if (inspector && !inspector.classList.contains('hidden') && rect && controlRect && workspaceRect && document.querySelector('#agent-focus-follow')?.classList.contains('active')) {
+          const bodyScrollBefore = document.scrollingElement?.scrollTop || 0;
+          document.querySelector('#code-map-board')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', isPrimary: true }));
+          await sleep(50);
+          return {
+            width: innerWidth, height: innerHeight,
+            inspector: { left: rect.left, right: rect.right, bottom: rect.bottom, width: rect.width },
+            workspace: { left: workspaceRect.left, right: workspaceRect.right, width: workspaceRect.width },
+            control: { left: controlRect.left, right: controlRect.right },
+            paused: document.querySelector('#agent-focus-free')?.textContent === 'Paused',
+            bodyScrollBefore, bodyScrollAfter: document.scrollingElement?.scrollTop || 0,
+          };
+        }
+        await sleep(100);
+      }
+      throw new Error('iPad Agent Follow responsive timeout');
+    })()`);
+    assert.equal(ipadFollow.width, 834);
+    assert.ok(ipadFollow.inspector.left >= ipadFollow.workspace.left && ipadFollow.inspector.right <= ipadFollow.workspace.right);
+    assert.ok(ipadFollow.inspector.left - ipadFollow.workspace.left <= 32 && ipadFollow.workspace.right - ipadFollow.inspector.right <= 32, `iPad inspector should be a bounded workspace bottom sheet: ${JSON.stringify({ inspector: ipadFollow.inspector, workspace: ipadFollow.workspace })}`);
+
+    await cdp.call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    const narrowFollow = await cdp.evaluate(`(() => {
+      const inspector = document.querySelector('#code-map-inspector')?.getBoundingClientRect();
+      const control = document.querySelector('#agent-focus-control')?.getBoundingClientRect();
+      const toolbar = document.querySelector('.toolbar')?.getBoundingClientRect();
+      return { width: innerWidth, inspector: inspector ? { left: inspector.left, right: inspector.right, bottom: inspector.bottom, width: inspector.width } : null, control: control ? { left: control.left, right: control.right } : null, toolbar: toolbar ? { left: toolbar.left, right: toolbar.right, scrollWidth: document.querySelector('.toolbar')?.scrollWidth || 0, clientWidth: document.querySelector('.toolbar')?.clientWidth || 0 } : null };
+    })()`);
+    assert.equal(narrowFollow.width, 390);
+    assert.ok(narrowFollow.inspector && narrowFollow.inspector.left >= 0 && narrowFollow.inspector.right <= 390, `narrow inspector must stay inside viewport: ${JSON.stringify(narrowFollow)}`);
+    assert.ok(narrowFollow.control && narrowFollow.control.left >= 0 && narrowFollow.control.right <= 390);
+    assert.ok(narrowFollow.toolbar && narrowFollow.toolbar.clientWidth <= narrowFollow.toolbar.scrollWidth);
+
+    await cdp.call("Emulation.clearDeviceMetricsOverride");
+    await cdp.call("Emulation.setTouchEmulationEnabled", { enabled: false, maxTouchPoints: 1 });
+
 
     const phase5RoundTrip = await cdp.evaluate(`(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -617,6 +721,8 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
     assert.equal(finalGraph.body.nodes.length, 6);
     assert.equal(finalGraph.body.items.length, 5);
     assert.equal(finalGraph.body.itemLinks.length, 5);
+    const browserAcceptanceErrors = await cdp.evaluate(`window.__questboardAcceptanceErrors ?? []`);
+    assert.deepEqual(browserAcceptanceErrors, [], `browser acceptance must have no uncaught errors: ${JSON.stringify(browserAcceptanceErrors)}`);
   } finally {
     if (cdp) {
       await cdp.call("Browser.close").catch(() => undefined);

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
@@ -404,6 +406,15 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
   } finally {
     repository.close();
   }
+});
+
+test("ephemeral Agent Focus stays outside MCP durable mutation receipt injection", () => {
+  const source = readFileSync(resolve("src/adapters/mcp/mcp-server.ts"), "utf8");
+  const mutatingTools = source.match(/const MUTATING_TOOLS = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? "";
+  assert.match(mutatingTools, /questboard_update_task/);
+  assert.doesNotMatch(mutatingTools, /questboard_get_agent_focus/);
+  assert.doesNotMatch(mutatingTools, /questboard_set_agent_focus/);
+  assert.doesNotMatch(mutatingTools, /questboard_clear_agent_focus/);
 });
 
 test("MCP automatic mutation request ids replay exact retries without colliding on reused JSON-RPC ids", () => {

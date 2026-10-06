@@ -46,7 +46,7 @@ import {
   type CodeScopeBindingService,
 } from "../application/code-scope-binding.js";
 import { CodeMapQueryError } from "../application/code-map-query.js";
-import type { AgentFocusService } from "../application/agent-focus.js";
+import { AGENT_FOCUS_SURFACES, AGENT_NAVIGATION_INTENTS, type AgentFocusService } from "../application/agent-focus.js";
 import {
   CodeMapInvestigationSyncError,
   type CodeMapInvestigationSyncSelection,
@@ -236,6 +236,9 @@ async function handleRequest(
         focus: options.agentFocusService.set({
           projectId,
           sessionId: requireString(body, "sessionId"),
+          ...optionalPositiveIntegerProperty(body, "sequence"),
+          ...optionalEnumProperty(body, "activeSurface", AGENT_FOCUS_SURFACES),
+          ...optionalEnumProperty(body, "navigationIntent", AGENT_NAVIGATION_INTENTS),
           ...optionalStringProperty(body, "taskId"),
           ...optionalStringProperty(body, "workGroupId"),
           ...optionalStringProperty(body, "flowNodeId"),

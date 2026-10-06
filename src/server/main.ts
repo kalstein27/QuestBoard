@@ -45,7 +45,21 @@ const codeMapAugmentationService = codeMapRuntime.service
 const codeScopeBindingService = codeMapRuntime.service
   ? new CodeScopeBindingService(codeMapRuntime.service, repository, service)
   : undefined;
-const agentFocusService = new AgentFocusService(repository);
+const agentFocusService = new AgentFocusService(
+  repository,
+  undefined,
+  undefined,
+  codeMapRuntime.service
+    ? (projectId, codeNodeId) => {
+        try {
+          codeMapRuntime.service!.query(projectId, { operation: "get_node", nodeId: codeNodeId, limit: 1 });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    : undefined,
+);
 const tailnetMode = process.argv.includes("--tailnet") || process.env.QUESTBOARD_TAILNET === "1";
 const httpRuntime = await startQuestBoardHttpRuntime(service, {
   tailnetMode,

@@ -839,10 +839,19 @@ main { min-height: 0; overflow: hidden; }
 .code-scope-task-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c8ced7; font-size: 9px; }
 .code-scope-task-group-count { color: #687381; font-size: 7px; }
 .agent-focus-control { display: flex; align-items: center; gap: 4px; padding: 3px 4px; border: 1px solid #2a323d; border-radius: 7px; background: #11161c; }
-.agent-focus-status { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; color: #8f99a7; font-size: 8px; }
+.agent-focus-status { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; color: #8f99a7; font-size: 8px; }
 .agent-focus-control .button.active { border-color: rgba(116,134,255,.5); background: rgba(116,134,255,.12); color: #adb6ff; }
-@media (max-width: 1024px) { .agent-focus-status { max-width: 110px; } }
-@media (max-width: 720px) { .agent-focus-control { flex: 0 0 auto; } .agent-focus-status { max-width: 84px; } }
+.task-card.agent-focus-target,
+.investigation-node.agent-focus-target,
+.investigation-group.agent-focus-target,
+.code-map-tree-row.agent-focus-target,
+.code-map-search-result.agent-focus-target,
+.code-map-entrypoint.agent-focus-target,
+.code-map-inspector.agent-focus-target { outline: 1px dashed rgba(91,198,177,.9); outline-offset: 2px; }
+.code-map-tree-row.agent-focus-target, .code-map-search-result.agent-focus-target, .code-map-entrypoint.agent-focus-target { background: rgba(91,198,177,.065); }
+.agent-focus-target[data-agent-focus-session] { --agent-focus-present: 1; }
+@media (max-width: 1024px) { .agent-focus-status { max-width: 126px; } }
+@media (max-width: 720px) { .agent-focus-control { flex: 0 0 auto; } .agent-focus-status { max-width: 94px; } }
 
 /* Cards show structure first: title, then linked tasks. */
 .task-card { display: flex; align-items: center; gap: 8px; }
@@ -1021,8 +1030,8 @@ main { min-height: 0; overflow: hidden; }
   .workspace-nav-button { grid-template-columns: 20px minmax(0, 1fr); padding-inline: 6px; }
   .workspace-nav-icon { width: 20px; }
   .code-map-stage { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
-  .code-map-inspector { width: 300px; }
-  .investigation-inspector { width: 270px; }
+  .code-map-inspector { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-height: min(46dvh, 410px); }
+  .investigation-inspector { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-height: min(42dvh, 360px); }
   .flow-code-lens { max-height: 82px; overflow: hidden; }
   .flow-code-scope-chip { max-width: 145px; }
   .workspace-heading span { display: none; }
@@ -1030,8 +1039,8 @@ main { min-height: 0; overflow: hidden; }
 
 @media (max-width: 720px) {
   .sidebar { padding-top: max(8px, env(safe-area-inset-top)); }
-  .topbar { padding-right: max(8px, env(safe-area-inset-right)); padding-left: max(8px, env(safe-area-inset-left)); }
-  .toolbar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .topbar { min-width: 0; overflow: hidden; padding-right: max(8px, env(safe-area-inset-right)); padding-left: max(8px, env(safe-area-inset-left)); }
+  .toolbar { width: 100%; max-width: 100%; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; }
   .toolbar::-webkit-scrollbar { display: none; }
   .kanban-board { overflow-x: auto; overflow-y: auto; overscroll-behavior: contain; }
   .work-group-form { grid-template-columns: 1fr; }

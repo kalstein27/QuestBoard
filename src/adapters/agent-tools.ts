@@ -49,7 +49,7 @@ import {
   type CodeScopeBindingService,
 } from "../application/code-scope-binding.js";
 import { CodeProviderLifecycleError } from "../application/code-map-provider-registry.js";
-import type { AgentFocusService } from "../application/agent-focus.js";
+import { AGENT_FOCUS_SURFACES, AGENT_NAVIGATION_INTENTS, type AgentFocusService } from "../application/agent-focus.js";
 import {
   CODE_MAP_HIERARCHY_DIRECTIONS,
   CODE_MAP_QUERY_DIRECTIONS,
@@ -949,13 +949,16 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_set_agent_focus",
-    description: "Publish minimal ephemeral agent focus for one session without writing Task Activity/history.",
+    description: "Publish one meaningful ephemeral Agent Follow location for a session. Use navigate/focus only for user-visible Quest/Flow/Code movement, inspect for explicit background context, and idle to clear. Code targets must be raw code:node:* IDs; derived code-map:node:* architecture IDs are not interchangeable. This never writes Task Activity/history.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         projectId: { type: "string", minLength: 1 },
-        sessionId: { type: "string", minLength: 1 },
+        sessionId: { type: "string", minLength: 1, maxLength: 128, description: "Opaque bounded agent/session identity; never place prompts, secrets, or tool arguments here." },
+        sequence: { type: "integer", minimum: 1 },
+        activeSurface: { type: "string", enum: [...AGENT_FOCUS_SURFACES] },
+        navigationIntent: { type: "string", enum: [...AGENT_NAVIGATION_INTENTS] },
         taskId: { type: "string", minLength: 1 },
         workGroupId: { type: "string", minLength: 1 },
         flowNodeId: { type: "string", minLength: 1 },
@@ -1507,6 +1510,9 @@ export function executeQuestBoardAgentTool(
         focus: requireAgentFocusService(context).set({
           projectId: requireString(args, "projectId"),
           sessionId: requireString(args, "sessionId"),
+          ...optionalPositiveIntegerProperty(args, "sequence"),
+          ...optionalEnumProperty(args, "activeSurface", AGENT_FOCUS_SURFACES),
+          ...optionalEnumProperty(args, "navigationIntent", AGENT_NAVIGATION_INTENTS),
           ...optionalStringProperty(args, "taskId"),
           ...optionalStringProperty(args, "workGroupId"),
           ...optionalStringProperty(args, "flowNodeId"),

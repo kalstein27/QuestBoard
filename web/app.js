@@ -50,9 +50,11 @@ const state = {
   flowCodeLensEnabled: false,
   flowCodeFocus: { groupId: null, taskId: null, codeNodeId: null },
   agentFocus: null,
-  agentFocusMode: "free",
+  agentFocusMode: "paused",
   agentFocusLastAppliedAt: null,
   agentFocusPollTimer: null,
+  agentFocusApplying: false,
+  taskDrawerOwner: null,
   codeMap: { enabled: false, available: false, indexed: false, graph: null, projection: null, mode: null },
   codeMapLoading: false,
   codeMapIndexError: null,
@@ -116,6 +118,7 @@ function populateStaticOptions() {
 
 function bindEvents() {
   el["project-select"].addEventListener("change", () => {
+    pauseAgentFollow("project-change");
     state.projectId = el["project-select"].value || null;
     localStorage.setItem("questboard.projectId", state.projectId ?? "");
     closeDrawer();
@@ -127,35 +130,32 @@ function bindEvents() {
   el["new-task-button"].addEventListener("click", () => openTaskDialog());
   el["empty-new-task-button"].addEventListener("click", () => openTaskDialog());
   el["refresh-button"].addEventListener("click", () => void refreshAll());
-  el["agent-focus-follow"].addEventListener("click", () => {
-    state.agentFocusMode = "follow";
-    renderAgentFocusControls();
-    void applyLatestAgentFocus();
-  });
-  el["agent-focus-free"].addEventListener("click", () => {
-    state.agentFocusMode = "free";
-    renderAgentFocusControls();
-  });
-  el["agent-focus-return"].addEventListener("click", () => void applyLatestAgentFocus());
+  el["agent-focus-follow"].addEventListener("click", resumeAgentFollow);
+  el["agent-focus-free"].addEventListener("click", () => pauseAgentFollow("explicit-pause"));
+  el["agent-focus-return"].addEventListener("click", () => void applyLatestAgentFocus(true));
   el["hide-completed-toggle"].addEventListener("change", () => {
+    pauseAgentFollow("quest-filter");
     state.hideCompleted = el["hide-completed-toggle"].checked;
     localStorage.setItem("questboard.hideCompleted", String(state.hideCompleted));
     renderBoard();
   });
   el["board-error-retry"].addEventListener("click", () => void refreshAll());
   el["code-map-refresh"].addEventListener("click", () => void refreshCodeMap());
-  el["code-map-sync"].addEventListener("click", () => void openCodeMapSyncPreview());
-  el["code-map-search"].addEventListener("input", scheduleCodeMapSearch);
-  el["code-map-kind-filter"].addEventListener("change", () => void runCodeMapSearch());
-  el["code-map-language-filter"].addEventListener("change", () => void runCodeMapSearch());
-  el["code-map-back"].addEventListener("click", navigateCodeMapBack);
-  el["code-map-inspector-close"].addEventListener("click", clearCodeMapSelection);
+  el["code-map-sync"].addEventListener("click", () => { pauseAgentFollow("code-sync"); void openCodeMapSyncPreview(); });
+  el["code-map-search"].addEventListener("input", () => { pauseAgentFollow("code-search"); scheduleCodeMapSearch(); });
+  el["code-map-kind-filter"].addEventListener("change", () => { pauseAgentFollow("code-filter"); void runCodeMapSearch(); });
+  el["code-map-language-filter"].addEventListener("change", () => { pauseAgentFollow("code-filter"); void runCodeMapSearch(); });
+  el["code-map-back"].addEventListener("click", () => { pauseAgentFollow("code-history"); navigateCodeMapBack(); });
+  el["code-map-inspector-close"].addEventListener("click", () => { pauseAgentFollow("code-selection"); clearCodeMapSelection(); });
   el["code-map-sync-close"].addEventListener("click", () => el["code-map-sync-dialog"].close());
   el["code-map-sync-recreate-detached"].addEventListener("change", renderCodeMapSyncDialog);
   el["code-map-sync-apply"].addEventListener("click", () => void applyCodeMapSync());
   el["code-map-sync-open-investigation"].addEventListener("click", () => void openInvestigationFromCodeMapSync());
   el["workspace-nav"].querySelectorAll("[data-board-view]").forEach((button) => {
-    button.addEventListener("click", () => setViewMode(button.dataset.boardView));
+    button.addEventListener("click", () => {
+      pauseAgentFollow("surface-navigation");
+      setViewMode(button.dataset.boardView);
+    });
   });
   el["investigation-undo"].addEventListener("click", () => void undoInvestigationMove());
   el["investigation-redo"].addEventListener("click", () => void redoInvestigationMove());
@@ -168,6 +168,7 @@ function bindEvents() {
   el["investigation-add-node"].addEventListener("click", () => void createInvestigationNodeFromPrompt());
   el["investigation-add-group"].addEventListener("click", () => void createFlowWorkGroupFromPrompt());
   bindInvestigationViewportGestures();
+  installAgentFollowManualOverride();
   el["save-actor-button"].addEventListener("click", saveActor);
   el["task-form"].addEventListener("submit", (event) => void saveTask(event));
   el["project-form"].addEventListener("submit", (event) => void saveProject(event));
@@ -221,10 +222,20 @@ async function refreshAgentFocus() {
   }
   try {
     const { focus } = await api(`/projects/${encodeURIComponent(state.projectId)}/agent-focus`);
-    const changed = Boolean(focus?.updatedAt && focus.updatedAt !== state.agentFocus?.updatedAt);
+    if (focus?.navigationIntent === "inspect") {
+      renderAgentFocusControls();
+      return;
+    }
+    const changed = Boolean(focus && (
+      focus.sessionId !== state.agentFocus?.sessionId
+      || focus.sequence !== state.agentFocus?.sequence
+      || focus.updatedAt !== state.agentFocus?.updatedAt
+    ));
     state.agentFocus = focus || null;
     renderAgentFocusControls();
-    if (changed && state.agentFocusMode === "follow") await applyLatestAgentFocus();
+    if (changed && state.agentFocusMode === "follow" && focus?.navigationIntent === "navigate") {
+      await applyLatestAgentFocus();
+    }
   } catch {
     state.agentFocus = null;
     renderAgentFocusControls();
@@ -235,39 +246,142 @@ function renderAgentFocusControls() {
   const control = el["agent-focus-control"];
   if (!control) return;
   const focus = state.agentFocus;
-  control.classList.toggle("hidden", !focus);
-  if (!focus) return;
-  el["agent-focus-status"].textContent = `Watching · ${focus.sessionId}`;
+  const visible = Boolean(focus && focus.navigationIntent !== "inspect" && focus.navigationIntent !== "idle");
+  control.classList.toggle("hidden", !visible);
+  renderAgentFocusMarkers();
+  if (!visible) return;
+  const surface = focus.activeSurface || "work";
+  const paused = state.agentFocusMode === "paused";
+  el["agent-focus-status"].textContent = `Agent viewing · ${surface} · ${focus.sessionId}${paused ? " · Paused" : ""}`;
   el["agent-focus-follow"].classList.toggle("active", state.agentFocusMode === "follow");
-  el["agent-focus-free"].classList.toggle("active", state.agentFocusMode === "free");
+  el["agent-focus-free"].classList.toggle("active", paused);
+  el["agent-focus-free"].textContent = paused ? "Paused" : "Pause";
   el["agent-focus-return"].classList.toggle("hidden", state.agentFocusMode === "follow");
+  el["agent-focus-return"].textContent = "Return to agent";
 }
 
-async function applyLatestAgentFocus() {
+function pauseAgentFollow(reason = "manual") {
+  if (state.agentFocusMode !== "follow") return false;
+  state.agentFocusMode = "paused";
+  if (reason === "drawer-interaction") state.taskDrawerOwner = "user";
+  renderAgentFocusControls();
+  return true;
+}
+
+function resumeAgentFollow() {
+  state.agentFocusMode = "follow";
+  renderAgentFocusControls();
+  void applyLatestAgentFocus(true);
+}
+
+function hasActiveUserNavigationContext() {
+  if (el["task-dialog"]?.open || el["project-dialog"]?.open || el["code-map-sync-dialog"]?.open) return true;
+  return Boolean(el["task-drawer"]?.classList.contains("open") && state.taskDrawerOwner === "user");
+}
+
+function installAgentFollowManualOverride() {
+  const manualRootSelector = "#board-shell, #task-drawer, #task-dialog, #project-dialog, #code-map-sync-dialog";
+  const manualTarget = (target) => target instanceof Element && Boolean(target.closest(manualRootSelector)) && !target.closest("#agent-focus-control");
+  const markDrawerUserOwned = (target) => {
+    if (target instanceof Element && target.closest("#task-drawer")) state.taskDrawerOwner = "user";
+  };
+  document.addEventListener("pointerdown", (event) => {
+    if (!manualTarget(event.target)) return;
+    markDrawerUserOwned(event.target);
+    pauseAgentFollow(event.target instanceof Element && event.target.closest("#task-drawer") ? "drawer-interaction" : "pointer-navigation");
+  }, true);
+  document.addEventListener("wheel", (event) => {
+    if (!manualTarget(event.target)) return;
+    markDrawerUserOwned(event.target);
+    pauseAgentFollow(event.target instanceof Element && event.target.closest("#task-drawer") ? "drawer-interaction" : "scroll-navigation");
+  }, { capture: true, passive: true });
+  document.addEventListener("beforeinput", (event) => {
+    if (!manualTarget(event.target)) return;
+    markDrawerUserOwned(event.target);
+    pauseAgentFollow(event.target instanceof Element && event.target.closest("#task-drawer") ? "drawer-interaction" : "edit-navigation");
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (!manualTarget(event.target)) return;
+    if (!["Enter", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(event.key)) return;
+    markDrawerUserOwned(event.target);
+    pauseAgentFollow(event.target instanceof Element && event.target.closest("#task-drawer") ? "drawer-interaction" : "keyboard-navigation");
+  }, true);
+}
+
+function renderAgentFocusMarkers() {
+  document.querySelectorAll(".agent-focus-target").forEach((target) => {
+    target.classList.remove("agent-focus-target");
+    delete target.dataset.agentFocusSession;
+  });
+  const focus = state.agentFocus;
+  if (!focus || focus.projectId !== state.projectId || !["focus", "navigate"].includes(focus.navigationIntent)) return;
+  const mark = (target) => {
+    if (!(target instanceof HTMLElement)) return;
+    target.classList.add("agent-focus-target");
+    target.dataset.agentFocusSession = focus.sessionId;
+  };
+
+  if (focus.activeSurface === "quest" && focus.taskId) {
+    mark(el["kanban-board"]?.querySelector(`[data-task-id="${CSS.escape(focus.taskId)}"]`));
+    return;
+  }
+  if (focus.activeSurface === "flow") {
+    if (focus.focusedEntityType === "flow_node" && focus.flowNodeId) {
+      mark([...el["investigation-nodes"].children].find((target) => target.dataset.entityType === "investigation_node" && target.dataset.entityId === focus.flowNodeId));
+      return;
+    }
+    if (focus.focusedEntityType === "work_group" && focus.workGroupId) {
+      mark(flowWorkGroupShell(focus.workGroupId));
+      return;
+    }
+    if (focus.taskId) {
+      mark([...el["investigation-nodes"].children].find((target) => target.dataset.entityType === "task" && target.dataset.entityId === focus.taskId));
+      el["investigation-groups"].querySelectorAll(`[data-flow-task-id="${CSS.escape(focus.taskId)}"]`).forEach(mark);
+    }
+    return;
+  }
+  if (focus.activeSurface === "code" && focus.codeScopeId) {
+    el["code-map-content"].querySelectorAll(`[data-code-map-node-id="${CSS.escape(focus.codeScopeId)}"]`).forEach(mark);
+    if (state.selectedCodeMapDetail?.type === "node" && state.selectedCodeMapDetail.id === focus.codeScopeId) mark(el["code-map-inspector"]);
+  }
+}
+
+async function applyLatestAgentFocus(force = false) {
   const focus = state.agentFocus;
   if (!focus || focus.projectId !== state.projectId) return;
-  state.agentFocusLastAppliedAt = focus.updatedAt;
-  if (focus.codeScopeId) {
-    await jumpToCodeScope(focus.codeScopeId);
+  if (!force && focus.navigationIntent !== "navigate") return;
+  if (!force && hasActiveUserNavigationContext()) {
+    pauseAgentFollow("active-user-context");
     return;
   }
-  if (focus.workGroupId || focus.flowNodeId) {
-    setViewMode("investigation");
-    await loadBoard();
-    if (focus.workGroupId) {
-      state.flowCodeLensEnabled = true;
-      state.flowCodeFocus = { groupId: focus.workGroupId, taskId: focus.taskId || null, codeNodeId: null };
-      renderInvestigationBoard();
-      requestAnimationFrame(() => flowWorkGroupShell(focus.workGroupId)?.scrollIntoView({ block: "center", inline: "center" }));
+  state.agentFocusLastAppliedAt = `${focus.sessionId}:${focus.sequence ?? focus.updatedAt}`;
+  state.agentFocusApplying = true;
+  try {
+    if (focus.codeScopeId) {
+      await jumpToCodeScope(focus.codeScopeId);
+      return;
     }
-    if (focus.flowNodeId && state.investigationGraphNodes.some((entry) => entry.id === focus.flowNodeId)) {
-      selectInvestigationNode(focus.flowNodeId);
+    if (focus.workGroupId || focus.flowNodeId) {
+      setViewMode("investigation");
+      await loadBoard();
+      if (focus.workGroupId) {
+        state.flowCodeLensEnabled = true;
+        state.flowCodeFocus = { groupId: focus.workGroupId, taskId: focus.taskId || null, codeNodeId: null };
+        renderInvestigationBoard();
+        requestAnimationFrame(() => flowWorkGroupShell(focus.workGroupId)?.scrollIntoView({ block: "center", inline: "center" }));
+      }
+      if (focus.flowNodeId && state.investigationGraphNodes.some((entry) => entry.id === focus.flowNodeId)) {
+        selectInvestigationNode(focus.flowNodeId);
+      }
+      return;
     }
-    return;
-  }
-  if (focus.taskId) {
-    setViewMode("quest");
-    await openTask(focus.taskId);
+    if (focus.taskId) {
+      setViewMode("quest");
+      await openTask(focus.taskId);
+    }
+  } finally {
+    state.agentFocusApplying = false;
+    renderAgentFocusMarkers();
   }
 }
 
@@ -3723,6 +3837,10 @@ async function moveTask(taskId, status) {
 }
 
 async function openTask(taskId) {
+  const previousTaskId = state.selectedTaskId;
+  const drawerOwner = state.agentFocusApplying
+    ? "agent"
+    : (state.taskDrawerOwner === "agent" && previousTaskId === taskId ? "agent" : "user");
   state.selectedTaskId = taskId;
   try {
     const [{ task }, { claim }, { activities }, { artifacts }, { relations }, { codeScopeBindings }] = await Promise.all([
@@ -3738,6 +3856,7 @@ async function openTask(taskId) {
     state.artifacts = artifacts;
     state.relations = relations;
     renderDrawer(task, claim, artifacts, relations, codeScopeBindings || []);
+    state.taskDrawerOwner = drawerOwner;
     el["task-drawer"].classList.add("open");
     el["task-drawer"].setAttribute("aria-hidden", "false");
     el["drawer-scrim"].classList.remove("hidden");
@@ -4411,6 +4530,7 @@ function closeDrawer() {
   const selectedTask = state.tasks.find((task) => task.id === state.selectedTaskId);
   if (selectedTask?.status === "done") markDoneTaskSeen(selectedTask.id);
   state.selectedTaskId = null;
+  state.taskDrawerOwner = null;
   el["task-drawer"].classList.remove("open");
   el["task-drawer"].setAttribute("aria-hidden", "true");
   el["drawer-scrim"].classList.add("hidden");
@@ -4418,6 +4538,7 @@ function closeDrawer() {
 }
 
 function openTaskDialog(task = null) {
+  pauseAgentFollow("task-edit");
   if (!state.projectId) {
     toast("Create a project first", true);
     return;
@@ -4466,6 +4587,7 @@ async function saveTask(event) {
 }
 
 function openProjectDialog() {
+  pauseAgentFollow("project-edit");
   el["project-form"].reset();
   el["project-dialog"].showModal();
   queueMicrotask(() => el["project-name"].focus());

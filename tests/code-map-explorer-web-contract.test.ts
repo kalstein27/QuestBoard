@@ -196,10 +196,13 @@ test("Phase 5 provides bounded Group↔Flow↔Code navigation without merging th
 test("Phase 6 exposes conservative relink and ephemeral Agent Follow controls", () => {
   assert.match(html, /id="agent-focus-control"/);
   assert.match(html, />Follow</);
-  assert.match(html, />Free</);
+  assert.match(html, />Pause</);
   assert.match(html, />Return to agent</);
   assert.match(app, /refreshAgentFocus/);
   assert.match(app, /agentFocusMode/);
+  assert.match(app, /focus\?\.navigationIntent === "navigate"/);
+  assert.match(app, /focus\.navigationIntent !== "inspect"/);
+  assert.match(app, /focus\.sequence !== state\.agentFocus\?\.sequence/);
   assert.match(app, /applyLatestAgentFocus/);
   assert.match(app, /1500/);
   assert.match(app, /relinkTaskCodeScope/);
@@ -207,4 +210,42 @@ test("Phase 6 exposes conservative relink and ephemeral Agent Follow controls", 
   assert.match(css, /\.code-scope-state\.relinkable/);
   assert.match(css, /\.agent-focus-control/);
   assert.match(css, /@media \(max-width: 1024px\)[^\n]*\.agent-focus-status/);
+});
+
+test("Agent Follow presence markers stay separate from user selection and ignore background presence", () => {
+  assert.match(app, /function renderAgentFocusMarkers\(\)/);
+  assert.match(app, /\["focus", "navigate"\]\.includes\(focus\.navigationIntent\)/);
+  assert.match(app, /data-agent-focus-session|agentFocusSession/);
+  assert.match(app, /focus\.activeSurface === "quest"/);
+  assert.match(app, /focus\.activeSurface === "flow"/);
+  assert.match(app, /focus\.activeSurface === "code"/);
+  assert.match(app, /Agent viewing/);
+  assert.match(css, /\.task-card\.agent-focus-target/);
+  assert.match(css, /\.investigation-node\.agent-focus-target/);
+  assert.match(css, /\.investigation-group\.agent-focus-target/);
+  assert.match(css, /\.code-map-tree-row\.agent-focus-target/);
+  assert.match(css, /outline: 1px dashed/);
+});
+
+test("Agent Follow pauses on direct user navigation and protects active user editing context", () => {
+  assert.match(app, /function pauseAgentFollow\(/);
+  assert.match(app, /agentFocusMode = "paused"/);
+  assert.match(app, /function resumeAgentFollow\(\)/);
+  assert.match(app, /applyLatestAgentFocus\(true\)/);
+  assert.match(app, /function installAgentFollowManualOverride\(\)/);
+  assert.match(app, /pointerdown/);
+  assert.match(app, /beforeinput/);
+  assert.match(app, /wheel/);
+  assert.match(app, /hasActiveUserNavigationContext/);
+  assert.match(app, /taskDrawerOwner === "user"/);
+  assert.match(app, /state\.agentFocusApplying = true/);
+  assert.match(app, /state\.taskDrawerOwner = drawerOwner/);
+  assert.match(app, /Paused/);
+});
+
+test("Agent Follow presence loss is fail-soft and cannot take down workspace navigation", () => {
+  assert.match(app, /async function refreshAgentFocus\(\)/);
+  assert.match(app, /if \(focus\?\.navigationIntent === "inspect"\) \{\s*renderAgentFocusControls\(\);\s*return;\s*\}/);
+  assert.match(app, /catch \{\s*state\.agentFocus = null;\s*renderAgentFocusControls\(\);\s*\}/);
+  assert.match(app, /setInterval\(\(\) => void refreshAgentFocus\(\), 1500\)/);
 });
