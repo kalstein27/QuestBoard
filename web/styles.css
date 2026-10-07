@@ -789,6 +789,16 @@ main { min-height: 0; overflow: hidden; }
 .code-map-architecture-summary { color: #788492; font-size: 9px; cursor: pointer; user-select: none; }
 .code-map-architecture-lens[open] > .code-map-architecture-summary { margin-bottom: 8px; color: #a8b1bd; }
 .code-map-architecture-lens.sparse { border-color: #303946; }
+.code-map-architecture-quality { margin: 3px 0 8px; color: #a6aeb9; font-size: 8px; line-height: 1.5; }
+.code-map-subsystems { margin-bottom: 8px; padding: 8px; display: grid; gap: 7px; border: 1px solid #293542; border-radius: 6px; background: #111720; }
+.code-map-subsystems-title { color: #bdc7d5; font-size: 9px; }
+.code-map-subsystems-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 5px; }
+.code-map-subsystem { min-width: 0; padding: 7px; border: 1px solid #303b49; border-radius: 5px; background: #0d141b; text-align: left; display: grid; gap: 3px; cursor: pointer; }
+.code-map-subsystem:hover, .code-map-subsystem:focus-visible { border-color: #60718a; outline: none; }
+.code-map-subsystem-path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #d0d8e2; font-size: 9px; }
+.code-map-subsystem-meta, .code-map-subsystem-note { color: #7f8d9d; font-size: 8px; }
+.code-map-subsystem-relations { display: flex; flex-wrap: wrap; gap: 4px; }
+.code-map-subsystem-relation { padding: 4px 6px; color: #9aa9ba; background: #1a2531; border-radius: 5px; font-size: 8px; }
 .code-map-architecture-fallback { margin-bottom: 8px; padding: 8px; display: grid; gap: 5px; border: 1px solid #29323d; border-radius: 6px; background: #11161c; }
 .code-map-architecture-fallback-title { color: #bac3ce; font-size: 9px; }
 .code-map-architecture-fallback-copy, .code-map-architecture-fallback-empty, .code-map-architecture-id-note { color: #727f8e; font-size: 8px; line-height: 1.45; }

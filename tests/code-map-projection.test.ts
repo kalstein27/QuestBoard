@@ -212,3 +212,69 @@ test("architecture projection marks a deliberately sparse one-group lens explici
     relationCount: 0,
   });
 });
+
+test("large role-only architecture projection reports overcompression and bounded source subsystems", () => {
+  const graph = questBoardGraph();
+  graph.nodes = graph.nodes.filter((node) => node.id !== "sqlite-repository");
+  graph.relations = graph.relations.filter((relation) => relation.id !== "sqlite-contract");
+  const roleBaseline = projectCodeArchitecture(graph);
+  const prefixes = [
+    "src/server", "src/runtime", "src/exec", "src/bridge",
+    "src/workflows", "src/providers", "src/adapters", "src/operations",
+    "src/transport", "src/control", "src/security", "src/core",
+    "src/infrastructure", "src/shared",
+  ];
+  const symbols = Array.from({ length: 2932 }, (_, index) => ({
+    id: `symbol-${index}`,
+    kind: "function" as const,
+    name: `helper${index}`,
+    canonicalIdentity: `scip:helper${index}().`,
+    language: "typescript",
+    location: { path: `${prefixes[index % prefixes.length]}/unit-${Math.floor(index / prefixes.length) % 12}.ts`, startLine: index + 1 },
+  }));
+  graph.nodes = [...graph.nodes, ...symbols];
+  graph.relations = [
+    ...graph.relations,
+    ...Array.from({ length: 320 }, (_, index) => ({
+      id: `subsystem-call-${index}`,
+      from: symbols[index]!.id,
+      to: symbols[index + 1]!.id,
+      kind: "calls" as const,
+      confidence: 1,
+    })),
+  ];
+
+  const projection = projectCodeArchitecture(graph);
+  assert.equal(graph.nodes.length, 2936);
+  assert.equal(projection.nodes.length, 4, "stable macro role taxonomy must not be redefined");
+  assert.equal(projection.relations.length, 3);
+  assert.deepEqual(
+    projection.nodes.map((node) => [node.id, node.kind]),
+    roleBaseline.nodes.map((node) => [node.id, node.kind]),
+    "derived role IDs must remain compatible with Investigation sync",
+  );
+  assert.equal(projection.quality.status, "sparse");
+  assert.equal(projection.quality.reason, "overcompressed");
+  const quality = projection.quality.diagnostics!;
+  assert.equal(quality.sourceSymbolCount, 2936);
+  assert.equal(quality.representedSymbolCount, 4);
+  assert.equal(quality.sourceRelationCount, 323);
+  assert.equal(quality.evidencedRelationCount, 3);
+  assert.equal(quality.symbolsPerGroup, 734);
+  assert.ok(quality.symbolCoverageRatio < 0.01);
+  assert.ok(quality.relationEvidenceRatio < 0.01);
+
+  const subsystems = projection.subsystems!;
+  assert.equal(subsystems.nodes.length, 12);
+  assert.equal(subsystems.truncated, true);
+  assert.ok(subsystems.nodes.some((node) => node.pathPrefix === "src/runtime"));
+  assert.ok(subsystems.relations.length > 0 && subsystems.relations.length <= 24);
+  const rawIds = new Set(graph.nodes.map((node) => node.id));
+  const rawRelationIds = new Set(graph.relations.map((relation) => relation.id));
+  assert.ok(subsystems.nodes.every((node) => node.sampleNodeIds.length <= 5
+    && node.sampleNodeIds.every((id) => rawIds.has(id))));
+  assert.ok(subsystems.relations.every((relation) => relation.kind === "calls"
+    && relation.sourceRelationIds.length <= 16
+    && relation.sourceRelationIds.every((id) => rawRelationIds.has(id))));
+  assert.equal(graph.nodes.length, 2936, "derived subsystem grouping must not mutate the canonical graph");
+});

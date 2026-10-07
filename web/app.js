@@ -1277,9 +1277,43 @@ function codeMapArchitectureLens(map) {
   details.open = sparse;
   const summary = node("summary", "code-map-architecture-summary", `Architecture lens${sparse ? " · sparse" : ""} · ${projection.nodes.length} groups · ${projection.relations.length} relations`);
   details.append(summary);
+  const quality = projection.quality;
+  if (quality?.reason === "overcompressed" && quality.diagnostics) {
+    const metrics = quality.diagnostics;
+    details.append(node("p", "code-map-architecture-quality",
+      `Macro roles are overcompressed: ${metrics.sourceSymbolCount.toLocaleString()} local symbols → ${projection.nodes.length} role groups (${Math.round(metrics.symbolsPerGroup)} symbols/group). Only ${Math.round(metrics.symbolCoverageRatio * 100)}% of candidate symbols and ${Math.round(metrics.relationEvidenceRatio * 100)}% of raw relation evidence appear in these roles. Explore source subsystems or raw nodes below.`));
+  }
   const fallback = codeMapSparseArchitectureFallback(map);
   if (fallback) details.append(fallback);
   const stage = node("div", "code-map-architecture-stage");
+  if (projection.subsystems?.nodes?.length) {
+    const section = node("section", "code-map-subsystems");
+    section.append(node("strong", "code-map-subsystems-title", "Source subsystems · derived from file paths and raw calls"));
+    const list = node("div", "code-map-subsystems-list");
+    projection.subsystems.nodes.forEach((item) => {
+      const button = node("button", "code-map-subsystem");
+      button.type = "button";
+      const rawAnchor = item.sampleNodeIds?.[0];
+      button.disabled = !rawAnchor;
+      button.append(
+        node("strong", "code-map-subsystem-path", item.pathPrefix),
+        node("span", "code-map-subsystem-meta", `${item.fileCount} files · ${item.symbolCount} symbols`),
+      );
+      if (rawAnchor) button.addEventListener("click", () => selectCodeMapDetail("node", rawAnchor));
+      list.append(button);
+    });
+    section.append(list);
+    if (projection.subsystems.relations?.length) {
+      const calls = node("div", "code-map-subsystem-relations");
+      projection.subsystems.relations.slice(0, 12).forEach((item) => {
+        calls.append(node("span", "code-map-subsystem-relation",
+          `${item.fromPathPrefix} → ${item.toPathPrefix} · ${item.sourceRelationCount} raw calls`));
+      });
+      section.append(calls);
+    }
+    if (projection.subsystems.truncated) section.append(node("span", "code-map-subsystem-note", "Showing the largest bounded subsystem candidates."));
+    details.append(section);
+  }
   projection.nodes.forEach((item) => {
     const card = node("article", "code-map-architecture-card");
     card.append(

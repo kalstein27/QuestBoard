@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { projectCodeArchitecture } from "../src/application/code-map-projection.js";
+import { queryCodeGraph } from "../src/application/code-map-query.js";
 import { normalizeScipGraph, parseScipJsonIndex } from "../src/adapters/code-intelligence/scip-normalizer.js";
 
 const HTTP = "scip-typescript npm questboard 0.0.0 src/server/http-api.ts/handleRequest().";
@@ -378,6 +379,165 @@ test("SCIP preserves enclosingSymbol as symbol containment", () => {
   assert.ok(graph.relations.some((relation) =>
     relation.kind === "contains" && relation.from === service.id && relation.to === method.id,
   ));
+});
+
+test("SCIP adds bounded registerTool source-registration fallback nodes behind semantic symbols", () => {
+  const PROPERTY = "scip-typescript npm chatgpt2codex 0.2.0 src/server/capability-preflight.ts/managed_mcp_update.";
+  const graph = normalizeScipGraph({
+    projectId: "chatgpt2codex",
+    rootPath: "/workspace/chatgpt2codex",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [
+        {
+          relativePath: "src/server/tools.ts",
+          language: "typescript",
+          symbols: [],
+          occurrences: [],
+        },
+        {
+          relativePath: "src/server/capability-preflight.ts",
+          language: "typescript",
+          symbols: [{ symbol: PROPERTY, displayName: "managed_mcp_update", kind: "Property" }],
+          occurrences: [{ symbol: PROPERTY, symbolRoles: 1, range: [10, 2, 20] }],
+        },
+      ],
+    }),
+    sourceTextByPath: new Map([
+      ["src/server/tools.ts", [
+        "registerTool(",
+        "  \"managed_mcp_update\",",
+        "  { title: \"Update managed MCP server\" },",
+        "  async () => undefined,",
+        ");",
+        "const unrelated = \"managed_mcp_update\";",
+      ].join("\n")],
+    ]),
+  });
+
+  const fallback = graph.nodes.find((node) =>
+    node.canonicalIdentity.startsWith("source-registration:src/server/tools.ts:registerTool:managed_mcp_update:"));
+  assert.ok(fallback);
+  assert.equal(fallback.kind, "function");
+  assert.equal(fallback.location?.startLine, 2);
+  assert.deepEqual(fallback.provenance, [{
+    providerId: "scip-typescript",
+    fidelity: "syntax",
+    freshness: "fresh",
+  }]);
+  assert.equal(
+    graph.nodes.filter((node) => node.name === "managed_mcp_update").length,
+    2,
+    "only the semantic property and the bounded registerTool fallback should be materialized",
+  );
+
+  const found = queryCodeGraph(graph, "scip-typescript", {
+    operation: "find_nodes",
+    query: "managed_mcp_update",
+    limit: 10,
+  });
+  assert.equal(found.operation, "find_nodes");
+  assert.equal(found.nodes[0]?.id, fallback.id);
+  assert.equal(found.nodes[1]?.kind, "property");
+});
+
+test("SCIP does not add a registerTool fallback when a named semantic implementation already exists", () => {
+  const HANDLER = "scip-typescript npm app 1.0.0 src/tools.ts/operation_status().";
+  const graph = normalizeScipGraph({
+    projectId: "app",
+    rootPath: "/workspace/app",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/tools.ts",
+        language: "typescript",
+        symbols: [{ symbol: HANDLER, displayName: "operation_status", kind: "Function" }],
+        occurrences: [{ symbol: HANDLER, symbolRoles: 1, range: [0, 9, 25] }],
+      }],
+    }),
+    sourceTextByPath: new Map([[
+      "src/tools.ts",
+      'function operation_status() {}\nregisterTool("operation_status", {}, operation_status);\n',
+    ]]),
+  });
+
+  assert.equal(graph.nodes.filter((node) => node.name === "operation_status").length, 1);
+  assert.equal(
+    graph.nodes.some((node) => node.canonicalIdentity.startsWith("source-registration:")),
+    false,
+  );
+});
+
+test("SCIP source-registration fallback surfaces anonymous operation_status registration as an implementation candidate", () => {
+  const METADATA = "scip-typescript npm app 1.0.0 src/runtime/activity.ts/operation_status.";
+  const graph = normalizeScipGraph({
+    projectId: "app",
+    rootPath: "/workspace/app",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [
+        {
+          relativePath: "src/server/tools.ts",
+          language: "typescript",
+          symbols: [],
+          occurrences: [],
+        },
+        {
+          relativePath: "src/runtime/activity.ts",
+          language: "typescript",
+          symbols: [{ symbol: METADATA, displayName: "operation_status", kind: "Property" }],
+          occurrences: [{ symbol: METADATA, symbolRoles: 1, range: [3, 2, 18] }],
+        },
+      ],
+    }),
+    sourceTextByPath: new Map([[
+      "src/server/tools.ts",
+      [
+        "registerTool(",
+        '  "operation_status",',
+        "  { title: 'Check background operation' },",
+        "  async (input) => ({ state: input.operationId }),",
+        ");",
+      ].join("\n"),
+    ]]),
+  });
+
+  const result = queryCodeGraph(graph, "scip-typescript", {
+    operation: "find_nodes",
+    query: "operation_status",
+    limit: 10,
+  });
+  assert.equal(result.operation, "find_nodes");
+  assert.equal(result.nodes[0]?.kind, "function");
+  assert.equal(result.nodes[0]?.location?.path, "src/server/tools.ts");
+  assert.match(result.nodes[0]?.canonicalIdentity ?? "", /^source-registration:.*:registerTool:operation_status:/);
+  assert.equal(result.nodes[1]?.kind, "property");
+});
+
+test("SCIP source-registration fallback is bounded per document", () => {
+  const registrations = Array.from(
+    { length: 105 },
+    (_, index) => `registerTool("tool_${index}", {}, async () => undefined);`,
+  ).join("\n");
+  const graph = normalizeScipGraph({
+    projectId: "app",
+    rootPath: "/workspace/app",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    index: parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/tools.ts",
+        language: "typescript",
+        symbols: [],
+        occurrences: [],
+      }],
+    }),
+    sourceTextByPath: new Map([["src/tools.ts", registrations]]),
+  });
+
+  const registrationsOnly = graph.nodes.filter((node) =>
+    node.canonicalIdentity.startsWith("source-registration:src/tools.ts:registerTool:"));
+  assert.equal(registrationsOnly.length, 100);
+  assert.equal(graph.coverage?.providers[0]?.nodeCount, 100);
 });
 
 test("SCIP falls back to narrow enclosing definition ranges when explicit symbol ownership is absent", () => {

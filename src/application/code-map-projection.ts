@@ -24,7 +24,7 @@ export type CodeArchitectureRelationKind = (typeof CODE_ARCHITECTURE_RELATION_KI
 export const CODE_ARCHITECTURE_PROJECTION_QUALITY_STATUSES = ["useful", "sparse"] as const;
 export type CodeArchitectureProjectionQualityStatus = (typeof CODE_ARCHITECTURE_PROJECTION_QUALITY_STATUSES)[number];
 
-export const CODE_ARCHITECTURE_SPARSE_REASONS = ["no_groups", "single_group", "no_relations"] as const;
+export const CODE_ARCHITECTURE_SPARSE_REASONS = ["no_groups", "single_group", "no_relations", "overcompressed"] as const;
 export type CodeArchitectureSparseReason = (typeof CODE_ARCHITECTURE_SPARSE_REASONS)[number];
 
 export interface CodeArchitectureNode {
@@ -47,6 +47,7 @@ export interface CodeArchitectureProjectionQuality {
   groupCount: number;
   relationCount: number;
   reason?: CodeArchitectureSparseReason;
+  diagnostics?: CodeArchitectureProjectionDiagnostics;
 }
 
 export interface CodeArchitectureProjection {
@@ -55,6 +56,45 @@ export interface CodeArchitectureProjection {
   quality: CodeArchitectureProjectionQuality;
   nodes: readonly CodeArchitectureNode[];
   relations: readonly CodeArchitectureRelation[];
+  /** Optional source-subsystem hints, never architecture node IDs for Investigation sync. */
+  subsystems?: CodeArchitectureSubsystemLens;
+}
+
+export interface CodeArchitectureProjectionDiagnostics {
+  /** Locatable, project-local, non-document-local architecture candidate symbols. */
+  sourceSymbolCount: number;
+  /** Source symbols included in one of the stable six role groups. */
+  representedSymbolCount: number;
+  sourceRelationCount: number;
+  /** Unique raw relation IDs backing projected architecture relations. */
+  evidencedRelationCount: number;
+  symbolsPerGroup: number;
+  symbolCoverageRatio: number;
+  relationEvidenceRatio: number;
+}
+
+export interface CodeArchitectureSubsystem {
+  /** A source directory prefix (e.g. src/server), not a code:node or code-map:node ID. */
+  pathPrefix: string;
+  fileCount: number;
+  symbolCount: number;
+  /** Up to five canonical raw Code Map symbol anchors for drill-down. */
+  sampleNodeIds: readonly string[];
+}
+
+export interface CodeArchitectureSubsystemRelation {
+  fromPathPrefix: string;
+  toPathPrefix: string;
+  kind: "calls";
+  sourceRelationCount: number;
+  /** Evidence is bounded independently of the total observed count. */
+  sourceRelationIds: readonly string[];
+}
+
+export interface CodeArchitectureSubsystemLens {
+  nodes: readonly CodeArchitectureSubsystem[];
+  relations: readonly CodeArchitectureSubsystemRelation[];
+  truncated: boolean;
 }
 
 const ARCHITECTURE_TITLES: Record<CodeArchitectureNodeKind, string> = {
@@ -107,6 +147,12 @@ function hasArchitectureToken(tokens: ReadonlySet<string>, values: readonly stri
 
 function isArchitectureSymbol(node: CodeNode): boolean {
   return ARCHITECTURE_SYMBOL_KINDS.has(node.kind);
+}
+
+function isProjectArchitectureCandidate(node: CodeNode): boolean {
+  return isArchitectureSymbol(node)
+    && Boolean(node.location?.path)
+    && !node.canonicalIdentity.includes(":local ");
 }
 
 export function classifyCodeArchitectureNode(node: CodeNode): CodeArchitectureNodeKind | undefined {
@@ -228,16 +274,111 @@ function architectureRelationKind(
   return undefined;
 }
 
+function sourceSubsystemPath(path: string): string | undefined {
+  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (normalized.startsWith("/") || normalized.split("/").some((part) => part === "..")) return undefined;
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length < 2 || ["tests", "test", "fixtures", "vendor", "node_modules", "dist", "build"].includes(parts[0]!)) return undefined;
+  return parts[0] === "src" && parts.length >= 3 ? `src/${parts[1]}` : parts[0];
+}
+
+function projectSourceSubsystems(graph: CodeGraphSnapshot): CodeArchitectureSubsystemLens {
+  const byPath = new Map<string, { files: Set<string>; nodeIds: string[] }>();
+  const nodeSubsystem = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (!isProjectArchitectureCandidate(node)) continue;
+    const path = node.location!.path;
+    const prefix = sourceSubsystemPath(path);
+    if (!prefix) continue;
+    const entry = byPath.get(prefix) ?? { files: new Set<string>(), nodeIds: [] };
+    entry.files.add(path);
+    entry.nodeIds.push(node.id);
+    byPath.set(prefix, entry);
+    nodeSubsystem.set(node.id, prefix);
+  }
+  const MAX_SUBSYSTEMS = 12;
+  const MAX_SUBSYSTEM_RELATIONS = 24;
+  const allNodes = [...byPath.entries()]
+    .map(([pathPrefix, entry]) => ({
+      pathPrefix,
+      fileCount: entry.files.size,
+      symbolCount: entry.nodeIds.length,
+      sampleNodeIds: [...entry.nodeIds].sort().slice(0, 5),
+    }))
+    .sort((left, right) => right.fileCount - left.fileCount
+      || right.symbolCount - left.symbolCount
+      || left.pathPrefix.localeCompare(right.pathPrefix));
+  const nodes = allNodes.slice(0, MAX_SUBSYSTEMS);
+  const selected = new Set(nodes.map((node) => node.pathPrefix));
+  const edgeEvidence = new Map<string, CodeArchitectureSubsystemRelation>();
+  for (const relation of graph.relations) {
+    if (relation.kind !== "calls") continue;
+    const fromPathPrefix = nodeSubsystem.get(relation.from);
+    const toPathPrefix = nodeSubsystem.get(relation.to);
+    if (!fromPathPrefix || !toPathPrefix || fromPathPrefix === toPathPrefix
+      || !selected.has(fromPathPrefix) || !selected.has(toPathPrefix)) continue;
+    const key = `${fromPathPrefix}\0${toPathPrefix}`;
+    const existing = edgeEvidence.get(key);
+    if (existing) {
+      existing.sourceRelationCount += 1;
+      if (existing.sourceRelationIds.length < 16) {
+        (existing.sourceRelationIds as string[]).push(relation.id);
+      }
+    } else {
+      edgeEvidence.set(key, {
+        fromPathPrefix,
+        toPathPrefix,
+        kind: "calls",
+        sourceRelationCount: 1,
+        sourceRelationIds: [relation.id],
+      });
+    }
+  }
+  const allRelations = [...edgeEvidence.values()]
+    .sort((left, right) => right.sourceRelationCount - left.sourceRelationCount
+      || left.fromPathPrefix.localeCompare(right.fromPathPrefix)
+      || left.toPathPrefix.localeCompare(right.toPathPrefix));
+  return {
+    nodes,
+    relations: allRelations.slice(0, MAX_SUBSYSTEM_RELATIONS),
+    truncated: allNodes.length > MAX_SUBSYSTEMS || allRelations.length > MAX_SUBSYSTEM_RELATIONS,
+  };
+}
+
 function projectionQuality(
   nodes: readonly CodeArchitectureNode[],
   relations: readonly CodeArchitectureRelation[],
+  graph: CodeGraphSnapshot,
 ): CodeArchitectureProjectionQuality {
   const groupCount = nodes.length;
   const relationCount = relations.length;
-  if (groupCount === 0) return { status: "sparse", reason: "no_groups", groupCount, relationCount };
-  if (groupCount === 1) return { status: "sparse", reason: "single_group", groupCount, relationCount };
-  if (relationCount === 0) return { status: "sparse", reason: "no_relations", groupCount, relationCount };
-  return { status: "useful", groupCount, relationCount };
+  const candidates = new Set(graph.nodes.filter(isProjectArchitectureCandidate).map((node) => node.id));
+  const sourceSymbolCount = candidates.size;
+  const representedSymbolCount = new Set(nodes.flatMap((node) =>
+    node.memberNodeIds.filter((id) => candidates.has(id)))).size;
+  const evidencedRelationCount = new Set(relations.flatMap((relation) => relation.sourceRelationIds)).size;
+  const sourceRelationCount = graph.relations.length;
+  const symbolsPerGroup = groupCount > 0 ? sourceSymbolCount / groupCount : 0;
+  const symbolCoverageRatio = sourceSymbolCount > 0 ? representedSymbolCount / sourceSymbolCount : 0;
+  const relationEvidenceRatio = sourceRelationCount > 0 ? evidencedRelationCount / sourceRelationCount : 0;
+  const diagnostics = sourceSymbolCount >= 200 ? {
+    sourceSymbolCount,
+    representedSymbolCount,
+    sourceRelationCount,
+    evidencedRelationCount,
+    symbolsPerGroup,
+    symbolCoverageRatio,
+    relationEvidenceRatio,
+  } : undefined;
+  const metadata = { groupCount, relationCount, ...(diagnostics ? { diagnostics } : {}) };
+  if (groupCount === 0) return { status: "sparse", reason: "no_groups", ...metadata };
+  if (groupCount === 1) return { status: "sparse", reason: "single_group", ...metadata };
+  if (relationCount === 0) return { status: "sparse", reason: "no_relations", ...metadata };
+  if (symbolsPerGroup >= 100 && sourceSymbolCount >= 200
+    && (symbolCoverageRatio < 0.5 || relationEvidenceRatio < 0.05)) {
+    return { status: "sparse", reason: "overcompressed", ...metadata };
+  }
+  return { status: "useful", ...metadata };
 }
 
 export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitectureProjection {
@@ -309,8 +450,11 @@ export function projectCodeArchitecture(graph: CodeGraphSnapshot): CodeArchitect
   return {
     projectId: graph.projectId,
     sourceIndexedAt: graph.indexedAt,
-    quality: projectionQuality(nodes, relations),
+    quality: projectionQuality(nodes, relations, graph),
     nodes,
     relations,
+    ...(graph.nodes.filter(isProjectArchitectureCandidate).length >= 200
+      ? { subsystems: projectSourceSubsystems(graph) }
+      : {}),
   };
 }

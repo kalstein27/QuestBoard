@@ -782,7 +782,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map",
-    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
+    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Default neighborhood navigation hides broad depends_on edges to SCIP external symbols; includeExternalDependencies=true or explicit relationKinds including depends_on restores those raw edges. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -797,6 +797,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
         canonicalIdentity: { type: "string", minLength: 1 },
         direction: { type: "string", enum: ["incoming", "outgoing", "both", "parents", "children"] },
         relationKinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_RELATION_KINDS] } },
+        includeExternalDependencies: { type: "boolean", description: "Neighborhood only: include broad depends_on edges to external SCIP symbols. Default false; explicit relationKinds including depends_on also includes them." },
         semantic: { type: "string", enum: [...CODE_MAP_RELATION_SEMANTICS] },
         nodeIds: { type: "array", minItems: 1, maxItems: CODE_MAP_QUERY_MAX_SEEDS, uniqueItems: true, items: { type: "string", minLength: 1 } },
         depth: { type: "integer", minimum: 1, maximum: CODE_MAP_QUERY_MAX_DEPTH },
@@ -1860,6 +1861,7 @@ function codeMapQueryInput(args: Record<string, unknown>): CodeMapQueryInput {
     ...optionalStringProperty(args, "canonicalIdentity"),
     ...optionalEnumProperty(args, "direction", CODE_MAP_QUERY_INPUT_DIRECTIONS),
     ...(relationKinds ? { relationKinds } : {}),
+    ...optionalBooleanProperty(args, "includeExternalDependencies"),
     ...optionalEnumProperty(args, "semantic", CODE_MAP_RELATION_SEMANTICS),
     ...(nodeIds ? { nodeIds } : {}),
     ...optionalPositiveIntegerProperty(args, "depth"),

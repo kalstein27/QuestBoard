@@ -50,8 +50,21 @@ class QueryProvider implements CodeIntelligenceProvider {
   readonly providerId = "query-test-provider";
   readonly capabilities = { incrementalIndexing: false, impactAnalysis: false, callTrace: true } as const;
 
+  constructor(private readonly withExternalDependency = false) {}
+
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
-    return fixtureGraph(request.projectId, request.rootPath);
+    const graph = fixtureGraph(request.projectId, request.rootPath);
+    if (this.withExternalDependency) {
+      graph.nodes = [
+        ...graph.nodes,
+        { id: "external-promise", kind: "type", name: "Promise", canonicalIdentity: "scip-external:Promise#", language: "typescript" },
+      ];
+      graph.relations = [
+        ...graph.relations,
+        { id: "external-promise-dependency", from: "method-run", to: "external-promise", kind: "depends_on", confidence: 0.9 },
+      ];
+    }
+    return graph;
   }
 }
 
@@ -181,6 +194,82 @@ test("find_nodes normalizes unknown language and ranks exact names ahead of encl
   assert.equal(ranked.nodes[0]?.id, "class-service");
 });
 
+test("find_nodes prefers implementation symbols over same-name properties and locals within the same text rank", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    {
+      id: "resource-local",
+      kind: "variable",
+      name: "ResourceDiagnostics",
+      canonicalIdentity: "scip:src/cli.ts:local 212",
+      language: "typescript",
+      location: { path: "src/cli.ts", startLine: 304 },
+    },
+    {
+      id: "resource-property",
+      kind: "property",
+      name: "ResourceDiagnostics",
+      canonicalIdentity: "scip:BridgeOptions#ResourceDiagnostics.",
+      language: "typescript",
+      location: { path: "src/exec/mobile-approval.ts", startLine: 136 },
+    },
+    {
+      id: "resource-class",
+      kind: "class",
+      name: "ResourceDiagnostics",
+      canonicalIdentity: "scip:ResourceDiagnostics#",
+      language: "typescript",
+      location: { path: "src/runtime/resource-diagnostics.ts", startLine: 168 },
+    },
+  ];
+
+  const result = queryCodeGraph(graph, "query-test-provider", {
+    operation: "find_nodes",
+    query: "ResourceDiagnostics",
+    limit: 10,
+  });
+
+  assert.equal(result.operation, "find_nodes");
+  assert.deepEqual(
+    result.nodes.filter((node) => node.name === "ResourceDiagnostics").map((node) => node.id),
+    ["resource-class", "resource-property", "resource-local"],
+  );
+});
+
+test("find_nodes keeps exact text matches ahead of higher-value prefix symbols", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    {
+      id: "operation-property",
+      kind: "property",
+      name: "operation_status",
+      canonicalIdentity: "scip:activityHint#operation_status.",
+      language: "typescript",
+      location: { path: "src/runtime/activity.ts", startLine: 351 },
+    },
+    {
+      id: "operation-function",
+      kind: "function",
+      name: "operation_status_handler",
+      canonicalIdentity: "scip:operation_status_handler().",
+      language: "typescript",
+      location: { path: "src/server/tools.ts", startLine: 13428 },
+    },
+  ];
+
+  const result = queryCodeGraph(graph, "query-test-provider", {
+    operation: "find_nodes",
+    query: "operation_status",
+    limit: 10,
+  });
+
+  assert.equal(result.operation, "find_nodes");
+  assert.equal(result.nodes[0]?.id, "operation-property");
+  assert.equal(result.nodes[1]?.id, "operation-function");
+});
+
 test("neighborhood keeps broad depends_on edges behind more useful navigation relations", () => {
   const graph = fixtureGraph();
   graph.nodes = [
@@ -201,6 +290,74 @@ test("neighborhood keeps broad depends_on edges behind more useful navigation re
   });
   assert.equal(neighborhood.operation, "neighborhood");
   assert.deepEqual(neighborhood.nodes.map((node) => node.id), ["method-run", "method-helper", "config"]);
+});
+
+test("neighborhood hides external SCIP dependencies by default but explicit queries preserve the raw graph", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    ...graph.nodes,
+    { id: "local-diagnostic", kind: "type", name: "LocalDiagnostic", canonicalIdentity: "scip:LocalDiagnostic#", language: "typescript", location: { path: "src/diagnostics.ts", startLine: 3 } },
+    ...["Promise", "NodeJS", "MemoryUsage", "Timeout"].map((name) => ({
+      id: `external-${name}`,
+      kind: "type" as const,
+      name,
+      canonicalIdentity: `scip-external:${name}#`,
+      language: "typescript",
+    })),
+  ];
+  graph.relations = [
+    ...graph.relations,
+    { id: "local-diagnostic-dependency", from: "method-run", to: "local-diagnostic", kind: "depends_on", confidence: 0.9 },
+    ...["Promise", "NodeJS", "MemoryUsage", "Timeout"].map((name) => ({
+      id: `external-${name}-dependency`,
+      from: "method-run",
+      to: `external-${name}`,
+      kind: "depends_on" as const,
+      confidence: 0.9,
+    })),
+  ];
+  const originalRelationCount = graph.relations.length;
+
+  const defaultResult = queryCodeGraph(graph, "query-test-provider", {
+    operation: "neighborhood", nodeId: "method-run", direction: "outgoing", limit: 100,
+  });
+  assert.equal(defaultResult.operation, "neighborhood");
+  assert.ok(defaultResult.nodes.some((node) => node.id === "local-diagnostic"));
+  assert.equal(defaultResult.nodes.some((node) => node.id.startsWith("external-")), false);
+  assert.equal(defaultResult.relations.some((relation) => relation.id.startsWith("external-")), false);
+  assert.equal(defaultResult.truncated, false);
+
+  const allResult = queryCodeGraph(graph, "query-test-provider", {
+    operation: "neighborhood", nodeId: "method-run", direction: "outgoing",
+    includeExternalDependencies: true, limit: 100,
+  });
+  assert.equal(allResult.operation, "neighborhood");
+  assert.equal(allResult.nodes.filter((node) => node.id.startsWith("external-")).length, 4);
+  assert.equal(allResult.relations.filter((relation) => relation.id.startsWith("external-")).length, 4);
+  assert.equal(allResult.truncated, false);
+
+  const explicit = queryCodeGraph(graph, "query-test-provider", {
+    operation: "neighborhood", nodeId: "method-run", direction: "outgoing",
+    relationKinds: ["depends_on"], limit: 100,
+  });
+  assert.equal(explicit.operation, "neighborhood");
+  assert.equal(explicit.relations.filter((relation) => relation.id.startsWith("external-")).length, 4);
+
+  const bounded = queryCodeGraph(graph, "query-test-provider", {
+    operation: "neighborhood", nodeId: "method-run", direction: "outgoing",
+    relationKinds: ["depends_on"], limit: 2,
+  });
+  assert.equal(bounded.operation, "neighborhood");
+  assert.deepEqual(bounded.nodes.map((node) => node.id), ["method-run", "local-diagnostic"]);
+  assert.equal(bounded.truncated, true);
+
+  const rawRelations = queryCodeGraph(graph, "query-test-provider", {
+    operation: "relations", nodeId: "method-run", direction: "outgoing",
+    relationKinds: ["depends_on"], limit: 100,
+  });
+  assert.equal(rawRelations.operation, "relations");
+  assert.equal(rawRelations.entries.filter((entry) => entry.node.id.startsWith("external-")).length, 4);
+  assert.equal(graph.relations.length, originalRelationCount, "navigation filtering must never alter provider facts");
 });
 
 test("Code Map query limits are hard bounded and ambiguous search stays explicit", () => {
@@ -256,7 +413,7 @@ test("HTTP and MCP share the same bounded Code Map query surface", async () => {
   const repository = new SqliteQuestBoardRepository();
   const service = new QuestBoardService(repository);
   const project = service.createProject({ name: "Query boundary", rootPath: "/workspace/query-boundary" }, actor);
-  const codeMapService = new CodeMapService(new QueryProvider());
+  const codeMapService = new CodeMapService(new QueryProvider(true));
   const server = createQuestBoardHttpServer(service, { codeMapService });
 
   try {
@@ -315,6 +472,29 @@ test("HTTP and MCP share the same bounded Code Map query surface", async () => {
     });
     assert.equal(neighborhood.body.query.nodes.length <= 3, true);
     assert.equal(neighborhood.body.query.relations.length <= 3, true);
+
+    const defaultNeighborhood = await json(queryUrl, {
+      method: "POST",
+      body: JSON.stringify({ operation: "neighborhood", nodeId: "method-run", direction: "outgoing", limit: 100 }),
+    });
+    assert.equal(defaultNeighborhood.response.status, 200);
+    assert.equal(defaultNeighborhood.body.query.nodes.some((node: { id: string }) => node.id === "external-promise"), false);
+
+    const explicitNeighborhoodInput = {
+      operation: "neighborhood", nodeId: "method-run", direction: "outgoing",
+      includeExternalDependencies: true, limit: 100,
+    };
+    const httpExplicit = await json(queryUrl, {
+      method: "POST", body: JSON.stringify(explicitNeighborhoodInput),
+    });
+    assert.equal(httpExplicit.response.status, 200);
+    assert.ok(httpExplicit.body.query.nodes.some((node: { id: string }) => node.id === "external-promise"));
+    const mcpExplicit = await mcp(baseUrl, 3, "tools/call", {
+      name: "questboard_query_code_map",
+      arguments: { projectId: project.id, ...explicitNeighborhoodInput },
+    });
+    const mcpPayload = JSON.parse((mcpExplicit.result.content as Array<{ text: string }>)[0]?.text ?? "{}");
+    assert.deepEqual(mcpPayload.query, httpExplicit.body.query);
   } finally {
     await closeServer(server);
     repository.close();

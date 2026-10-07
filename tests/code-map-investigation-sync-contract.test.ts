@@ -132,6 +132,26 @@ test("projection fingerprint is order-stable and invalidates across re-index or 
     ...relation,
     sourceRelationIds: [...relation.sourceRelationIds].reverse(),
   }));
+  reordered.quality = {
+    status: "sparse",
+    reason: "overcompressed",
+    groupCount: 2,
+    relationCount: 1,
+    diagnostics: {
+      sourceSymbolCount: 1000,
+      representedSymbolCount: 3,
+      sourceRelationCount: 500,
+      evidencedRelationCount: 2,
+      symbolsPerGroup: 500,
+      symbolCoverageRatio: 0.003,
+      relationEvidenceRatio: 0.004,
+    },
+  };
+  reordered.subsystems = {
+    nodes: [{ pathPrefix: "src/server", fileCount: 10, symbolCount: 100, sampleNodeIds: ["symbol:a"] }],
+    relations: [],
+    truncated: false,
+  };
 
   assert.equal(
     fingerprintCodeMapInvestigationProjection(first),

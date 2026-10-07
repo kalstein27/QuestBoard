@@ -75,6 +75,8 @@ export interface CodeMapQueryInput {
   canonicalIdentity?: string;
   direction?: CodeMapQueryDirection | CodeMapHierarchyDirection;
   relationKinds?: readonly CodeRelationKind[];
+  /** Neighborhoods hide broad external SCIP depends_on edges unless explicitly requested. */
+  includeExternalDependencies?: boolean;
   semantic?: CodeMapRelationSemantic;
   nodeIds?: readonly string[];
   depth?: number;
@@ -168,6 +170,47 @@ function queryMatchRank(node: CodeNode, query: string): number {
   return 3;
 }
 
+function queryKindRank(node: CodeNode): number {
+  switch (node.kind) {
+    case "class":
+    case "interface":
+    case "function":
+    case "method":
+    case "constructor":
+    case "type":
+    case "enum":
+    case "module":
+      return 0;
+    case "file":
+    case "namespace":
+    case "package":
+      return 1;
+    case "property":
+      return 2;
+    case "variable":
+      return 3;
+    case "unknown":
+      return 4;
+  }
+}
+
+function queryFidelityRank(node: CodeNode): number {
+  let best = 4;
+  for (const provenance of node.provenance ?? []) {
+    const rank = provenance.fidelity === "semantic-call"
+      ? 0
+      : provenance.fidelity === "semantic-reference"
+        ? 1
+        : provenance.fidelity === "syntax"
+          ? 2
+          : provenance.fidelity === "file-only"
+            ? 3
+            : 4;
+    best = Math.min(best, rank);
+  }
+  return best;
+}
+
 function requireKnownNodeKind(value: string): asserts value is CodeNodeKind {
   if (!(CODE_NODE_KINDS as readonly string[]).includes(value)) {
     throw new CodeMapQueryError("code_map_query_invalid", `Unknown code node kind: ${value}`);
@@ -232,6 +275,8 @@ function adjacentRelationSort(
   const leftNode = nodeById.get(otherNodeId(left, nodeId));
   const rightNode = nodeById.get(otherNodeId(right, nodeId));
   return NAVIGATION_RELATION_PRIORITY[left.kind] - NAVIGATION_RELATION_PRIORITY[right.kind]
+    || Number(isExternalDependencyNeighbor(left, nodeId, nodeById))
+      - Number(isExternalDependencyNeighbor(right, nodeId, nodeById))
     || (leftNode && rightNode ? nodeSort(leftNode, rightNode) : 0)
     || relationSort(left, right);
 }
@@ -284,6 +329,15 @@ function otherNodeId(relation: CodeRelation, nodeId: string): string {
   return relation.from === nodeId ? relation.to : relation.from;
 }
 
+function isExternalDependencyNeighbor(
+  relation: CodeRelation,
+  nodeId: string,
+  nodeById: ReadonlyMap<string, CodeNode>,
+): boolean {
+  return relation.kind === "depends_on"
+    && (nodeById.get(otherNodeId(relation, nodeId))?.canonicalIdentity.startsWith("scip-external:") ?? false);
+}
+
 function semanticRelationFilter(
   semantic: CodeMapRelationSemantic | undefined,
 ): { direction: CodeMapQueryDirection; kinds?: ReadonlySet<CodeRelationKind> } | undefined {
@@ -333,7 +387,11 @@ export function queryCodeGraph(
         .filter((node) => !path || node.location?.path.toLocaleLowerCase().includes(path))
         .filter((node) => !language || normalizedNodeLanguage(node) === language)
         .filter((node) => !kindSet || kindSet.has(node.kind))
-        .sort((left, right) => (query ? queryMatchRank(left, query) - queryMatchRank(right, query) : 0) || nodeSort(left, right));
+        .sort((left, right) => (query
+          ? queryMatchRank(left, query) - queryMatchRank(right, query)
+            || queryKindRank(left) - queryKindRank(right)
+            || queryFidelityRank(left) - queryFidelityRank(right)
+          : 0) || nodeSort(left, right));
       return {
         ...envelope,
         operation: "find_nodes",
@@ -470,6 +528,8 @@ export function queryCodeGraph(
       });
       const kindSet = relationKinds ? new Set(relationKinds) : undefined;
       const depth = normalizeDepth(input.depth);
+      const includeExternalDependencies = input.includeExternalDependencies === true
+        || (kindSet?.has("depends_on") ?? false);
       const visited = new Set(seedNodeIds);
       const orderedNodeIds = [...seedNodeIds];
       const selectedRelations = new Map<string, CodeRelation>();
@@ -484,6 +544,8 @@ export function queryCodeGraph(
           .filter((relation) => relation.from === current.nodeId || relation.to === current.nodeId)
           .filter((relation) => directionAllows(relation, current.nodeId, direction))
           .filter((relation) => !kindSet || kindSet.has(relation.kind))
+          .filter((relation) => includeExternalDependencies
+            || !isExternalDependencyNeighbor(relation, current.nodeId, nodeById))
           .sort((left, right) => adjacentRelationSort(current.nodeId, nodeById, left, right));
         for (const relation of adjacent) {
           if (selectedRelations.size >= limit || orderedNodeIds.length >= limit) {

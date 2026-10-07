@@ -87,6 +87,15 @@ test("coverage health and semantic capability stay distinct while architecture r
   assert.match(css, /\.code-map-architecture-lens/);
 });
 
+test("large architecture lens exposes overcompression diagnostics and bounded source subsystem navigation", () => {
+  assert.match(app, /quality\?\.reason === "overcompressed"/);
+  assert.match(app, /Source subsystems/);
+  assert.match(app, /projection\.subsystems\?\.nodes/);
+  assert.match(app, /item\.sampleNodeIds\?\.\[0\]/);
+  assert.match(app, /sourceRelationCount/);
+  assert.match(css, /\.code-map-subsystems-list/);
+});
+
 test("sparse Architecture lens exposes bounded raw call-root entrypoints without mixing ID spaces", () => {
   const sandbox: any = {
     window: { addEventListener() {} },

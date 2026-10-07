@@ -16,6 +16,8 @@ const SCIP_ROLE_DEFINITION = 1;
 const SCIP_ROLE_IMPORT = 2;
 const SCIP_ROLE_WRITE = 4;
 const SCIP_ROLE_READ = 8;
+const MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT = 100;
+const SOURCE_REGISTRATION_PATTERN = /\bregisterTool\s*\(\s*(["'])([A-Za-z0-9][A-Za-z0-9._:-]{0,199})\1/g;
 
 interface ScipRange {
   startLine: number;
@@ -341,6 +343,66 @@ function lineStartOffsets(source: string): number[] {
   return offsets;
 }
 
+function sourcePositionAtOffset(lineStarts: readonly number[], offset: number): { line: number; column: number } {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const start = lineStarts[middle]!;
+    const next = lineStarts[middle + 1] ?? Number.POSITIVE_INFINITY;
+    if (offset < start) high = middle - 1;
+    else if (offset >= next) low = middle + 1;
+    else return { line: middle + 1, column: offset - start + 1 };
+  }
+  return { line: 1, column: Math.max(1, offset + 1) };
+}
+
+function sourceRegistrationNodes(
+  document: ScipDocument,
+  source: string,
+  providerId: string,
+  semanticNodes: readonly CodeNode[],
+): CodeNode[] {
+  const semanticImplementationNames = new Set(
+    semanticNodes
+      .filter((node) =>
+        node.location?.path === document.relativePath
+        && ["class", "interface", "function", "method", "constructor", "type", "enum", "module"].includes(node.kind))
+      .map((node) => node.name.toLocaleLowerCase()),
+  );
+  const lineStarts = lineStartOffsets(source);
+  const nodes: CodeNode[] = [];
+  SOURCE_REGISTRATION_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while (
+    nodes.length < MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT
+    && (match = SOURCE_REGISTRATION_PATTERN.exec(source)) !== null
+  ) {
+    const name = match[2]!;
+    if (semanticImplementationNames.has(name.toLocaleLowerCase())) continue;
+    const nameOffset = match.index + match[0].lastIndexOf(name);
+    const position = sourcePositionAtOffset(lineStarts, nameOffset);
+    const canonicalIdentity = `source-registration:${document.relativePath}:registerTool:${name}:${position.line}`;
+    nodes.push({
+      id: stableId("node", canonicalIdentity),
+      kind: "function",
+      name,
+      canonicalIdentity,
+      ...(document.language ? { language: document.language } : {}),
+      location: {
+        path: document.relativePath,
+        startLine: position.line,
+        startColumn: position.column,
+        endLine: position.line,
+        endColumn: position.column + name.length,
+      },
+      signature: `registerTool("${name}", ...)`,
+      provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }],
+    });
+  }
+  return nodes;
+}
+
 function isCallOccurrence(source: string, lineStarts: readonly number[], range: ScipRange): boolean {
   const lineStart = lineStarts[range.endLine];
   if (lineStart === undefined) return false;
@@ -485,6 +547,18 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     definitionsByDocument.set(definition.document, items);
   }
 
+  const registrationNodes: CodeNode[] = [];
+  for (const document of input.index.documents) {
+    const source = input.sourceTextByPath?.get(document.relativePath);
+    if (!source) continue;
+    registrationNodes.push(...sourceRegistrationNodes(
+      document,
+      source,
+      providerId,
+      [...nodeBySymbol.values()],
+    ));
+  }
+
   const relations = new Map<string, CodeRelation>();
 
   // SCIP carries explicit lexical ownership on SymbolInformation. Preserve it
@@ -561,7 +635,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     projectId: input.projectId,
     rootPath: input.rootPath,
     indexedAt: input.indexedAt,
-    nodes: [...nodeBySymbol.values(), ...externalNodeBySymbol.values()],
+    nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values()],
     relations: [...relations.values()],
     coverage: {
       degraded: false,
@@ -570,7 +644,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         status: "fresh",
         fidelity,
         languages: [...semanticFileCountByLanguage.keys()].sort(),
-        nodeCount: nodeBySymbol.size + externalNodeBySymbol.size,
+        nodeCount: nodeBySymbol.size + registrationNodes.length + externalNodeBySymbol.size,
         relationCount: relations.size,
       }],
       languages: [...semanticFileCountByLanguage.entries()]

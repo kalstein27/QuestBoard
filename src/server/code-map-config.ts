@@ -90,7 +90,7 @@ function providerMetadata(provider: QuestBoardCodeMapProvider): { languages?: re
     : { languages: ["php"], fidelity: "semantic-call" };
 }
 
-function semanticFactsProvider(
+export function semanticFactsProvider(
   service: CodeMapService,
   providerId: QuestBoardCodeMapProvider,
 ): CodeIntelligenceProvider {
@@ -116,6 +116,7 @@ function semanticFactsProvider(
           indexedAt: graph.indexedAt,
           nodes,
           relations,
+          ...(graph.coverage ? { coverage: graph.coverage } : {}),
         };
       },
     },

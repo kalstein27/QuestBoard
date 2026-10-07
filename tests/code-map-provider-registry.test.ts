@@ -158,6 +158,79 @@ test("provider capability distinguishes intentional compiler-project exclusions 
   assert.equal(partial.gapReason, "partial_coverage");
 });
 
+test("provider capability reports live-shaped TypeScript compiler scope as complete rather than partial", () => {
+  const registry = new CodeMapProviderRegistry(definitions, () => ({
+    configured: true,
+    installed: true,
+    available: true,
+    executable: "/tools/scip-typescript",
+    health: "ready",
+    diagnostics: [],
+  }));
+  const files = Array.from({ length: 330 }, (_, index) => ({
+    id: `file:src/file-${index}.ts`,
+    kind: "file" as const,
+    name: `file-${index}.ts`,
+    canonicalIdentity: `file:src/file-${index}.ts`,
+    language: "typescript",
+    location: { path: `src/file-${index}.ts` },
+    provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" as const }],
+  }));
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "typescript-scope",
+    rootPath: "/workspace/typescript-scope",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    nodes: [
+      ...files,
+      {
+        id: "symbol:service",
+        kind: "class",
+        name: "Service",
+        canonicalIdentity: "src/file-0.ts#Service",
+        language: "typescript",
+        location: { path: "src/file-0.ts", startLine: 1 },
+        provenance: [{ providerId: "scip-typescript", fidelity: "semantic-call" }],
+      },
+    ],
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: [{
+        providerId: "scip-typescript",
+        status: "fresh",
+        fidelity: "semantic-call",
+        languages: ["typescript"],
+        nodeCount: 1,
+        relationCount: 0,
+      }],
+      languages: [{
+        language: "typescript",
+        fileCount: 330,
+        semanticEligibleFileCount: 142,
+        semanticIndexedFileCount: 142,
+        semanticExcludedFileCount: 188,
+        semanticExclusionReason: "provider_project_scope",
+        fidelity: "semantic-call",
+        providerIds: ["scip-typescript"],
+        degraded: false,
+      }],
+    },
+  };
+
+  const report = registry.report(graph);
+  const typescript = report.languages.find((entry) => entry.language === "typescript")!;
+  assert.equal(report.health, "healthy");
+  assert.equal(report.semanticCoverage, "complete");
+  assert.equal(typescript.discoveredFileCount, 330);
+  assert.equal(typescript.eligibleFileCount, 142);
+  assert.equal(typescript.indexedFileCount, 142);
+  assert.equal(typescript.excludedFileCount, 188);
+  assert.equal(typescript.exclusionReason, "provider_project_scope");
+  assert.equal(typescript.semanticCoverage, "complete");
+  assert.equal(typescript.gapReason, null);
+});
+
 test("unsupported recognized languages are capability gaps without degrading Code Map health", () => {
   const registry = new CodeMapProviderRegistry(definitions, () => ({
     configured: true,

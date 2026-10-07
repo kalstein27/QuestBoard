@@ -6,6 +6,8 @@ import {
   resolveQuestBoardCodeMapConfig,
   withManagedServiceCodeMapDefault,
 } from "../src/server/code-map-config.js";
+import { semanticFactsProvider } from "../src/server/code-map-config.js";
+import { CODE_GRAPH_SCHEMA_VERSION, type CodeGraphSnapshot } from "../src/application/code-intelligence.js";
 
 test("managed service enables Code Map by default without changing ordinary runtime defaults", () => {
   const ordinaryEnv = withManagedServiceCodeMapDefault({}, false);
@@ -53,6 +55,73 @@ test("Code Map config composes an ordered zero-or-more semantic provider set", (
   });
   const service = createConfiguredCodeMapService(env);
   assert.equal(service?.providerId, "composite");
+});
+
+test("multi-provider semantic wrapper preserves compiler-scope coverage from the child service", async () => {
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "project",
+    rootPath: "/workspace/project",
+    indexedAt: "2026-10-07T00:00:00.000Z",
+    nodes: [
+      {
+        id: "ts-symbol",
+        kind: "class",
+        name: "Service",
+        canonicalIdentity: "src/service.ts#Service",
+        language: "typescript",
+        location: { path: "src/service.ts", startLine: 1 },
+        provenance: [{ providerId: "scip-typescript", fidelity: "semantic-call" }],
+      },
+      {
+        id: "file:test",
+        kind: "file",
+        name: "service.test.ts",
+        canonicalIdentity: "file:src/service.test.ts",
+        language: "typescript",
+        location: { path: "src/service.test.ts" },
+        provenance: [{ providerId: "questboard:file-inventory", fidelity: "file-only" }],
+      },
+    ],
+    relations: [],
+    coverage: {
+      degraded: false,
+      providers: [{
+        providerId: "scip-typescript",
+        status: "fresh",
+        fidelity: "semantic-call",
+        languages: ["typescript"],
+        nodeCount: 1,
+        relationCount: 0,
+      }],
+      languages: [{
+        language: "typescript",
+        fileCount: 2,
+        semanticEligibleFileCount: 1,
+        semanticIndexedFileCount: 1,
+        semanticExcludedFileCount: 1,
+        semanticExclusionReason: "provider_project_scope",
+        fidelity: "semantic-call",
+        providerIds: ["scip-typescript", "questboard:file-inventory"],
+        degraded: false,
+      }],
+    },
+  };
+  const service = {
+    capabilities: { incrementalIndexing: false, impactAnalysis: false, callTrace: false },
+    async refresh() {
+      return { graph };
+    },
+  } as unknown as Parameters<typeof semanticFactsProvider>[0];
+
+  const provider = semanticFactsProvider(service, "scip-typescript");
+  const contribution = await provider.indexProject({
+    projectId: "project",
+    rootPath: "/workspace/project",
+  });
+
+  assert.deepEqual(contribution.coverage, graph.coverage);
+  assert.deepEqual(contribution.nodes.map((node) => node.id), ["ts-symbol"]);
 });
 
 test("Code Map runtime keeps healthy semantic providers when another configured provider is missing", () => {
