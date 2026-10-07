@@ -211,7 +211,7 @@ Multiple MCP stdio proxies and the CLI can attach to the same daemon concurrentl
 
 The adapter exposes the shared agent-tool catalog rather than a separate MCP-only feature set. It includes:
 
-- Project and Task workflow tools such as `questboard_list_projects`, `questboard_list_tasks`, `questboard_resume_task`, and `questboard_checkpoint_task`;
+- Project and Task workflow tools such as `questboard_list_projects`, `questboard_list_tasks`, canonical read-only `questboard_get_task_resume`, and `questboard_checkpoint_task`; `questboard_resume_task` remains as a compatibility alias;
 - Claim, Activity, Artifact, Relation, Investigation, and Flow Work Group tools;
 - bounded Code Map lifecycle/query, Task ↔ CodeScope, manual-relation, and Investigation-sync tools;
 - ephemeral Agent Follow presence through `questboard_get_agent_focus`, `questboard_set_agent_focus`, and `questboard_clear_agent_focus`.

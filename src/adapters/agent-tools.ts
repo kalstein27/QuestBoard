@@ -209,8 +209,18 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_get_task_resume",
+    description: "Canonical read-only Resume Capsule lookup for one explicit task. Returns only the minimal continuity state and does not load Activity, Investigation, Code Map, Artifacts, Relations, or Code Scope.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { taskId: { type: "string", minLength: 1 } },
+      required: ["taskId"],
+    },
+  },
+  {
     name: "questboard_resume_task",
-    description: "Read the minimal Resume Capsule for one explicit task without loading Activity, Investigation, Code Map, Artifacts, or Relations.",
+    description: "Legacy compatibility alias for questboard_get_task_resume. Reads the same minimal Resume Capsule without loading Activity, Investigation, Code Map, Artifacts, Relations, or Code Scope.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1146,6 +1156,7 @@ export function executeQuestBoardAgentTool(
       const taskId = requireString(args, "taskId");
       return { task: service.getTask(taskId, { diagnoseRead: true }), claim: service.getTaskClaim(taskId) ?? null };
     }
+    case "questboard_get_task_resume":
     case "questboard_resume_task":
       return { resume: service.resumeTask(requireString(args, "taskId")) };
     case "questboard_checkpoint_task": {

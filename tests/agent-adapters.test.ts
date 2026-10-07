@@ -43,7 +43,7 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
     assert.equal(created.task.now, "Shared adapter boundary exists");
     assert.equal(created.task.next, "Verify Task updates through the neutral tool contract");
 
-    const resumed = executeQuestBoardAgentTool(service, "questboard_resume_task", {
+    const resumed = executeQuestBoardAgentTool(service, "questboard_get_task_resume", {
       taskId: created.task.id,
     }) as { resume: { taskId: string; projectId: string; revision: number; status: string; goal: string; now: string; next: string } };
     assert.deepEqual(resumed.resume, {
@@ -55,6 +55,11 @@ test("agent tool boundary provides Task, Claim, and Activity workflow without ve
       now: "Shared adapter boundary exists",
       next: "Verify Task updates through the neutral tool contract",
     });
+    assert.deepEqual(
+      executeQuestBoardAgentTool(service, "questboard_resume_task", { taskId: created.task.id }),
+      resumed,
+      "legacy resume alias must preserve the same capsule contract",
+    );
 
     const listed = executeQuestBoardAgentTool(service, "questboard_list_tasks", {
       projectId: project.id,
@@ -368,7 +373,7 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
-      params: { name: "questboard_resume_task", arguments: { taskId: task.id } },
+      params: { name: "questboard_get_task_resume", arguments: { taskId: task.id } },
     })}\n`);
     input.end();
     await running;
@@ -381,6 +386,7 @@ test("MCP stdio exposes initialize, tools/list, and tools/call over newline JSON
     assert.equal((messages[0]?.result.serverInfo as { name: string }).name, "questboard");
     const toolNames = (messages[1]?.result.tools as Array<{ name: string }>).map((tool) => tool.name);
     assert.ok(toolNames.includes("questboard_create_project"));
+    assert.ok(toolNames.includes("questboard_get_task_resume"));
     assert.ok(toolNames.includes("questboard_resume_task"));
     assert.ok(toolNames.includes("questboard_claim_task"));
     assert.ok(toolNames.includes("questboard_add_artifact"));
