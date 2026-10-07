@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CodeGraphSnapshot, CodeNode, CodeRelation } from "./code-intelligence.js";
+import { deriveCodeSourceSubsystems } from "./code-map-subsystems.js";
 
 export const CODE_ARCHITECTURE_NODE_KINDS = [
   "http_api",
@@ -274,74 +275,24 @@ function architectureRelationKind(
   return undefined;
 }
 
-function sourceSubsystemPath(path: string): string | undefined {
-  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
-  if (normalized.startsWith("/") || normalized.split("/").some((part) => part === "..")) return undefined;
-  const parts = normalized.split("/").filter(Boolean);
-  if (parts.length < 2 || ["tests", "test", "fixtures", "vendor", "node_modules", "dist", "build"].includes(parts[0]!)) return undefined;
-  return parts[0] === "src" && parts.length >= 3 ? `src/${parts[1]}` : parts[0];
-}
-
 function projectSourceSubsystems(graph: CodeGraphSnapshot): CodeArchitectureSubsystemLens {
-  const byPath = new Map<string, { files: Set<string>; nodeIds: string[] }>();
-  const nodeSubsystem = new Map<string, string>();
-  for (const node of graph.nodes) {
-    if (!isProjectArchitectureCandidate(node)) continue;
-    const path = node.location!.path;
-    const prefix = sourceSubsystemPath(path);
-    if (!prefix) continue;
-    const entry = byPath.get(prefix) ?? { files: new Set<string>(), nodeIds: [] };
-    entry.files.add(path);
-    entry.nodeIds.push(node.id);
-    byPath.set(prefix, entry);
-    nodeSubsystem.set(node.id, prefix);
-  }
-  const MAX_SUBSYSTEMS = 12;
-  const MAX_SUBSYSTEM_RELATIONS = 24;
-  const allNodes = [...byPath.entries()]
-    .map(([pathPrefix, entry]) => ({
-      pathPrefix,
-      fileCount: entry.files.size,
-      symbolCount: entry.nodeIds.length,
-      sampleNodeIds: [...entry.nodeIds].sort().slice(0, 5),
-    }))
-    .sort((left, right) => right.fileCount - left.fileCount
-      || right.symbolCount - left.symbolCount
-      || left.pathPrefix.localeCompare(right.pathPrefix));
-  const nodes = allNodes.slice(0, MAX_SUBSYSTEMS);
-  const selected = new Set(nodes.map((node) => node.pathPrefix));
-  const edgeEvidence = new Map<string, CodeArchitectureSubsystemRelation>();
-  for (const relation of graph.relations) {
-    if (relation.kind !== "calls") continue;
-    const fromPathPrefix = nodeSubsystem.get(relation.from);
-    const toPathPrefix = nodeSubsystem.get(relation.to);
-    if (!fromPathPrefix || !toPathPrefix || fromPathPrefix === toPathPrefix
-      || !selected.has(fromPathPrefix) || !selected.has(toPathPrefix)) continue;
-    const key = `${fromPathPrefix}\0${toPathPrefix}`;
-    const existing = edgeEvidence.get(key);
-    if (existing) {
-      existing.sourceRelationCount += 1;
-      if (existing.sourceRelationIds.length < 16) {
-        (existing.sourceRelationIds as string[]).push(relation.id);
-      }
-    } else {
-      edgeEvidence.set(key, {
-        fromPathPrefix,
-        toPathPrefix,
-        kind: "calls",
-        sourceRelationCount: 1,
-        sourceRelationIds: [relation.id],
-      });
-    }
-  }
-  const allRelations = [...edgeEvidence.values()]
-    .sort((left, right) => right.sourceRelationCount - left.sourceRelationCount
-      || left.fromPathPrefix.localeCompare(right.fromPathPrefix)
-      || left.toPathPrefix.localeCompare(right.toPathPrefix));
+  const derived = deriveCodeSourceSubsystems(graph);
+  const callRelations = derived.relations.filter((relation) => relation.kind === "calls");
   return {
-    nodes,
-    relations: allRelations.slice(0, MAX_SUBSYSTEM_RELATIONS),
-    truncated: allNodes.length > MAX_SUBSYSTEMS || allRelations.length > MAX_SUBSYSTEM_RELATIONS,
+    nodes: derived.nodes.map((node) => ({
+      pathPrefix: node.pathPrefix,
+      fileCount: node.fileCount,
+      symbolCount: node.symbolCount,
+      sampleNodeIds: node.representativeNodeIds,
+    })),
+    relations: callRelations.map((relation) => ({
+      fromPathPrefix: relation.fromPathPrefix,
+      toPathPrefix: relation.toPathPrefix,
+      kind: "calls",
+      sourceRelationCount: relation.sourceRelationCount,
+      sourceRelationIds: relation.sourceRelationIds,
+    })),
+    truncated: derived.truncation.subsystems.truncated || derived.truncation.relations.truncated,
   };
 }
 

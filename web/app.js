@@ -56,6 +56,7 @@ const state = {
   agentFocusApplying: false,
   taskDrawerOwner: null,
   codeMap: { enabled: false, available: false, indexed: false, graph: null, projection: null, mode: null },
+  codeMapSubsystems: null,
   codeMapLoading: false,
   codeMapIndexError: null,
   selectedCodeMapDetail: null,
@@ -440,6 +441,7 @@ async function loadBoard() {
     state.boardPositions.clear();
     state.displayPositions.clear();
     state.codeMap = { enabled: false, available: false, indexed: false, graph: null, projection: null, mode: null };
+    state.codeMapSubsystems = null;
     state.codeMapIndexError = null;
     resetCodeMapExplorerState();
     state.codeMapSyncPreview = null;
@@ -726,13 +728,29 @@ async function loadCodeMap() {
   if (!state.projectId) return;
   state.codeMapLoading = true;
   renderCodeMapBoard();
+  const subsystemRead = loadCodeMapSubsystems();
   try {
     state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    await subsystemRead;
     state.codeMapIndexError = null;
   } finally {
     state.codeMapLoading = false;
     renderCodeMapBoard();
   }
+}
+
+async function loadCodeMapSubsystems() {
+  if (!state.projectId) {
+    state.codeMapSubsystems = null;
+    return null;
+  }
+  try {
+    const result = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map/subsystems`);
+    state.codeMapSubsystems = result.subsystems || null;
+  } catch {
+    state.codeMapSubsystems = null;
+  }
+  return state.codeMapSubsystems;
 }
 
 async function loadCodeMapContext() {
@@ -777,12 +795,14 @@ async function refreshCodeMap() {
       throw new Error(receipt?.error?.message || "Code indexing failed");
     }
     state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    await loadCodeMapSubsystems();
     state.codeMapIndexError = null;
     toast(receipt.mode === "cache-hit" ? "Code is current" : "Code indexed");
   } catch (error) {
     state.codeMapIndexError = error.message || "Code indexing failed";
     try {
       state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+      await loadCodeMapSubsystems();
     } catch {}
     fail(error);
   } finally {
@@ -1271,49 +1291,140 @@ function codeMapSparseArchitectureFallback(map) {
 function codeMapArchitectureLens(map) {
   const projection = map.projection;
   if (!projection) return null;
+  const subsystemRead = state.codeMapSubsystems;
   const sparse = projection.quality?.status === "sparse";
   const details = document.createElement("details");
   details.className = `code-map-architecture-lens${sparse ? " sparse" : ""}`;
   details.open = sparse;
-  const summary = node("summary", "code-map-architecture-summary", `Architecture lens${sparse ? " · sparse" : ""} · ${projection.nodes.length} groups · ${projection.relations.length} relations`);
-  details.append(summary);
+  details.append(node(
+    "summary",
+    "code-map-architecture-summary",
+    `Architecture views${sparse ? " · compatibility sparse" : ""} · ${projection.nodes.length} compatibility roles · ${subsystemRead?.nodes?.length || 0} source subsystems`,
+  ));
+
   const quality = projection.quality;
   if (quality?.reason === "overcompressed" && quality.diagnostics) {
     const metrics = quality.diagnostics;
-    details.append(node("p", "code-map-architecture-quality",
-      `Macro roles are overcompressed: ${metrics.sourceSymbolCount.toLocaleString()} local symbols → ${projection.nodes.length} role groups (${Math.round(metrics.symbolsPerGroup)} symbols/group). Only ${Math.round(metrics.symbolCoverageRatio * 100)}% of candidate symbols and ${Math.round(metrics.relationEvidenceRatio * 100)}% of raw relation evidence appear in these roles. Explore source subsystems or raw nodes below.`));
+    details.append(node(
+      "p",
+      "code-map-architecture-quality",
+      `Compatibility roles are overcompressed: ${metrics.sourceSymbolCount.toLocaleString()} local symbols → ${projection.nodes.length} role groups (${Math.round(metrics.symbolsPerGroup)} symbols/group). This compatibility lens is not the complete source structure; use Source subsystems / Calls or raw nodes for technical navigation.`,
+    ));
   }
-  const fallback = codeMapSparseArchitectureFallback(map);
-  if (fallback) details.append(fallback);
-  const stage = node("div", "code-map-architecture-stage");
-  if (projection.subsystems?.nodes?.length) {
+
+  if (sparse) {
+    const fallback = node("section", "code-map-architecture-fallback");
+    fallback.append(
+      node("strong", "code-map-architecture-fallback-title", "Raw entrypoints"),
+      node("span", "code-map-architecture-fallback-copy", "Compatibility roles are sparse. Start from raw call-root candidates instead of treating the Code Map as empty."),
+    );
+    const candidates = codeMapRawEntrypoints(map.graph, 8);
+    if (candidates.length) {
+      const list = node("div", "code-map-entrypoint-list");
+      candidates.forEach((item) => {
+        const button = node("button", "code-map-entrypoint");
+        button.type = "button";
+        button.dataset.codeMapNodeId = item.id;
+        button.append(
+          node("strong", "code-map-entrypoint-title", item.name),
+          node("span", "code-map-entrypoint-meta", `${item.kind}${item.location?.path ? ` · ${item.location.path}` : ""}`),
+        );
+        button.addEventListener("click", () => selectCodeMapDetail("node", item.id));
+        list.append(button);
+      });
+      fallback.append(list);
+    } else {
+      fallback.append(node("span", "code-map-architecture-fallback-empty", "No cross-file call-root candidate was found. Use raw Source explorer search and follow callers / callees from a matching symbol."));
+    }
+    fallback.append(node("span", "code-map-architecture-id-note", "Raw source nodes use code:node:* IDs. Investigation sync uses code-map:node:* architecture IDs; they are not interchangeable."));
+    details.append(fallback);
+  }
+
+  if (subsystemRead?.nodes?.length) {
     const section = node("section", "code-map-subsystems");
-    section.append(node("strong", "code-map-subsystems-title", "Source subsystems · derived from file paths and raw calls"));
+    section.append(
+      node("strong", "code-map-subsystems-title", "Source subsystems / Calls · bounded evidence-backed view"),
+      node("span", "code-map-subsystem-note", "Calls are primary. Only actual raw instantiates / implements are auxiliary. Broad depends_on, external SCIP targets, name similarity, and path-only inference are excluded from structural edges."),
+      node("span", "code-map-subsystem-note", "Subsystem IDs use code-subsystem:*; notable drill-down targets use raw code:node:*. Registration context never reassigns the raw relation owner."),
+    );
+    const metrics = subsystemRead.quality;
+    if (metrics) {
+      section.append(node(
+        "span",
+        "code-map-subsystem-quality",
+        `Quality · ${metrics.eligibleProjectLocalSymbols} eligible local symbols · ${metrics.compatibilityRepresentedSymbols} represented by compatibility roles · raw calls used: subsystem ${metrics.subsystemCallEvidenceCount}/${metrics.rawCallCount}, compatibility ${metrics.compatibilityCallEvidenceCount}/${metrics.rawCallCount} · compatibility compression ${Math.round(metrics.compatibilitySymbolsPerGroup)} symbols/group`,
+      ));
+      if (metrics.languageGaps?.length) {
+        section.append(node(
+          "span",
+          "code-map-subsystem-note",
+          `Semantic language gaps · ${metrics.languageGaps.map((gap) => `${gap.language}: ${gap.gapReason.replaceAll("_", " ")}`).join(" · ")}`,
+        ));
+      }
+    }
+
     const list = node("div", "code-map-subsystems-list");
-    projection.subsystems.nodes.forEach((item) => {
-      const button = node("button", "code-map-subsystem");
-      button.type = "button";
-      const rawAnchor = item.sampleNodeIds?.[0];
-      button.disabled = !rawAnchor;
-      button.append(
+    subsystemRead.nodes.forEach((item) => {
+      const card = node("article", "code-map-subsystem");
+      card.append(
         node("strong", "code-map-subsystem-path", item.pathPrefix),
-        node("span", "code-map-subsystem-meta", `${item.fileCount} files · ${item.symbolCount} symbols`),
+        node("span", "code-map-subsystem-meta", `${item.fileCount} files · ${item.symbolCount} symbols · ${item.outgoingCrossBoundaryCallCount} outgoing calls · ${item.incomingCrossBoundaryCallCount} incoming calls`),
+        node("span", "code-map-subsystem-id", item.id),
       );
-      if (rawAnchor) button.addEventListener("click", () => selectCodeMapDetail("node", rawAnchor));
-      list.append(button);
+      if (item.notableNodes?.length) {
+        const notableList = node("div", "code-map-subsystem-notables");
+        item.notableNodes.forEach((notable) => {
+          const button = node("button", "code-map-subsystem-notable");
+          button.type = "button";
+          button.dataset.codeMapNodeId = notable.rawNodeId;
+          button.append(
+            node("strong", "code-map-subsystem-notable-name", notable.name),
+            node("span", "code-map-subsystem-notable-meta", `${notable.roles.join(" / ") || "boundary node"} · ${notable.selectionReasons.join(", ")}`),
+            notable.registrationContext
+              ? node("span", "code-map-subsystem-owner-note", "Registration context · raw relation owner preserved")
+              : node("span", "code-map-subsystem-owner-note", `Raw node · ${notable.rawNodeId}`),
+          );
+          button.addEventListener("click", () => selectCodeMapDetail("node", notable.rawNodeId));
+          notableList.append(button);
+        });
+        card.append(notableList);
+      }
+      if (item.notableNodesTruncated) {
+        card.append(node("span", "code-map-subsystem-note", `Notable nodes bounded to ${subsystemRead.caps.notableNodesPerSubsystem}.`));
+      }
+      list.append(card);
     });
     section.append(list);
-    if (projection.subsystems.relations?.length) {
-      const calls = node("div", "code-map-subsystem-relations");
-      projection.subsystems.relations.slice(0, 12).forEach((item) => {
-        calls.append(node("span", "code-map-subsystem-relation",
-          `${item.fromPathPrefix} → ${item.toPathPrefix} · ${item.sourceRelationCount} raw calls`));
+
+    if (subsystemRead.relations?.length) {
+      const relations = node("div", "code-map-subsystem-relations");
+      subsystemRead.relations.forEach((item) => {
+        const evidenceCount = item.evidenceSample?.length || item.sourceRelationIds?.length || 0;
+        relations.append(node(
+          "span",
+          "code-map-subsystem-relation",
+          `${item.fromPathPrefix} → ${item.toPathPrefix} · ${item.kind} · total ${item.sourceRelationCount} raw evidence · sample ${evidenceCount}${item.evidenceTruncated ? ` · truncated: ${item.evidenceTruncationReason}` : ""}`,
+        ));
       });
-      section.append(calls);
+      section.append(relations);
     }
-    if (projection.subsystems.truncated) section.append(node("span", "code-map-subsystem-note", "Showing the largest bounded subsystem candidates."));
+    if (subsystemRead.truncation?.subsystems?.truncated) {
+      const cap = subsystemRead.truncation.subsystems;
+      section.append(node("span", "code-map-subsystem-note", `Subsystems bounded: ${cap.returnedCount}/${cap.candidateCount} · ${cap.reason}.`));
+    }
+    if (subsystemRead.truncation?.relations?.truncated) {
+      const cap = subsystemRead.truncation.relations;
+      section.append(node("span", "code-map-subsystem-note", `Relations bounded: ${cap.returnedCount}/${cap.candidateCount} · ${cap.reason}.`));
+    }
     details.append(section);
   }
+
+  const compatibility = node("section", "code-map-compatibility-roles");
+  compatibility.append(
+    node("strong", "code-map-compatibility-title", "Compatibility roles · six-role Investigation sync lens"),
+    node("span", "code-map-compatibility-note", "This stable code-map:node:* projection is preserved for compatibility and Investigation sync. It is not a claim that these macro roles are the complete source architecture."),
+  );
+  const stage = node("div", "code-map-architecture-stage");
   projection.nodes.forEach((item) => {
     const card = node("article", "code-map-architecture-card");
     card.append(
@@ -1328,8 +1439,9 @@ function codeMapArchitectureLens(map) {
   projection.relations.forEach((relation) => {
     relations.append(node("div", "code-map-architecture-relation", `${nodeById.get(relation.from)?.title || relation.from} · ${relation.kind.replaceAll("_", " ")} → ${nodeById.get(relation.to)?.title || relation.to}`));
   });
-  if (projection.nodes.length) details.append(stage);
-  if (projection.relations.length) details.append(relations);
+  if (projection.nodes.length) compatibility.append(stage);
+  if (projection.relations.length) compatibility.append(relations);
+  details.append(compatibility);
   return details;
 }
 

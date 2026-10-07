@@ -796,9 +796,19 @@ main { min-height: 0; overflow: hidden; }
 .code-map-subsystem { min-width: 0; padding: 7px; border: 1px solid #303b49; border-radius: 5px; background: #0d141b; text-align: left; display: grid; gap: 3px; cursor: pointer; }
 .code-map-subsystem:hover, .code-map-subsystem:focus-visible { border-color: #60718a; outline: none; }
 .code-map-subsystem-path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #d0d8e2; font-size: 9px; }
-.code-map-subsystem-meta, .code-map-subsystem-note { color: #7f8d9d; font-size: 8px; }
+.code-map-subsystem-meta, .code-map-subsystem-note, .code-map-subsystem-id { color: #7f8d9d; font-size: 8px; }
+.code-map-subsystem-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5f6d7e; font-size: 7px; }
+.code-map-subsystem-quality { padding: 5px 6px; border-radius: 5px; background: #151e28; color: #a8b4c3; font-size: 8px; line-height: 1.45; }
+.code-map-subsystem-notables { display: grid; gap: 3px; margin-top: 3px; }
+.code-map-subsystem-notable { min-width: 0; padding: 5px 6px; display: grid; gap: 2px; border: 1px solid #273341; border-radius: 4px; background: #101820; text-align: left; cursor: pointer; }
+.code-map-subsystem-notable:hover, .code-map-subsystem-notable:focus-visible { border-color: #61738b; outline: none; }
+.code-map-subsystem-notable-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c3cdd9; font-size: 8px; }
+.code-map-subsystem-notable-meta, .code-map-subsystem-owner-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #728091; font-size: 7px; }
 .code-map-subsystem-relations { display: flex; flex-wrap: wrap; gap: 4px; }
 .code-map-subsystem-relation { padding: 4px 6px; color: #9aa9ba; background: #1a2531; border-radius: 5px; font-size: 8px; }
+.code-map-compatibility-roles { padding: 8px; display: grid; gap: 6px; border: 1px solid #252e39; border-radius: 6px; background: #0f141a; }
+.code-map-compatibility-title { color: #aab4c0; font-size: 9px; }
+.code-map-compatibility-note { color: #707c8b; font-size: 8px; line-height: 1.45; }
 .code-map-architecture-fallback { margin-bottom: 8px; padding: 8px; display: grid; gap: 5px; border: 1px solid #29323d; border-radius: 6px; background: #11161c; }
 .code-map-architecture-fallback-title { color: #bac3ce; font-size: 9px; }
 .code-map-architecture-fallback-copy, .code-map-architecture-fallback-empty, .code-map-architecture-id-note { color: #727f8e; font-size: 8px; line-height: 1.45; }

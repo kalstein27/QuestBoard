@@ -12,6 +12,8 @@ export * from "./application/code-map-augmentation.js";
 export * from "./application/code-scope-binding.js";
 export * from "./application/agent-focus.js";
 export * from "./application/code-map-projection.js";
+export * from "./application/code-map-subsystems.js";
+export * from "./application/code-map-subsystem-read.js";
 export * from "./application/code-map-overlay.js";
 export * from "./application/code-map-service.js";
 export * from "./application/code-map-persistence.js";

@@ -82,18 +82,31 @@ test("coverage health and semantic capability stay distinct while architecture r
   assert.match(app, /Semantic coverage:/);
   assert.match(app, /semantic analysis not applicable/);
   assert.match(app, /codeMapArchitectureLens/);
-  assert.match(app, /Architecture lens/);
+  assert.match(app, /Architecture views/);
+  assert.match(app, /Compatibility roles/);
   assert.match(app, /document\.createElement\("details"\)/);
   assert.match(css, /\.code-map-architecture-lens/);
 });
 
-test("large architecture lens exposes overcompression diagnostics and bounded source subsystem navigation", () => {
+test("Web separates compatibility roles from the bounded Source subsystems / Calls contract", () => {
   assert.match(app, /quality\?\.reason === "overcompressed"/);
-  assert.match(app, /Source subsystems/);
-  assert.match(app, /projection\.subsystems\?\.nodes/);
-  assert.match(app, /item\.sampleNodeIds\?\.\[0\]/);
+  assert.match(app, /code-map\/subsystems/);
+  assert.match(app, /state\.codeMapSubsystems/);
+  assert.match(app, /const subsystemRead = loadCodeMapSubsystems\(\);\s*try \{\s*state\.codeMap = await api/);
+  assert.match(app, /Source subsystems \/ Calls/);
+  assert.match(app, /Compatibility roles · six-role Investigation sync lens/);
+  assert.doesNotMatch(app, /projection\.subsystems\?\.nodes/);
+  assert.match(app, /notable\.rawNodeId/);
+  assert.match(app, /notable\.selectionReasons/);
   assert.match(app, /sourceRelationCount/);
+  assert.match(app, /sourceRelationIds/);
+  assert.match(app, /evidenceTruncated/);
+  assert.match(app, /Broad depends_on, external SCIP targets, name similarity, and path-only inference are excluded/);
+  assert.match(app, /Registration context never reassigns the raw relation owner/);
+  assert.match(app, /code-subsystem:\*/);
+  assert.match(app, /raw code:node:\*/);
   assert.match(css, /\.code-map-subsystems-list/);
+  assert.match(css, /\.code-map-compatibility-roles/);
 });
 
 test("sparse Architecture lens exposes bounded raw call-root entrypoints without mixing ID spaces", () => {

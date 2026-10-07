@@ -183,6 +183,21 @@ async function handleRequest(
     return;
   }
 
+  const codeMapSubsystemsMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/subsystems$/);
+  if (codeMapSubsystemsMatch && method === "GET") {
+    const projectId = decodePathPart(codeMapSubsystemsMatch[1]);
+    service.getProject(projectId);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      {
+        service,
+        ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
+      },
+      "questboard_get_code_map_subsystems",
+      { projectId },
+    ));
+    return;
+  }
+
   const codeMapRefreshMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/refresh$/);
   if (codeMapRefreshMatch && method === "GET") {
     const projectId = decodePathPart(codeMapRefreshMatch[1]);

@@ -15,6 +15,10 @@ import {
   type CodeArchitectureProjection,
 } from "./code-map-projection.js";
 import {
+  createCodeSourceSubsystemRead,
+  type CodeSourceSubsystemRead,
+} from "./code-map-subsystem-read.js";
+import {
   materializeCodeFileHierarchy,
   type CodeFileInventory,
 } from "./code-map-hierarchy.js";
@@ -313,6 +317,21 @@ export class CodeMapService {
     const cached = this.getCached(projectId)?.graph;
     const rootPath = cached?.rootPath ?? this.#persistence?.rootPathForProject?.(projectId);
     return this.#providerRegistry?.report(cached, rootPath);
+  }
+
+  sourceSubsystems(projectId: string): CodeSourceSubsystemRead {
+    const cached = this.getCached(projectId);
+    if (!cached) {
+      throw new CodeMapQueryError(
+        "code_map_not_indexed",
+        `Code Map has not been indexed for project ${projectId}`,
+      );
+    }
+    return createCodeSourceSubsystemRead(
+      cached.graph,
+      cached.projection,
+      this.providerCapabilities(projectId),
+    );
   }
 
   async providerCapabilitiesWithPreflight(

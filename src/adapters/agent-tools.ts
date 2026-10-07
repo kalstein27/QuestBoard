@@ -807,6 +807,18 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_get_code_map_subsystems",
+    description: "Read the bounded evidence-backed Source subsystems / Calls view without returning the full raw graph. Subsystems and relations use a separate deterministic code-subsystem:* derived namespace; notable navigation always terminates at canonical raw code:node:* IDs. Calls are primary structural evidence, actual raw instantiates/implements are auxiliary, and broad depends_on/external/name/path inference is excluded. Raw relation ownership is preserved.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
     name: "questboard_get_code_map_status",
     description: "Canonical first read for Code Map lifecycle work. Reports indexed/freshness state, detected language summary, provider requirement/availability, projection quality, and one machine-actionable recommendedNextAction without returning the full graph. Follow recommendedNextAction; use questboard_get_code_map_provider_capabilities only when detailed language coverage or install options are needed.",
     inputSchema: {
@@ -1430,6 +1442,12 @@ export function executeQuestBoardAgentTool(
         query: requireCodeMapService(context).query(
           requireString(args, "projectId"),
           codeMapQueryInput(args),
+        ),
+      };
+    case "questboard_get_code_map_subsystems":
+      return {
+        subsystems: requireCodeMapService(context).sourceSubsystems(
+          requireString(args, "projectId"),
         ),
       };
     case "questboard_get_code_map_status":
