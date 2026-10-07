@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import ts from "typescript";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   assertValidCodeGraphSnapshot,
@@ -17,7 +18,9 @@ const SCIP_ROLE_IMPORT = 2;
 const SCIP_ROLE_WRITE = 4;
 const SCIP_ROLE_READ = 8;
 const MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT = 100;
-const SOURCE_REGISTRATION_PATTERN = /\bregisterTool\s*\(\s*(["'])([A-Za-z0-9][A-Za-z0-9._:-]{0,199})\1/g;
+const MAX_REGISTRATION_SOURCE_LENGTH = 3_000_000;
+const MAX_REGISTRATION_CALL_SITES_PER_DOCUMENT = 8_000;
+const SOURCE_REGISTRATION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 interface ScipRange {
   startLine: number;
@@ -357,12 +360,29 @@ function sourcePositionAtOffset(lineStarts: readonly number[], offset: number): 
   return { line: 1, column: Math.max(1, offset + 1) };
 }
 
+interface RegistrationCallSite {
+  ownerId: string;
+  kind: "calls" | "instantiates";
+}
+
+interface SourceRegistrations {
+  nodes: CodeNode[];
+  callSites: Map<string, RegistrationCallSite>;
+}
+
 function sourceRegistrationNodes(
   document: ScipDocument,
   source: string,
   providerId: string,
   semanticNodes: readonly CodeNode[],
-): CodeNode[] {
+): SourceRegistrations {
+  const nodes: CodeNode[] = [];
+  const callSites = new Map<string, RegistrationCallSite>();
+  // Only JavaScript-family files have TypeScript-compatible syntax trees.
+  // Large inputs remain searchable through semantic SCIP without an unbounded parse.
+  if (!/\.(?:[cm]?[jt]s|[jt]sx)$/i.test(document.relativePath)
+    || source.length > MAX_REGISTRATION_SOURCE_LENGTH) return { nodes, callSites };
+
   const semanticImplementationNames = new Set(
     semanticNodes
       .filter((node) =>
@@ -371,36 +391,78 @@ function sourceRegistrationNodes(
       .map((node) => node.name.toLocaleLowerCase()),
   );
   const lineStarts = lineStartOffsets(source);
-  const nodes: CodeNode[] = [];
-  SOURCE_REGISTRATION_PATTERN.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while (
-    nodes.length < MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT
-    && (match = SOURCE_REGISTRATION_PATTERN.exec(source)) !== null
-  ) {
-    const name = match[2]!;
-    if (semanticImplementationNames.has(name.toLocaleLowerCase())) continue;
-    const nameOffset = match.index + match[0].lastIndexOf(name);
-    const position = sourcePositionAtOffset(lineStarts, nameOffset);
-    const canonicalIdentity = `source-registration:${document.relativePath}:registerTool:${name}:${position.line}`;
-    nodes.push({
-      id: stableId("node", canonicalIdentity),
-      kind: "function",
-      name,
-      canonicalIdentity,
-      ...(document.language ? { language: document.language } : {}),
-      location: {
-        path: document.relativePath,
-        startLine: position.line,
-        startColumn: position.column,
-        endLine: position.line,
-        endColumn: position.column + name.length,
-      },
-      signature: `registerTool("${name}", ...)`,
-      provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }],
-    });
+  const sourceFile = ts.createSourceFile(
+    document.relativePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    /\.[jt]sx$/i.test(document.relativePath) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const handlers: Array<{ ownerId: string; callback: ts.ArrowFunction | ts.FunctionExpression }> = [];
+  const visitRegistration = (syntaxNode: ts.Node): void => {
+    if (nodes.length >= MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT) return;
+    if (ts.isCallExpression(syntaxNode)
+      && (ts.isIdentifier(syntaxNode.expression) && syntaxNode.expression.text === "registerTool"
+        || ts.isPropertyAccessExpression(syntaxNode.expression) && syntaxNode.expression.name.text === "registerTool")) {
+      const nameArgument = syntaxNode.arguments[0];
+      // Preserve the existing literal-only stable identity. Escaped text,
+      // computed names and template literals are deliberately not inferred.
+      if (nameArgument && ts.isStringLiteral(nameArgument)
+        && SOURCE_REGISTRATION_NAME.test(nameArgument.text)
+        && /^["'][^"'\\]*["']$/.test(nameArgument.getText(sourceFile))
+        && !semanticImplementationNames.has(nameArgument.text.toLocaleLowerCase())) {
+        const name = nameArgument.text;
+        const nameOffset = nameArgument.getStart(sourceFile) + 1;
+        const position = sourcePositionAtOffset(lineStarts, nameOffset);
+        const canonicalIdentity = `source-registration:${document.relativePath}:registerTool:${name}:${position.line}`;
+        const ownerId = stableId("node", canonicalIdentity);
+        nodes.push({
+          id: ownerId,
+          kind: "function",
+          name,
+          canonicalIdentity,
+          ...(document.language ? { language: document.language } : {}),
+          location: {
+            path: document.relativePath,
+            startLine: position.line,
+            startColumn: position.column,
+            endLine: position.line,
+            endColumn: position.column + name.length,
+          },
+          signature: `registerTool("${name}", ...)`,
+          provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }],
+        });
+        const callback = syntaxNode.arguments[2];
+        if (callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
+          handlers.push({ ownerId, callback });
+        }
+      }
+    }
+    ts.forEachChild(syntaxNode, visitRegistration);
+  };
+  visitRegistration(sourceFile);
+
+  // Walk each verified callback body without crossing another function or
+  // class boundary. Nested callbacks have their own lexical owner and must
+  // never create a fictitious edge from the enclosing registration handler.
+  for (const { ownerId, callback } of handlers) {
+    const visitDirectCalls = (syntaxNode: ts.Node): void => {
+      if (callSites.size >= MAX_REGISTRATION_CALL_SITES_PER_DOCUMENT) return;
+      if (ts.isFunctionLike(syntaxNode) || ts.isClassDeclaration(syntaxNode) || ts.isClassExpression(syntaxNode)) return;
+      if (ts.isCallExpression(syntaxNode) || ts.isNewExpression(syntaxNode)) {
+        const callee = syntaxNode.expression;
+        const token = ts.isIdentifier(callee) ? callee
+          : ts.isPropertyAccessExpression(callee) ? callee.name : undefined;
+        if (token) {
+          const key = `${token.getStart(sourceFile)}:${token.getEnd()}`;
+          callSites.set(key, { ownerId, kind: ts.isNewExpression(syntaxNode) ? "instantiates" : "calls" });
+        }
+      }
+      ts.forEachChild(syntaxNode, visitDirectCalls);
+    };
+    visitDirectCalls(callback.body);
   }
-  return nodes;
+  return { nodes, callSites };
 }
 
 function isCallOccurrence(source: string, lineStarts: readonly number[], range: ScipRange): boolean {
@@ -462,11 +524,17 @@ function addRelation(
   to: string,
   kind: CodeRelationKind,
   confidence = 1,
+  evidence?: CodeRelation["evidence"],
+  provenance?: CodeRelation["provenance"],
 ): void {
   if (from === to) return;
   const identity = `${from}->${kind}->${to}`;
   if (output.has(identity)) return;
-  output.set(identity, { id: stableId("relation", identity), from, to, kind, confidence });
+  output.set(identity, {
+    id: stableId("relation", identity), from, to, kind, confidence,
+    ...(evidence ? { evidence } : {}),
+    ...(provenance ? { provenance } : {}),
+  });
 }
 
 export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSnapshot {
@@ -548,15 +616,18 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   const registrationNodes: CodeNode[] = [];
+  const registrationCallsByDocument = new Map<ScipDocument, Map<string, RegistrationCallSite>>();
   for (const document of input.index.documents) {
     const source = input.sourceTextByPath?.get(document.relativePath);
     if (!source) continue;
-    registrationNodes.push(...sourceRegistrationNodes(
+    const registrations = sourceRegistrationNodes(
       document,
       source,
       providerId,
       [...nodeBySymbol.values()],
-    ));
+    );
+    registrationNodes.push(...registrations.nodes);
+    registrationCallsByDocument.set(document, registrations.callSites);
   }
 
   const relations = new Map<string, CodeRelation>();
@@ -616,6 +687,24 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       const target = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
         ?? externalNodeBySymbol.get(occurrence.symbol)?.id;
       if (!target) continue;
+      const occurrenceStart = lineStarts?.[occurrence.range.startLine];
+      const occurrenceEnd = lineStarts?.[occurrence.range.endLine];
+      const registrationCall = occurrenceStart !== undefined && occurrenceEnd !== undefined
+        ? registrationCallsByDocument.get(document)?.get(`${occurrenceStart + occurrence.range.startCharacter}:${occurrenceEnd + occurrence.range.endCharacter}`)
+        : undefined;
+      if (registrationCall) {
+        addRelation(relations, registrationCall.ownerId, target, registrationCall.kind, 1, [{
+          location: {
+            path: document.relativePath,
+            startLine: occurrence.range.startLine + 1,
+            startColumn: occurrence.range.startCharacter + 1,
+            endLine: occurrence.range.endLine + 1,
+            endColumn: occurrence.range.endCharacter + 1,
+          },
+          label: "SCIP-resolved direct handler call",
+        }], [{ providerId, fidelity: "semantic-call", freshness: "fresh" }]);
+        continue;
+      }
       const owners = documentDefinitions
         .filter((definition) => definition.occurrence.enclosingRange && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))
         .sort((left, right) => rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!));
