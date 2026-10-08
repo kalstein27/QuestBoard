@@ -8,6 +8,7 @@ import {
   type CodeGraphSnapshot,
   type CodeNode,
   type CodeNodeKind,
+  type CodeSourceLocation,
   type CodeRelation,
   type CodeRelationKind,
 } from "../../application/code-intelligence.js";
@@ -74,6 +75,8 @@ export interface NormalizeScipGraphInput {
   sourceTextByPath?: ReadonlyMap<string, string>;
   providerId?: string;
   fidelity?: CodeFidelityLevel;
+  /** SHA-256 of the actual index.scip bytes; do not substitute a source hash. */
+  indexArtifactSha256?: string | undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -338,6 +341,16 @@ function rangeSpan(range: ScipRange): number {
   return (range.endLine - range.startLine) * 1_000_000 + range.endCharacter - range.startCharacter;
 }
 
+function nativeLocation(path: string, range: ScipRange): CodeSourceLocation {
+  return {
+    path,
+    startLine: range.startLine + 1,
+    startColumn: range.startCharacter + 1,
+    endLine: range.endLine + 1,
+    endColumn: range.endCharacter + 1,
+  };
+}
+
 function lineStartOffsets(source: string): number[] {
   const offsets = [0];
   for (let index = 0; index < source.length; index += 1) {
@@ -529,7 +542,24 @@ function addRelation(
 ): void {
   if (from === to) return;
   const identity = `${from}->${kind}->${to}`;
-  if (output.has(identity)) return;
+  const existing = output.get(identity);
+  if (existing) {
+    const byEvidence = new Map<string, NonNullable<CodeRelation["evidence"]>[number]>();
+    for (const item of [...(existing.evidence ?? []), ...(evidence ?? [])]) {
+      byEvidence.set(JSON.stringify([item.location.path, item.location.startLine, item.location.startColumn,
+        item.location.endLine, item.location.endColumn, item.label ?? ""]), item);
+    }
+    const mergedEvidence = [...byEvidence.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, item]) => item);
+    const byProvider = new Map((existing.provenance ?? []).map((item) => [item.providerId, item]));
+    for (const item of provenance ?? []) byProvider.set(item.providerId, item);
+    output.set(identity, {
+      ...existing,
+      confidence: Math.max(existing.confidence, confidence),
+      ...(mergedEvidence.length ? { evidence: mergedEvidence } : {}),
+      ...(byProvider.size ? { provenance: [...byProvider.values()].sort((a, b) => a.providerId.localeCompare(b.providerId)) } : {}),
+    });
+    return;
+  }
   output.set(identity, {
     id: stableId("relation", identity), from, to, kind, confidence,
     ...(evidence ? { evidence } : {}),
@@ -562,13 +592,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       const info = infoBySymbol.get(symbolKey);
       const canonicalIdentity = canonicalScipIdentity(document, occurrence.symbol);
       const nodeId = stableId("node", canonicalIdentity);
-      const location = {
-        path: document.relativePath,
-        startLine: occurrence.range.startLine + 1,
-        startColumn: occurrence.range.startCharacter + 1,
-        endLine: occurrence.range.endLine + 1,
-        endColumn: occurrence.range.endCharacter + 1,
-      };
+      const location = nativeLocation(document.relativePath, occurrence.range);
       const node: CodeNode = {
         id: nodeId,
         kind: normalizeKind(info, occurrence.symbol),
@@ -578,6 +602,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         canonicalIdentity,
         ...(document.language ? { language: document.language } : {}),
         location,
+        ...(occurrence.enclosingRange
+          ? { lexicalExtent: nativeLocation(document.relativePath, occurrence.enclosingRange) } : {}),
         ...(info?.signature ? { signature: info.signature } : {}),
       };
       nodeBySymbol.set(symbolKey, node);
@@ -631,6 +657,20 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   const relations = new Map<string, CodeRelation>();
+  const nativeReferenceCounts = new Map<string, number>();
+  for (const node of nodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
+  for (const node of externalNodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
+  // Count native references before owner/target/range filtering so a filtered
+  // call is distinguishable from a provider that emitted no reference at all.
+  for (const document of input.index.documents) {
+    for (const occurrence of document.occurrences) {
+      if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) !== 0) continue;
+      const targetNode = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))
+        ?? externalNodeBySymbol.get(occurrence.symbol);
+      if (targetNode) nativeReferenceCounts.set(targetNode.canonicalIdentity,
+        (nativeReferenceCounts.get(targetNode.canonicalIdentity) ?? 0) + 1);
+    }
+  }
 
   // SCIP carries explicit lexical ownership on SymbolInformation. Preserve it
   // as real code containment before adding usage relationships. When an
@@ -684,8 +724,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const lineStarts = source ? lineStartOffsets(source) : undefined;
     for (const occurrence of document.occurrences) {
       if ((occurrence.symbolRoles & SCIP_ROLE_DEFINITION) !== 0 || !occurrence.range) continue;
-      const target = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
-        ?? externalNodeBySymbol.get(occurrence.symbol)?.id;
+      const targetNode = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))
+        ?? externalNodeBySymbol.get(occurrence.symbol);
+      const target = targetNode?.id;
       if (!target) continue;
       const occurrenceStart = lineStarts?.[occurrence.range.startLine];
       const occurrenceEnd = lineStarts?.[occurrence.range.endLine];
@@ -694,13 +735,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         : undefined;
       if (registrationCall) {
         addRelation(relations, registrationCall.ownerId, target, registrationCall.kind, 1, [{
-          location: {
-            path: document.relativePath,
-            startLine: occurrence.range.startLine + 1,
-            startColumn: occurrence.range.startCharacter + 1,
-            endLine: occurrence.range.endLine + 1,
-            endColumn: occurrence.range.endCharacter + 1,
-          },
+          location: nativeLocation(document.relativePath, occurrence.range),
           label: "SCIP-resolved direct handler call",
         }], [{ providerId, fidelity: "semantic-call", freshness: "fresh" }]);
         continue;
@@ -715,7 +750,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         : source && lineStarts && isCallOccurrence(source, lineStarts, occurrence.range)
           ? "calls"
           : relationKindForRoles(occurrence.symbolRoles);
-      addRelation(relations, owner, target, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9);
+      addRelation(relations, owner, target, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9,
+        [{ location: nativeLocation(document.relativePath, occurrence.range), label: "SCIP native reference occurrence" }],
+        [{ providerId, fidelity, freshness: "fresh" }]);
     }
   }
 
@@ -726,6 +763,16 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     indexedAt: input.indexedAt,
     nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values()],
     relations: [...relations.values()],
+    ...(input.indexArtifactSha256 ? {
+      providerRuns: [{
+        providerId,
+        nativeArtifactSha256: input.indexArtifactSha256,
+        indexedAt: input.indexedAt,
+        fingerprint: createHash("sha256").update(JSON.stringify([providerId, input.indexArtifactSha256, input.indexedAt])).digest("hex"),
+        nativeReferences: [...nativeReferenceCounts.entries()].sort(([a], [b]) => a.localeCompare(b))
+          .map(([canonicalIdentity, referenceOccurrenceCount]) => ({ canonicalIdentity, referenceOccurrenceCount })),
+      }],
+    } : {}),
     coverage: {
       degraded: false,
       providers: [{

@@ -117,6 +117,8 @@ export interface CodeNode {
   canonicalIdentity: string;
   language?: string;
   location?: CodeSourceLocation;
+  /** SCIP definition enclosingRange. Native lexical scope, not an inferred body. */
+  lexicalExtent?: CodeSourceLocation | undefined;
   signature?: string;
   exported?: boolean;
   /** One or more normalized sources that assert this exact fact. */
@@ -136,6 +138,20 @@ export interface CodeRelation {
   provenance?: readonly CodeFactProvenance[];
 }
 
+export interface CodeNativeReferenceCount {
+  canonicalIdentity: string;
+  referenceOccurrenceCount: number;
+}
+
+export interface CodeProviderRunEvidence {
+  providerId: string;
+  nativeArtifactSha256: string;
+  indexedAt: string;
+  /** SHA-256 over the exact providerId/artifact/indexedAt tuple. */
+  fingerprint: string;
+  nativeReferences: readonly CodeNativeReferenceCount[];
+}
+
 export interface CodeGraphSnapshot {
   schemaVersion: typeof CODE_GRAPH_SCHEMA_VERSION;
   projectId: string;
@@ -143,6 +159,8 @@ export interface CodeGraphSnapshot {
   indexedAt: string;
   nodes: readonly CodeNode[];
   relations: readonly CodeRelation[];
+  /** Native index audit, absent when an exact provider artifact is unavailable. */
+  providerRuns?: readonly CodeProviderRunEvidence[];
   /** Optional mixed-provider fidelity/health summary. Facts remain canonical without it. */
   coverage?: CodeGraphCoverage;
 }
@@ -192,7 +210,8 @@ export type CodeGraphValidationIssueCode =
   | "dangling_relation"
   | "invalid_confidence"
   | "invalid_location"
-  | "invalid_provenance";
+  | "invalid_provenance"
+  | "invalid_native_evidence";
 
 export interface CodeGraphValidationIssue {
   code: CodeGraphValidationIssueCode;
@@ -267,9 +286,33 @@ export function validateCodeGraphSnapshot(snapshot: CodeGraphSnapshot): CodeGrap
     if (node.location) {
       validateLocation(node.location, `Node ${node.id}`, issues);
     }
+    if (node.lexicalExtent) {
+      validateLocation(node.lexicalExtent, `Node ${node.id} lexicalExtent`, issues);
+      if (node.location && node.location.path !== node.lexicalExtent.path) {
+        issues.push({ code: "invalid_native_evidence", message: `Node ${node.id} lexicalExtent path differs from declaration` });
+      }
+    }
     validateProvenance(node.provenance, `Node ${node.id}`, issues);
   }
 
+  const runProviders = new Set<string>();
+  for (const run of snapshot.providerRuns ?? []) {
+    if (!run.providerId.trim() || runProviders.has(run.providerId)
+      || !/^[a-f0-9]{64}$/.test(run.nativeArtifactSha256)
+      || !/^[a-f0-9]{64}$/.test(run.fingerprint)
+      || Number.isNaN(Date.parse(run.indexedAt))) {
+      issues.push({ code: "invalid_native_evidence", message: `Invalid provider run ${run.providerId}` });
+    }
+    runProviders.add(run.providerId);
+    const keys = new Set<string>();
+    for (const count of run.nativeReferences) {
+      if (!count.canonicalIdentity || keys.has(count.canonicalIdentity)
+        || !Number.isSafeInteger(count.referenceOccurrenceCount) || count.referenceOccurrenceCount < 0) {
+        issues.push({ code: "invalid_native_evidence", message: `Invalid native reference summary for ${run.providerId}` });
+      }
+      keys.add(count.canonicalIdentity);
+    }
+  }
   const relationIds = new Set<string>();
   for (const relation of snapshot.relations) {
     if (relationIds.has(relation.id)) {

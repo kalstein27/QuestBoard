@@ -15,6 +15,7 @@ import {
   WorkerScipGraphLoader,
   indexDirectory,
   readIndexedSourceText,
+  scipArtifactSha256,
   type ScipGraphLoader,
   type ScipIndexReader,
   type ScipProcessRunner,
@@ -121,8 +122,9 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
     }
 
     const indexedAt = this.#now();
+    const indexArtifactSha256 = scipArtifactSha256(indexPath);
     if (this.#graphLoader) {
-      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId });
+      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256 });
     }
     const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
@@ -132,6 +134,7 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
       index,
       sourceTextByPath: readIndexedSourceText(request.rootPath, index),
       providerId: this.providerId,
+      indexArtifactSha256,
     });
   }
 }

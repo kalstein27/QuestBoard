@@ -139,6 +139,11 @@ export interface CodeSourceSubsystemDerivation {
   truncation: CodeSourceSubsystemTruncation;
 }
 
+export interface CodeSourceSubsystemDerivationOptions {
+  /** Internal discovery mode: preserve deterministic derivation but skip only top-level 12/24 slicing. */
+  unbounded?: boolean;
+}
+
 const MAX_SUBSYSTEMS = 12;
 const MAX_RELATIONS = 24;
 const MAX_RELATION_EVIDENCE = 16;
@@ -485,6 +490,7 @@ function relationKindRank(kind: CodeSourceSubsystemRelationKind): number {
 
 export function deriveCodeSourceSubsystems(
   graph: CodeGraphSnapshot,
+  options?: CodeSourceSubsystemDerivationOptions,
 ): CodeSourceSubsystemDerivation {
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
   const subsystemByNodeId = new Map<string, string>();
@@ -643,7 +649,9 @@ export function deriveCodeSourceSubsystems(
       || left.pathPrefix.localeCompare(right.pathPrefix);
   });
 
-  const selectedNodes = allSubsystems.slice(0, MAX_SUBSYSTEMS);
+  const selectedNodes = options?.unbounded === true
+    ? allSubsystems
+    : allSubsystems.slice(0, MAX_SUBSYSTEMS);
   const selectedPaths = new Set(selectedNodes.map((node) => node.pathPrefix));
 
   const allRelations: CodeSourceSubsystemRelation[] =
@@ -672,7 +680,9 @@ export function deriveCodeSourceSubsystems(
         || left.fromPathPrefix.localeCompare(right.fromPathPrefix)
         || left.toPathPrefix.localeCompare(right.toPathPrefix));
 
-  const selectedRelations = allRelations.slice(0, MAX_RELATIONS);
+  const selectedRelations = options?.unbounded === true
+    ? allRelations
+    : allRelations.slice(0, MAX_RELATIONS);
   const subsystemTruncated = allSubsystems.length > selectedNodes.length;
   const relationTruncated = allRelations.length > selectedRelations.length;
 

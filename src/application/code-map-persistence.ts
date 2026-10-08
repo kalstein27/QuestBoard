@@ -13,7 +13,8 @@ export type CodeMapHydrationRejectReason =
   | "root_changed"
   | "provider_changed"
   | "storage_inside_project"
-  | "graph_invalid";
+  | "graph_invalid"
+  | "identity_invalid";
 
 export interface PersistedCodeMapSnapshotEnvelope {
   formatVersion: typeof CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION;
@@ -22,6 +23,10 @@ export interface PersistedCodeMapSnapshotEnvelope {
   rootIdentity: string;
   providerConfigFingerprint: string;
   sourceManifestFingerprint?: string;
+  /** Additive exact-content/run pin. Legacy snapshots without these remain unpinned. */
+  graphDigest?: string;
+  snapshotId?: string;
+  providerRunFingerprint?: string;
   persistedAt: string;
   graph: CodeGraphSnapshot;
 }

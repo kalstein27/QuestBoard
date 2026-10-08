@@ -184,6 +184,7 @@ export function materializeCodeFileHierarchy(
     indexedAt: graph.indexedAt,
     nodes,
     relations,
+    ...(graph.providerRuns ? { providerRuns: graph.providerRuns } : {}),
     ...(graph.coverage ? { coverage: graph.coverage } : {}),
   };
   assertValidCodeGraphSnapshot(snapshot);

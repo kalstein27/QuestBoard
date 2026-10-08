@@ -7,6 +7,7 @@ export * from "./application/code-map-hierarchy.js";
 export * from "./application/code-map-preflight.js";
 export * from "./application/code-map-next-action.js";
 export * from "./application/code-map-query.js";
+export * from "./application/code-map-continuation.js";
 export * from "./application/code-map-provider-registry.js";
 export * from "./application/code-map-augmentation.js";
 export * from "./application/code-scope-binding.js";

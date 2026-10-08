@@ -132,6 +132,7 @@ function mergeProviderGraphs(
   const nodes: CodeNode[] = [];
   const relations: CodeRelation[] = [];
   const nodeByMergeKey = new Map<string, CodeNode>();
+  const disputedLexicalExtent = new Set<string>();
   const nodeIdByProviderId = new Map<string, Map<string, string>>();
   const usedNodeIds = new Set<string>();
   const relationByMergeKey = new Map<string, CodeRelation>();
@@ -151,11 +152,19 @@ function mergeProviderGraphs(
           ...existing,
           ...(existing.language === undefined && node.language !== undefined ? { language: node.language } : {}),
           ...(existing.location === undefined && node.location !== undefined ? { location: node.location } : {}),
+          ...(disputedLexicalExtent.has(key)
+            || (existing.lexicalExtent && node.lexicalExtent
+              && locationKey(existing.lexicalExtent) !== locationKey(node.lexicalExtent))
+            ? { lexicalExtent: undefined }
+            : existing.lexicalExtent === undefined && node.lexicalExtent !== undefined
+              ? { lexicalExtent: node.lexicalExtent } : {}),
           ...(existing.signature === undefined && node.signature !== undefined ? { signature: node.signature } : {}),
           ...(existing.exported === undefined && node.exported !== undefined ? { exported: node.exported } : {}),
           provenance: mergeProvenance(existing.provenance, node.provenance ?? []),
         };
         const index = nodes.findIndex((candidate) => candidate.id === existing.id);
+        if (existing.lexicalExtent && node.lexicalExtent
+          && locationKey(existing.lexicalExtent) !== locationKey(node.lexicalExtent)) disputedLexicalExtent.add(key);
         nodes[index] = merged;
         nodeByMergeKey.set(key, merged);
         continue;
@@ -217,6 +226,10 @@ function mergeProviderGraphs(
       .at(-1) ?? new Date(0).toISOString(),
     nodes,
     relations,
+    ...(contributions.some((contribution) => contribution.graph.providerRuns?.length) ? {
+      providerRuns: contributions.flatMap((contribution) => contribution.graph.providerRuns ?? [])
+        .sort((a, b) => a.providerId.localeCompare(b.providerId)),
+    } : {}),
   };
 }
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { computeCodeMapSnapshotIdentity, type CodeMapSnapshotIdentity } from "./code-map-snapshot-identity.js";
 import {
   assertValidCodeGraphSnapshot,
   type CodeGraphSnapshot,
@@ -16,6 +17,9 @@ import {
 } from "./code-map-projection.js";
 import {
   createCodeSourceSubsystemRead,
+  queryCodeSourceSubsystems,
+  type CodeSourceSubsystemQueryInput,
+  type CodeSourceSubsystemQueryResult,
   type CodeSourceSubsystemRead,
 } from "./code-map-subsystem-read.js";
 import {
@@ -32,6 +36,11 @@ import {
   type CodeMapQueryInput,
   type CodeMapQueryResult,
 } from "./code-map-query.js";
+import {
+  queryCodeMapContinuations,
+  type CodeMapContinuationQueryInput,
+  type CodeMapContinuationResult,
+} from "./code-map-continuation.js";
 import {
   CodeMapProviderRegistry,
   CodeProviderLifecycleError,
@@ -261,6 +270,7 @@ export class CodeMapService {
   readonly #persistence: CodeMapPersistenceConfig | undefined;
   readonly #cache = new Map<string, CodeMapSnapshot>();
   readonly #snapshotStates = new Map<string, CodeMapSnapshotLifecycleState>();
+  readonly #snapshotIdentities = new Map<string, CodeMapSnapshotIdentity>();
   readonly #sourceManifestFingerprints = new Map<string, string | undefined>();
   readonly #hydrationDiagnostics = new Map<string, CodeMapHydrationDiagnostic>();
   readonly #hydrationAttempted = new Set<string>();
@@ -302,6 +312,11 @@ export class CodeMapService {
     return this.#refreshFreshness(projectId, cached.graph.rootPath);
   }
 
+  snapshotIdentity(projectId: string): CodeMapSnapshotIdentity | undefined {
+    this.getCached(projectId);
+    return this.#snapshotIdentities.get(projectId);
+  }
+
   hydrationDiagnostic(projectId: string): CodeMapHydrationDiagnostic | undefined {
     this.getCached(projectId);
     return this.#hydrationDiagnostics.get(projectId);
@@ -331,6 +346,26 @@ export class CodeMapService {
       cached.graph,
       cached.projection,
       this.providerCapabilities(projectId),
+    );
+  }
+
+  querySourceSubsystems(
+    projectId: string,
+    input: CodeSourceSubsystemQueryInput,
+  ): CodeSourceSubsystemQueryResult {
+    const cached = this.getCached(projectId);
+    if (!cached) {
+      throw new CodeMapQueryError(
+        "code_map_not_indexed",
+        `Code Map has not been indexed for project ${projectId}`,
+      );
+    }
+    return queryCodeSourceSubsystems(
+      cached.graph,
+      cached.projection,
+      input,
+      this.providerCapabilities(projectId),
+      this.#snapshotIdentities.get(projectId)?.snapshotId,
     );
   }
 
@@ -558,13 +593,37 @@ export class CodeMapService {
         `Code Map has not been indexed for project ${projectId}`,
       );
     }
+    const identity = this.#snapshotIdentities.get(projectId);
+    if (input.expectedSnapshotId && identity?.snapshotId !== input.expectedSnapshotId) {
+      throw new CodeMapQueryError("code_map_snapshot_changed", "Requested Code Map snapshot is not the current exact snapshot");
+    }
     const graph = this.#manualRelations
       ? augmentCodeGraphWithManualRelations(
           cached.graph,
           this.#manualRelations.listCodeMapManualRelations(projectId),
         )
       : cached.graph;
-    return queryCodeGraph(graph, this.providerId, input);
+    const result = queryCodeGraph(graph, this.providerId, input);
+    return identity ? { ...result, snapshotId: identity.snapshotId } : result;
+  }
+
+  queryContinuations(
+    projectId: string,
+    input: CodeMapContinuationQueryInput,
+  ): CodeMapContinuationResult {
+    const cached = this.getCached(projectId);
+    if (!cached) {
+      throw new CodeMapQueryError(
+        "code_map_not_indexed",
+        `Code Map has not been indexed for project ${projectId}`,
+      );
+    }
+    const identity = this.#snapshotIdentities.get(projectId);
+    if (input.expectedSnapshotId && identity?.snapshotId !== input.expectedSnapshotId) {
+      throw new CodeMapQueryError("code_map_snapshot_changed", "Requested Code Map snapshot is not the current exact snapshot");
+    }
+    const result = queryCodeMapContinuations(cached.graph, input, identity?.snapshotId);
+    return identity ? { ...result, snapshotId: identity.snapshotId } : result;
   }
 
   overlayTasks(projectId: string, links: readonly CodeMapTaskLink[]): CodeMapTaskOverlay {
@@ -578,6 +637,7 @@ export class CodeMapService {
   invalidate(projectId: string): void {
     this.#cache.delete(projectId);
     this.#snapshotStates.delete(projectId);
+    this.#snapshotIdentities.delete(projectId);
     this.#sourceManifestFingerprints.delete(projectId);
     this.#hydrationDiagnostics.delete(projectId);
     this.#hydrationAttempted.delete(projectId);
@@ -612,11 +672,23 @@ export class CodeMapService {
         projectId,
         rootIdentity: persistence.sourceState.rootIdentity(rootPath),
         providerConfigFingerprint: persistence.providerConfigFingerprint,
+        ...computeCodeMapSnapshotIdentity({
+          projectId,
+          rootIdentity: persistence.sourceState.rootIdentity(rootPath),
+          providerConfigFingerprint: persistence.providerConfigFingerprint,
+          sourceManifestFingerprint,
+          graph,
+        }),
         ...(sourceManifestFingerprint ? { sourceManifestFingerprint } : {}),
         persistedAt: persistence.now?.() ?? new Date().toISOString(),
         graph,
       };
       persistence.store.save(projectId, envelope);
+      this.#snapshotIdentities.set(projectId, {
+        graphDigest: envelope.graphDigest!,
+        snapshotId: envelope.snapshotId!,
+        ...(envelope.providerRunFingerprint ? { providerRunFingerprint: envelope.providerRunFingerprint } : {}),
+      });
     } catch {
       // Persistence is a restart optimization. A successful fresh index remains usable in memory.
     }
@@ -739,6 +811,27 @@ export class CodeMapService {
       return;
     }
 
+    // Older envelopes hydrate without an exact pin; partial or tampered new
+    // identity fields fail closed instead of being treated as legacy snapshots.
+    if (envelope.graphDigest !== undefined || envelope.snapshotId !== undefined
+      || envelope.providerRunFingerprint !== undefined) {
+      try {
+        const identity = computeCodeMapSnapshotIdentity({
+          projectId, rootIdentity,
+          providerConfigFingerprint: persistence.providerConfigFingerprint,
+          sourceManifestFingerprint: envelope.sourceManifestFingerprint,
+          graph,
+        });
+        if (envelope.graphDigest !== identity.graphDigest || envelope.snapshotId !== identity.snapshotId
+          || envelope.providerRunFingerprint !== identity.providerRunFingerprint) {
+          throw new Error("Persisted identity does not match the graph or provider runs");
+        }
+        this.#snapshotIdentities.set(projectId, identity);
+      } catch {
+        this.#hydrationDiagnostics.set(projectId, { hydrationRejectReason: "identity_invalid" });
+        return;
+      }
+    }
     const snapshot: CodeMapSnapshot = {
       graph,
       projection: projectCodeArchitecture(graph),

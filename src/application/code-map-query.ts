@@ -15,6 +15,7 @@ export const CODE_MAP_QUERY_OPERATIONS = [
   "hierarchy",
   "relations",
   "neighborhood",
+  "call_trace",
 ] as const;
 export type CodeMapQueryOperation = (typeof CODE_MAP_QUERY_OPERATIONS)[number];
 
@@ -53,6 +54,8 @@ export type CodeMapQueryErrorCode =
   | "code_map_not_indexed"
   | "code_node_not_found"
   | "code_node_ambiguous"
+  | "code_map_subsystem_snapshot_stale"
+  | "code_map_snapshot_changed"
   | "code_map_query_invalid";
 
 export class CodeMapQueryError extends Error {
@@ -67,6 +70,8 @@ export class CodeMapQueryError extends Error {
 
 export interface CodeMapQueryInput {
   operation: CodeMapQueryOperation;
+  /** Optional exact snapshot pin. Service rejects stale/missing identity before querying. */
+  expectedSnapshotId?: string;
   query?: string;
   path?: string;
   kinds?: readonly CodeNodeKind[];
@@ -85,6 +90,7 @@ export interface CodeMapQueryInput {
 
 export interface CodeMapQueryEnvelope {
   projectId: string;
+  snapshotId?: string;
   indexedAt: string;
   /** Provider that produced the semantic snapshot. Per-fact provenance is added separately from this query contract. */
   providerId: string;
@@ -135,6 +141,18 @@ export type CodeMapQueryResult =
       depth: number;
       nodes: readonly CodeNode[];
       relations: readonly CodeRelation[];
+    })
+  | (CodeMapQueryEnvelope & {
+      operation: "call_trace";
+      seedNodeId: string;
+      direction: CodeMapQueryDirection;
+      depth: number;
+      projectLocalOnly: true;
+      nodes: readonly CodeNode[];
+      relations: readonly CodeRelation[];
+      externalFilteredNodeCount: number;
+      externalFilteredRelationCount: number;
+      reasons: readonly ("node_cap" | "relation_cap")[];
     });
 
 function normalizeLimit(value: number | undefined): number {
@@ -327,6 +345,13 @@ function directionAllows(
 
 function otherNodeId(relation: CodeRelation, nodeId: string): string {
   return relation.from === nodeId ? relation.to : relation.from;
+}
+
+function isProjectLocalTraceNode(node: CodeNode): boolean {
+  const path = node.location?.path.replaceAll("\\", "/");
+  if (!path || path.startsWith("/") || /^[A-Za-z]:\//.test(path)) return false;
+  if (path.split("/").some((part) => part === "..")) return false;
+  return !node.canonicalIdentity.startsWith("scip-external:");
 }
 
 function isExternalDependencyNeighbor(
@@ -572,6 +597,98 @@ export function queryCodeGraph(
         nodes: orderedNodeIds.map((nodeId) => nodeById.get(nodeId)!).filter(Boolean),
         relations: [...selectedRelations.values()],
         truncated,
+      };
+    }
+    case "call_trace": {
+      const seed = requireNodeById(graph, input.nodeId);
+      if (!isProjectLocalTraceNode(seed)) {
+        throw new CodeMapQueryError(
+          "code_map_query_invalid",
+          "call_trace seed must be a project-local node with a project-relative source location",
+        );
+      }
+      if (
+        input.query !== undefined
+        || input.path !== undefined
+        || input.kinds !== undefined
+        || input.language !== undefined
+        || input.canonicalIdentity !== undefined
+        || input.semantic !== undefined
+        || input.relationKinds !== undefined
+        || input.nodeIds !== undefined
+        || input.includeExternalDependencies !== undefined
+      ) {
+        throw new CodeMapQueryError(
+          "code_map_query_invalid",
+          "call_trace accepts only nodeId, direction, depth, and limit traversal controls",
+        );
+      }
+      const requestedDirection = input.direction === undefined ? "both" : input.direction;
+      if (!(CODE_MAP_QUERY_DIRECTIONS as readonly string[]).includes(requestedDirection)) {
+        throw new CodeMapQueryError("code_map_query_invalid", `Invalid call_trace direction: ${requestedDirection}`);
+      }
+      const direction = requestedDirection as CodeMapQueryDirection;
+      const depth = normalizeDepth(input.depth);
+      const visited = new Set([seed.id]);
+      const orderedNodeIds = [seed.id];
+      const selectedRelations = new Map<string, CodeRelation>();
+      const filteredNodeIds = new Set<string>();
+      const filteredRelationIds = new Set<string>();
+      const reasons: Array<"node_cap" | "relation_cap"> = [];
+      const queue: Array<{ nodeId: string; depth: number }> = [{ nodeId: seed.id, depth: 0 }];
+
+      traversal: while (queue.length > 0) {
+        const current = queue.shift()!;
+        if (current.depth >= depth) continue;
+        const adjacent = graph.relations
+          .filter((relation) => relation.kind === "calls")
+          .filter((relation) => relation.from === current.nodeId || relation.to === current.nodeId)
+          .filter((relation) => directionAllows(relation, current.nodeId, direction))
+          .sort((left, right) => adjacentNodeSort(current.nodeId, nodeById, left, right));
+
+        for (const relation of adjacent) {
+          const nextId = otherNodeId(relation, current.nodeId);
+          const next = nodeById.get(nextId);
+          if (!next || !isProjectLocalTraceNode(next)) {
+            filteredRelationIds.add(relation.id);
+            if (next) filteredNodeIds.add(next.id);
+            continue;
+          }
+
+          if (!selectedRelations.has(relation.id)) {
+            const wouldAddNode = !visited.has(nextId);
+            const nodeCapped = wouldAddNode && orderedNodeIds.length >= limit;
+            const relationCapped = selectedRelations.size >= limit;
+            if (nodeCapped || relationCapped) {
+              if (nodeCapped) reasons.push("node_cap");
+              if (relationCapped) reasons.push("relation_cap");
+              break traversal;
+            }
+            selectedRelations.set(relation.id, relation);
+          }
+
+          if (visited.has(nextId)) continue;
+          visited.add(nextId);
+          orderedNodeIds.push(nextId);
+          if (current.depth + 1 < depth) {
+            queue.push({ nodeId: nextId, depth: current.depth + 1 });
+          }
+        }
+      }
+
+      return {
+        ...envelope,
+        operation: "call_trace",
+        seedNodeId: seed.id,
+        direction,
+        depth,
+        projectLocalOnly: true,
+        nodes: orderedNodeIds.map((nodeId) => nodeById.get(nodeId)!).filter(Boolean),
+        relations: [...selectedRelations.values()],
+        externalFilteredNodeCount: filteredNodeIds.size,
+        externalFilteredRelationCount: filteredRelationIds.size,
+        reasons,
+        truncated: reasons.length > 0,
       };
     }
   }

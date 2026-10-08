@@ -65,6 +65,15 @@ import {
   CodeMapQueryError,
   type CodeMapQueryInput,
 } from "../application/code-map-query.js";
+import {
+  CODE_MAP_CONTINUATION_MAX_LIMIT,
+  type CodeMapContinuationQueryInput,
+} from "../application/code-map-continuation.js";
+import {
+  CODE_SOURCE_SUBSYSTEM_QUERY_OPERATIONS,
+  type CodeSourceSubsystemQueryInput,
+} from "../application/code-map-subsystem-read.js";
+import { CODE_SOURCE_SUBSYSTEM_RELATION_KINDS } from "../application/code-map-subsystems.js";
 
 
 const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
@@ -782,12 +791,13 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map",
-    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references, and bounded neighborhoods without returning the full project graph. Default neighborhood navigation hides broad depends_on edges to SCIP external symbols; includeExternalDependencies=true or explicit relationKinds including depends_on restores those raw edges. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
+    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references, bounded neighborhoods, and project-local raw-calls-only call_trace traversal without returning the full project graph. Default neighborhood navigation hides broad depends_on edges to SCIP external symbols; includeExternalDependencies=true or explicit relationKinds including depends_on restores those raw edges. call_trace accepts only nodeId/direction/depth/limit traversal controls and excludes external or missing-location nodes without treating that scope filter as truncation. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         projectId: { type: "string", minLength: 1 },
+        expectedSnapshotId: { type: "string", minLength: 1 },
         operation: { type: "string", enum: [...CODE_MAP_QUERY_OPERATIONS] },
         query: { type: "string" },
         path: { type: "string" },
@@ -807,6 +817,23 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_query_code_map_continuations",
+    description: "Navigate a source-registration raw-owner gap without inventing a call edge. Preserves registration-handler→wrapper and enclosing-owner→downstream as separate raw calls facts; the handoff is explicitly navigation-only. Offset pages require both expectedSourceIndexedAt and expectedSnapshotId from the first page.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        nodeId: { type: "string", minLength: 1 },
+        offset: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: CODE_MAP_CONTINUATION_MAX_LIMIT },
+        expectedSnapshotId: { type: "string", minLength: 1 },
+        expectedSourceIndexedAt: { type: "string", minLength: 1 },
+      },
+      required: ["projectId", "nodeId"],
+    },
+  },
+  {
     name: "questboard_get_code_map_subsystems",
     description: "Read the bounded evidence-backed Source subsystems / Calls view without returning the full raw graph. Subsystems and relations use a separate deterministic code-subsystem:* derived namespace; notable navigation always terminates at canonical raw code:node:* IDs. Calls are primary structural evidence, actual raw instantiates/implements are auxiliary, and broad depends_on/external/name/path inference is excluded. Raw relation ownership is preserved.",
     inputSchema: {
@@ -816,6 +843,27 @@ export const QUESTBOARD_AGENT_TOOLS = [
         projectId: { type: "string", minLength: 1 },
       },
       required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_query_code_map_subsystems",
+    description: "Page and filter the full evidence-backed source-subsystem candidate universe without changing the bounded Phase 7 GET surface. list_subsystems filters by case-sensitive pathPrefix; list_relations filters by case-sensitive fromPathPrefix/toPathPrefix and raw structural relationKinds. Offset pages require both expectedSourceIndexedAt and expectedSnapshotId from the first page; unknown or changed exact identity fails closed.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        operation: { type: "string", enum: [...CODE_SOURCE_SUBSYSTEM_QUERY_OPERATIONS] },
+        pathPrefix: { type: "string" },
+        fromPathPrefix: { type: "string" },
+        toPathPrefix: { type: "string" },
+        relationKinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_SOURCE_SUBSYSTEM_RELATION_KINDS] } },
+        offset: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 24 },
+        expectedSourceIndexedAt: { type: "string", minLength: 1 },
+        expectedSnapshotId: { type: "string", minLength: 1 },
+      },
+      required: ["projectId", "operation"],
     },
   },
   {
@@ -1444,10 +1492,24 @@ export function executeQuestBoardAgentTool(
           codeMapQueryInput(args),
         ),
       };
+    case "questboard_query_code_map_continuations":
+      return {
+        query: requireCodeMapService(context).queryContinuations(
+          requireString(args, "projectId"),
+          codeMapContinuationQueryInput(args),
+        ),
+      };
     case "questboard_get_code_map_subsystems":
       return {
         subsystems: requireCodeMapService(context).sourceSubsystems(
           requireString(args, "projectId"),
+        ),
+      };
+    case "questboard_query_code_map_subsystems":
+      return {
+        query: requireCodeMapService(context).querySourceSubsystems(
+          requireString(args, "projectId"),
+          codeMapSubsystemQueryInput(args),
         ),
       };
     case "questboard_get_code_map_status":
@@ -1745,6 +1807,7 @@ async function codeMapAgentStatus(
   const cached = codeMap?.getCached(projectId);
   const snapshotState = codeMap?.snapshotLifecycleState(projectId);
   const hydrationDiagnostic = codeMap?.hydrationDiagnostic(projectId);
+  const snapshotIdentity = codeMap?.snapshotIdentity(projectId);
   const providerCapabilities = codeMap
     ? await codeMap.providerCapabilitiesWithPreflight(projectId, project.rootPath)
     : undefined;
@@ -1775,6 +1838,7 @@ async function codeMapAgentStatus(
         }
       : {}),
     ...(snapshotState ?? {}),
+    ...(snapshotIdentity ?? {}),
     ...(hydrationDiagnostic ?? {}),
     ...(providerCapabilities ? codeMapProviderStatusSummary(providerCapabilities) : {}),
     recommendedNextAction,
@@ -1871,6 +1935,7 @@ function codeMapQueryInput(args: Record<string, unknown>): CodeMapQueryInput {
   const nodeIds = "nodeIds" in args ? requireStringArray(args, "nodeIds") : undefined;
   return {
     operation: requireEnum(args, "operation", CODE_MAP_QUERY_OPERATIONS),
+    ...optionalStringProperty(args, "expectedSnapshotId"),
     ...optionalStringProperty(args, "query"),
     ...optionalStringProperty(args, "path"),
     ...(kinds ? { kinds } : {}),
@@ -1884,6 +1949,35 @@ function codeMapQueryInput(args: Record<string, unknown>): CodeMapQueryInput {
     ...(nodeIds ? { nodeIds } : {}),
     ...optionalPositiveIntegerProperty(args, "depth"),
     ...optionalPositiveIntegerProperty(args, "limit"),
+  };
+}
+
+function codeMapContinuationQueryInput(args: Record<string, unknown>): CodeMapContinuationQueryInput {
+  return {
+    nodeId: requireString(args, "nodeId"),
+    ...optionalFiniteNumberProperty(args, "offset"),
+    ...optionalPositiveIntegerProperty(args, "limit"),
+    ...optionalStringProperty(args, "expectedSnapshotId"),
+    ...optionalStringProperty(args, "expectedSourceIndexedAt"),
+  };
+}
+
+function codeMapSubsystemQueryInput(args: Record<string, unknown>): CodeSourceSubsystemQueryInput {
+  const relationKinds = optionalEnumArray(
+    args,
+    "relationKinds",
+    CODE_SOURCE_SUBSYSTEM_RELATION_KINDS,
+  );
+  return {
+    operation: requireEnum(args, "operation", CODE_SOURCE_SUBSYSTEM_QUERY_OPERATIONS),
+    ...optionalStringProperty(args, "pathPrefix"),
+    ...optionalStringProperty(args, "fromPathPrefix"),
+    ...optionalStringProperty(args, "toPathPrefix"),
+    ...(relationKinds ? { relationKinds } : {}),
+    ...optionalFiniteNumberProperty(args, "offset"),
+    ...optionalPositiveIntegerProperty(args, "limit"),
+    ...optionalStringProperty(args, "expectedSourceIndexedAt"),
+    ...optionalStringProperty(args, "expectedSnapshotId"),
   };
 }
 

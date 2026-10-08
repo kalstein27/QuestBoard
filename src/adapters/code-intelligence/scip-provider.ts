@@ -99,6 +99,7 @@ export interface ScipGraphLoadInput {
   request: CodeIndexRequest;
   indexedAt: string;
   providerId: string;
+  indexArtifactSha256?: string | undefined;
 }
 
 export interface ScipGraphLoader {
@@ -188,7 +189,13 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
     index,
     sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
     providerId: input.providerId,
+    indexArtifactSha256: input.indexArtifactSha256,
   });
+}
+
+/** Only the actual provider output bytes qualify as a native artifact digest. */
+export function scipArtifactSha256(indexPath: string): string | undefined {
+  return existsSync(indexPath) ? createHash("sha256").update(readFileSync(indexPath)).digest("hex") : undefined;
 }
 
 export class WorkerScipGraphLoader implements ScipGraphLoader {
@@ -306,8 +313,9 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
       { cwd: request.rootPath },
     );
     const indexedAt = this.#now();
+    const indexArtifactSha256 = scipArtifactSha256(indexPath);
     if (this.#graphLoader) {
-      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId });
+      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256 });
     }
     const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
@@ -317,6 +325,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
       index,
       sourceTextByPath: readIndexedSourceText(request.rootPath, index),
       providerId: this.providerId,
+      indexArtifactSha256,
     });
   }
 }

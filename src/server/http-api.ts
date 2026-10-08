@@ -198,6 +198,28 @@ async function handleRequest(
     return;
   }
 
+  const codeMapSubsystemQueryMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/subsystems\/query$/);
+  if (codeMapSubsystemQueryMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapSubsystemQueryMatch[1]);
+    service.getProject(projectId);
+    if (!options.codeMapService) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_query_unavailable",
+          message: "Code Map subsystem queries are not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+    const body = await readJsonObject(request);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      { service, codeMapService: options.codeMapService },
+      "questboard_query_code_map_subsystems",
+      { ...body, projectId },
+    ));
+    return;
+  }
+
   const codeMapRefreshMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/refresh$/);
   if (codeMapRefreshMatch && method === "GET") {
     const projectId = decodePathPart(codeMapRefreshMatch[1]);
@@ -380,6 +402,28 @@ async function handleRequest(
       },
       "questboard_get_code_map_provider_capabilities",
       { projectId },
+    ));
+    return;
+  }
+
+  const codeMapContinuationMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/continuations\/query$/);
+  if (codeMapContinuationMatch && method === "POST") {
+    const projectId = decodePathPart(codeMapContinuationMatch[1]);
+    service.getProject(projectId);
+    if (!options.codeMapService) {
+      sendJson(response, 503, {
+        error: {
+          code: "code_map_query_unavailable",
+          message: "Code Map continuation queries are not available in this QuestBoard runtime",
+        },
+      });
+      return;
+    }
+    const body = await readJsonObject(request);
+    sendJson(response, 200, executeQuestBoardAgentTool(
+      { service, codeMapService: options.codeMapService },
+      "questboard_query_code_map_continuations",
+      { ...body, projectId },
     ));
     return;
   }
@@ -614,6 +658,7 @@ async function handleRequest(
         ...(availability?.message ? { message: availability.message } : {}),
         ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
         ...(snapshotState ?? {}),
+        ...(codeMapService?.snapshotIdentity(projectId) ?? {}),
         ...(hydrationDiagnostic ?? {}),
         ...(codeMapService?.providerCapabilities(projectId)
           ? { providerCapabilities: codeMapService.providerCapabilities(projectId) }
@@ -1344,6 +1389,8 @@ function sendNoContent(response: ServerResponse): void {
 function sendError(response: ServerResponse, error: unknown): void {
   if (error instanceof CodeMapQueryError) {
     const statusCode = error.code === "code_map_not_indexed"
+      || error.code === "code_map_subsystem_snapshot_stale"
+      || error.code === "code_map_snapshot_changed"
       ? 409
       : error.code === "code_node_not_found"
         ? 404

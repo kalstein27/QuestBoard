@@ -360,6 +360,83 @@ test("neighborhood hides external SCIP dependencies by default but explicit quer
   assert.equal(graph.relations.length, originalRelationCount, "navigation filtering must never alter provider facts");
 });
 
+test("call_trace is deterministic, project-local-only, cycle preserving, and independently cap bounded", () => {
+  const graph = fixtureGraph();
+  graph.nodes = [
+    { id: "trace-a", kind: "function", name: "a", canonicalIdentity: "scip:a().", location: { path: "src/a.ts", startLine: 1 } },
+    { id: "trace-b", kind: "function", name: "b", canonicalIdentity: "scip:b().", location: { path: "src/b.ts", startLine: 1 } },
+    { id: "trace-c", kind: "function", name: "c", canonicalIdentity: "scip:c().", location: { path: "src/c.ts", startLine: 1 } },
+    { id: "trace-d", kind: "function", name: "d", canonicalIdentity: "scip:d().", location: { path: "src/d.ts", startLine: 1 } },
+    { id: "trace-external", kind: "function", name: "Promise", canonicalIdentity: "scip-external:Promise#then()." },
+    { id: "trace-no-location", kind: "function", name: "generated", canonicalIdentity: "scip:generated()." },
+  ];
+  graph.relations = [
+    { id: "trace-a-b", from: "trace-a", to: "trace-b", kind: "calls", confidence: 1 },
+    { id: "trace-a-d", from: "trace-a", to: "trace-d", kind: "calls", confidence: 1 },
+    { id: "trace-b-c", from: "trace-b", to: "trace-c", kind: "calls", confidence: 1 },
+    { id: "trace-c-a", from: "trace-c", to: "trace-a", kind: "calls", confidence: 1 },
+    { id: "trace-a-external", from: "trace-a", to: "trace-external", kind: "calls", confidence: 1 },
+    { id: "trace-a-no-location", from: "trace-a", to: "trace-no-location", kind: "calls", confidence: 1 },
+  ];
+
+  const input = {
+    operation: "call_trace" as const,
+    nodeId: "trace-a",
+    direction: "outgoing" as const,
+    depth: 3,
+    limit: 100,
+  };
+  const first = queryCodeGraph(graph, "query-test-provider", input);
+  const second = queryCodeGraph(
+    { ...graph, nodes: [...graph.nodes].reverse(), relations: [...graph.relations].reverse() },
+    "query-test-provider",
+    input,
+  );
+  assert.equal(first.operation, "call_trace");
+  assert.equal(second.operation, "call_trace");
+  assert.deepEqual(first.nodes.map((node) => node.id), ["trace-a", "trace-b", "trace-d", "trace-c"]);
+  assert.deepEqual(first.relations.map((relation) => relation.id), [
+    "trace-a-b", "trace-a-d", "trace-b-c", "trace-c-a",
+  ]);
+  assert.deepEqual(second, first);
+  assert.equal(first.externalFilteredNodeCount, 2);
+  assert.equal(first.externalFilteredRelationCount, 2);
+  assert.equal(first.truncated, false);
+  assert.deepEqual(first.reasons, []);
+
+  const nodeCapped = queryCodeGraph(graph, "query-test-provider", {
+    operation: "call_trace", nodeId: "trace-a", direction: "outgoing", depth: 2, limit: 2,
+  });
+  assert.equal(nodeCapped.operation, "call_trace");
+  assert.deepEqual(nodeCapped.nodes.map((node) => node.id), ["trace-a", "trace-b"]);
+  assert.deepEqual(nodeCapped.relations.map((relation) => relation.id), ["trace-a-b"]);
+  assert.deepEqual(nodeCapped.reasons, ["node_cap"]);
+
+  const relationCapGraph: CodeGraphSnapshot = {
+    ...graph,
+    nodes: graph.nodes.filter((node) => ["trace-a", "trace-b", "trace-c"].includes(node.id)),
+    relations: [
+      { id: "trace-a-b", from: "trace-a", to: "trace-b", kind: "calls", confidence: 1 },
+      { id: "trace-a-c", from: "trace-a", to: "trace-c", kind: "calls", confidence: 1 },
+      { id: "trace-b-c", from: "trace-b", to: "trace-c", kind: "calls", confidence: 1 },
+      { id: "trace-c-a", from: "trace-c", to: "trace-a", kind: "calls", confidence: 1 },
+    ],
+  };
+  const relationCapped = queryCodeGraph(relationCapGraph, "query-test-provider", {
+    operation: "call_trace", nodeId: "trace-a", direction: "both", depth: 3, limit: 3,
+  });
+  assert.equal(relationCapped.operation, "call_trace");
+  assert.equal(relationCapped.nodes.length, 3);
+  assert.equal(relationCapped.relations.length, 3);
+  assert.deepEqual(relationCapped.reasons, ["relation_cap"]);
+  assert.equal(relationCapped.truncated, true);
+
+  assert.throws(
+    () => queryCodeGraph(graph, "query-test-provider", { operation: "call_trace", nodeId: "trace-external" }),
+    (error: unknown) => error instanceof CodeMapQueryError && error.code === "code_map_query_invalid",
+  );
+});
+
 test("Code Map query limits are hard bounded and ambiguous search stays explicit", () => {
   const graph = fixtureGraph();
   graph.nodes = [
@@ -495,6 +572,19 @@ test("HTTP and MCP share the same bounded Code Map query surface", async () => {
     });
     const mcpPayload = JSON.parse((mcpExplicit.result.content as Array<{ text: string }>)[0]?.text ?? "{}");
     assert.deepEqual(mcpPayload.query, httpExplicit.body.query);
+
+    const traceInput = {
+      operation: "call_trace", nodeId: "method-run", direction: "both", depth: 2, limit: 10,
+    };
+    const httpTrace = await json(queryUrl, { method: "POST", body: JSON.stringify(traceInput) });
+    assert.equal(httpTrace.response.status, 200);
+    const mcpTrace = await mcp(baseUrl, 4, "tools/call", {
+      name: "questboard_query_code_map",
+      arguments: { projectId: project.id, ...traceInput },
+    });
+    const mcpTracePayload = JSON.parse((mcpTrace.result.content as Array<{ text: string }>)[0]?.text ?? "{}");
+    assert.deepEqual(mcpTracePayload.query, httpTrace.body.query);
+    assert.equal(httpTrace.body.query.projectLocalOnly, true);
   } finally {
     await closeServer(server);
     repository.close();
