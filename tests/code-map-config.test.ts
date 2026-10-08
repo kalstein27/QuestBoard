@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   createConfiguredCodeMapRuntime,
@@ -58,11 +59,22 @@ test("Code Map config composes an ordered zero-or-more semantic provider set", (
 });
 
 test("multi-provider semantic wrapper preserves compiler-scope coverage from the child service", async () => {
+  const indexedAt = "2026-10-07T00:00:00.000Z";
+  const nativeArtifactSha256 = "a".repeat(64);
+  const providerRun = {
+    providerId: "scip-typescript",
+    nativeArtifactSha256,
+    indexedAt,
+    fingerprint: createHash("sha256")
+      .update(JSON.stringify(["scip-typescript", nativeArtifactSha256, indexedAt]))
+      .digest("hex"),
+    nativeReferences: [{ canonicalIdentity: "src/service.ts#Service", referenceOccurrenceCount: 2 }],
+  };
   const graph: CodeGraphSnapshot = {
     schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
     projectId: "project",
     rootPath: "/workspace/project",
-    indexedAt: "2026-10-07T00:00:00.000Z",
+    indexedAt,
     nodes: [
       {
         id: "ts-symbol",
@@ -84,6 +96,7 @@ test("multi-provider semantic wrapper preserves compiler-scope coverage from the
       },
     ],
     relations: [],
+    providerRuns: [providerRun, { ...providerRun, providerId: "scip-php" }],
     coverage: {
       degraded: false,
       providers: [{
@@ -122,6 +135,7 @@ test("multi-provider semantic wrapper preserves compiler-scope coverage from the
 
   assert.deepEqual(contribution.coverage, graph.coverage);
   assert.deepEqual(contribution.nodes.map((node) => node.id), ["ts-symbol"]);
+  assert.deepEqual(contribution.providerRuns, [providerRun], "native run SHA, fingerprint and reference counts must survive the provider wrapper");
 });
 
 test("Code Map runtime keeps healthy semantic providers when another configured provider is missing", () => {

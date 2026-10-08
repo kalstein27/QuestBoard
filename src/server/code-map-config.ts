@@ -109,6 +109,7 @@ export function semanticFactsProvider(
           && nodeIds.has(relation.from)
           && nodeIds.has(relation.to),
         );
+        const providerRuns = graph.providerRuns?.filter((run) => run.providerId === providerId);
         return {
           schemaVersion: graph.schemaVersion,
           projectId: graph.projectId,
@@ -116,6 +117,7 @@ export function semanticFactsProvider(
           indexedAt: graph.indexedAt,
           nodes,
           relations,
+          ...(providerRuns?.length ? { providerRuns } : {}),
           ...(graph.coverage ? { coverage: graph.coverage } : {}),
         };
       },
