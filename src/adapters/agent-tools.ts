@@ -495,6 +495,16 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_get_flow_work_group_graph",
+    description: "Read only one Flow Work Group's direct Investigation Nodes, Items, directed outbound Item Links and memberships, without loading the full project graph.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { groupId: { type: "string", minLength: 1 } },
+      required: ["groupId"],
+    },
+  },
+  {
     name: "questboard_create_flow_work_group",
     description: "Create a first-class visual/spatial Flow Work Group. Groups may be nested independently of canonical Task hierarchy.",
     inputSchema: {
@@ -1341,6 +1351,8 @@ export function executeQuestBoardAgentTool(
       return { deleted: true };
     case "questboard_get_investigation_graph":
       return service.getInvestigationGraph(requireString(args, "projectId"));
+    case "questboard_get_flow_work_group_graph":
+      return service.getFlowWorkGroupGraph(requireString(args, "groupId"));
     case "questboard_create_flow_work_group": {
       const inputValue = {
         projectId: requireString(args, "projectId"),
@@ -1764,6 +1776,9 @@ export function describeQuestBoardError(error: unknown): { code: string; message
   if (error instanceof MutationRequestConflictError) return { code: "request_conflict", message: error.message };
   if (error instanceof RevisionConflictError) return { code: "revision_conflict", message: error.message };
   if (error instanceof EntityRevisionConflictError) return { code: "revision_conflict", message: error.message };
+  if (error instanceof Error && "code" in error && error.code === "flow_graph_too_large") {
+    return { code: "flow_graph_too_large", message: error.message };
+  }
   if (error instanceof TypeError) return { code: "bad_request", message: error.message };
   return { code: "internal_error", message: "Internal error" };
 }

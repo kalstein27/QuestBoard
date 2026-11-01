@@ -264,6 +264,23 @@ export interface InvestigationGraphSnapshot {
   positions: BoardNodePosition[];
 }
 
+/** A bounded, direct-members-only projection of the persisted Investigation Graph. */
+export interface FlowWorkGroupGraph {
+  group: FlowWorkGroup;
+  nodes: InvestigationNode[];
+  items: InvestigationItem[];
+  itemLinks: InvestigationItemLink[];
+  memberships: FlowWorkGroupMembership[];
+}
+
+export class FlowWorkGroupGraphTooLargeError extends Error {
+  readonly code = "flow_graph_too_large";
+  constructor() {
+    super("Flow Work Group graph exceeds the 64 KiB response limit; split the group into smaller direct memberships");
+  }
+}
+
+
 type Now = () => string;
 type IdFactory = () => string;
 
@@ -921,6 +938,30 @@ export class QuestBoardService {
     if (!group) throw new EntityNotFoundError("FlowWorkGroup", groupId);
     return group;
   }
+
+  getFlowWorkGroupGraph(groupId: string): FlowWorkGroupGraph {
+    const group = this.getFlowWorkGroup(groupId);
+    const memberships = this.repository.listFlowWorkGroupMemberships(group.projectId)
+      .filter((membership) => membership.groupId === group.id);
+    const nodeIds = new Set(memberships
+      .filter((membership) => membership.entityType === "investigation_node")
+      .map((membership) => membership.entityId));
+    const nodes = this.repository.listInvestigationNodes(group.projectId)
+      .filter((node) => nodeIds.has(node.id));
+    const items = this.repository.listInvestigationItems(group.projectId)
+      .filter((item) => nodeIds.has(item.nodeId));
+    const itemIds = new Set(items.map((item) => item.id));
+    // Preserve outbound edges even when their target node is outside this group.
+    const itemLinks = this.repository.listInvestigationItemLinks(group.projectId)
+      .filter((link) => itemIds.has(link.fromItemId));
+    const graph: FlowWorkGroupGraph = { group, nodes, items, itemLinks, memberships };
+    if (memberships.length > 128 || nodes.length > 128 || items.length > 256 ||
+        itemLinks.length > 256 || Buffer.byteLength(JSON.stringify(graph), "utf8") > 64 * 1024) {
+      throw new FlowWorkGroupGraphTooLargeError();
+    }
+    return graph;
+  }
+
 
   listFlowWorkGroups(projectId: string): FlowWorkGroup[] {
     this.getProject(projectId);

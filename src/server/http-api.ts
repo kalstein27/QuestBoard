@@ -783,6 +783,12 @@ async function handleRequest(
     }
   }
 
+  const flowGroupGraphMatch = pathname.match(/^\/flow-work-groups\/([^/]+)\/graph$/);
+  if (flowGroupGraphMatch && method === "GET") {
+    sendJson(response, 200, service.getFlowWorkGroupGraph(decodePathPart(flowGroupGraphMatch[1])));
+    return;
+  }
+
   const flowGroupMatch = pathname.match(/^\/flow-work-groups\/([^/]+)$/);
   if (flowGroupMatch) {
     const groupId = decodePathPart(flowGroupMatch[1]);
@@ -1480,6 +1486,10 @@ function sendError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof MutationRequestConflictError) {
     sendJson(response, 409, { error: { code: "request_conflict", message: error.message, requestId: error.requestId } });
+    return;
+  }
+  if (error instanceof Error && "code" in error && error.code === "flow_graph_too_large") {
+    sendJson(response, 413, { error: { code: "flow_graph_too_large", message: error.message } });
     return;
   }
   if (error instanceof TypeError || error instanceof URIError) {
