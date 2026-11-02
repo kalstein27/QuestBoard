@@ -95,6 +95,17 @@ export function materializeCodeFileHierarchy(
 
   const inventoryByPath = new Map<string, CodeFileInventoryEntry>();
   const actualInventoryPaths = new Set<string>();
+  // Index semantic languages once. A per-file nodes.find() turns a normal
+  // inventory-only import into O(files^2) even when no semantic nodes exist.
+  // Keep the first matching known language, identical to the old find order.
+  const firstKnownLanguageByPath = new Map<string, string>();
+  for (const node of nodes) {
+    if (!node.location?.path || !node.language) continue;
+    const path = normalizedPath(node.location.path);
+    if (!firstKnownLanguageByPath.has(path)) {
+      firstKnownLanguageByPath.set(path, node.language);
+    }
+  }
   for (const entry of inventory) {
     const path = normalizedPath(entry.path);
     if (!path) continue;
@@ -126,7 +137,7 @@ export function materializeCodeFileHierarchy(
     const id = stableId("node", canonicalIdentity);
     if (existingNodeIds.has(id)) continue;
     const language = entry.language
-      ?? nodes.find((node) => node.location && normalizedPath(node.location.path) === entry.path && node.language)?.language
+      ?? firstKnownLanguageByPath.get(entry.path)
       ?? inferCodeLanguageFromPath(entry.path);
     const fileNode: CodeNode = {
       id,

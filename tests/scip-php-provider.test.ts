@@ -106,6 +106,37 @@ test("SCIP PHP uses the project-local Composer executable, externalizes index.sc
   }
 });
 
+test("SCIP PHP coverage reports all first-party eligible files rather than calling native document count complete", async () => {
+  const root = mkdtempSync(join(tmpdir(), "questboard-scip-php-coverage-"));
+  const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-php-storage-"));
+  try {
+    preparePhpProject(root);
+    writeFileSync(join(root, "src", "not-indexed.php"), "<?php function missing() {}\n");
+    mkdirSync(join(root, "vendor", "package"), { recursive: true });
+    writeFileSync(join(root, "vendor", "package", "dependency.php"), "<?php\n");
+    const runner = new FakeRunner(({ cwd }) => writeFileSync(join(cwd, "index.scip"), "fixture"));
+    const nativeIndex = phpIndex();
+    nativeIndex.documents.push({
+      relativePath: "vendor/package/dependency.php",
+      language: "php",
+      occurrences: [],
+      symbols: [],
+    });
+    const provider = new ScipPhpProvider(runner, { storageRoot, indexReader: new FakeIndexReader(nativeIndex) });
+    const graph = await provider.indexProject({ projectId: "coverage", rootPath: root });
+    const php = graph.coverage?.languages.find((entry) => entry.language === "php");
+    assert.equal(php?.semanticEligibleFileCount, 2,
+      "first-party file inventory includes missing source but excludes installed Composer vendor");
+    assert.equal(php?.semanticIndexedFileCount, 1,
+      "out-of-scope vendor SCIP documents cannot inflate first-party indexing claims");
+    assert.equal(php?.fileCount, 2);
+    assert.equal(runner.calls.length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
 test("SCIP PHP refuses to overwrite a pre-existing project index.scip", async () => {
   const root = mkdtempSync(join(tmpdir(), "questboard-scip-php-existing-"));
   const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-php-storage-"));

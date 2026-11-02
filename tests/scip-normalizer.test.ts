@@ -106,6 +106,31 @@ test("SCIP coverage infers document language from path when the index omits it",
   assert.equal(graph.coverage?.languages.some((entry) => entry.language === "unknown"), false);
 });
 
+test("SCIP protobuf numeric PHP language enum does not corrupt first-party coverage or node language", () => {
+  const phpSymbol = "scip-php composer example/test 1.0.0 src/Example.php/example().";
+  for (const language of ["19", 19]) {
+    const index = parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/Example.php",
+        language,
+        symbols: [{ symbol: phpSymbol, displayName: "example", kind: "Function" }],
+        occurrences: [{ symbol: phpSymbol, symbolRoles: 1, range: [0, 9, 16] }],
+      }],
+    });
+    const graph = normalizeScipGraph({
+      projectId: "php-number-language",
+      rootPath: "/tmp/scip-php",
+      indexedAt: "2026-10-30T00:00:00.000Z",
+      providerId: "scip-php",
+      index,
+    });
+    assert.equal(index.documents[0]?.language, "php");
+    assert.equal(graph.nodes[0]?.language, "php");
+    assert.equal(graph.coverage?.languages[0]?.language, "php");
+    assert.equal(graph.coverage?.languages.some((entry) => entry.language === "19"), false);
+  }
+});
+
 test("SCIP source supplement promotes only syntactic call occurrences to calls", () => {
   const caller = "scip-typescript npm questboard 0.0.0 src/server/http-api.ts/handleRequest().";
   const callee = "scip-typescript npm questboard 0.0.0 src/application/quest-board-service.ts/QuestBoardService#createTask().";

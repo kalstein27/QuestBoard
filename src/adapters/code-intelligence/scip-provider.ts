@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,7 @@ import type {
   CodeIntelligenceProvider,
 } from "../../application/code-intelligence.js";
 import { inferCodeLanguageFromPath } from "../../application/code-map-hierarchy.js";
+import { extractPhpLexicalScopes } from "./php-lexical-scopes.js";
 import { FileSystemCodeFileInventory } from "./file-inventory.js";
 import { normalizeScipGraph, parseScipJsonIndex, type ScipJsonIndex } from "./scip-normalizer.js";
 
@@ -37,7 +38,9 @@ export class ExecFileScipProcessRunner implements ScipProcessRunner {
   readonly #maxBufferBytes: number;
 
   constructor(options: ExecFileScipProcessRunnerOptions = {}) {
-    this.#maxBufferBytes = options.maxBufferBytes ?? 128 * 1024 * 1024;
+    // Only diagnostic stdout/stderr is buffered. The actual SCIP index is a
+    // file, so allowing 128MiB of log output needlessly amplifies memory peaks.
+    this.#maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
   }
 
   async run(executable: string, args: readonly string[], options: ScipProcessRunOptions): Promise<ScipProcessRunResult> {
@@ -100,6 +103,8 @@ export interface ScipGraphLoadInput {
   indexedAt: string;
   providerId: string;
   indexArtifactSha256?: string | undefined;
+  /** For scip-php: first-party PHP file paths, not dependency/vendor documents. */
+  eligiblePhpPaths?: readonly string[];
 }
 
 export interface ScipGraphLoader {
@@ -182,12 +187,20 @@ export class BundledScipIndexReader implements ScipIndexReader {
 
 export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot> {
   const index = await new BundledScipIndexReader().read(input.indexPath);
+  const phpLexicalScopes = input.providerId === "scip-php"
+    ? await extractPhpLexicalScopes(
+        input.request.rootPath,
+        index.documents.map((document) => document.relativePath),
+      )
+    : undefined;
   return normalizeScipGraph({
     projectId: input.request.projectId,
     rootPath: input.request.rootPath,
     indexedAt: input.indexedAt,
     index,
     sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
+    ...(input.eligiblePhpPaths ? { phpEligibleFilePaths: input.eligiblePhpPaths } : {}),
+    ...(phpLexicalScopes ? { phpLexicalScopes } : {}),
     providerId: input.providerId,
     indexArtifactSha256: input.indexArtifactSha256,
   });
@@ -195,7 +208,22 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
 
 /** Only the actual provider output bytes qualify as a native artifact digest. */
 export function scipArtifactSha256(indexPath: string): string | undefined {
-  return existsSync(indexPath) ? createHash("sha256").update(readFileSync(indexPath)).digest("hex") : undefined;
+  if (!existsSync(indexPath)) return undefined;
+  // Streaming the hash in fixed chunks avoids a second entire SCIP binary
+  // buffer at the exact moment the indexer/decoder may already use peak RSS.
+  const digest = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(128 * 1024);
+  const descriptor = openSync(indexPath, "r");
+  try {
+    let bytesRead: number;
+    do {
+      bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) digest.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+    return digest.digest("hex");
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export class WorkerScipGraphLoader implements ScipGraphLoader {

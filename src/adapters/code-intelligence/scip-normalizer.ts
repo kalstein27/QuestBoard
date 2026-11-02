@@ -21,6 +21,8 @@ const SCIP_ROLE_READ = 8;
 const MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT = 100;
 const MAX_REGISTRATION_SOURCE_LENGTH = 3_000_000;
 const MAX_REGISTRATION_CALL_SITES_PER_DOCUMENT = 8_000;
+const MAX_REGISTRATION_INLINE_CALLBACKS_PER_DOCUMENT = 512;
+const MAX_REGISTRATION_CALLBACK_DEPTH = 2;
 const SOURCE_REGISTRATION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 interface ScipRange {
@@ -28,6 +30,14 @@ interface ScipRange {
   startCharacter: number;
   endLine: number;
   endCharacter: number;
+}
+
+/** PHP Parser 5 lexical functions/methods, with anonymous nested scopes acting as ownership barriers. */
+export interface ScipPhpLexicalScope {
+  type: "function" | "method" | "anonymous";
+  range: readonly [number, number, number, number];
+  name?: string;
+  nameRange?: readonly [number, number, number, number];
 }
 
 interface ScipOccurrence {
@@ -73,6 +83,10 @@ export interface NormalizeScipGraphInput {
   indexedAt: string;
   index: ScipJsonIndex;
   sourceTextByPath?: ReadonlyMap<string, string>;
+  /** Optional first-party PHP file inventory. Installed dependency SCIP docs remain facts, not indexed first-party coverage. */
+  phpEligibleFilePaths?: readonly string[];
+  /** Verified PHP AST extents; SCIP PHP currently emits no enclosingRange. */
+  phpLexicalScopes?: ReadonlyMap<string, readonly ScipPhpLexicalScope[]>;
   providerId?: string;
   fidelity?: CodeFidelityLevel;
   /** SHA-256 of the actual index.scip bytes; do not substitute a source hash. */
@@ -117,6 +131,13 @@ function parsePackedRange(value: unknown): ScipRange | undefined {
   }
   if (fourth === undefined) return undefined;
   return { startLine, startCharacter, endLine: third, endCharacter: fourth };
+}
+
+function tupleRange(tuple: readonly [number, number, number, number]): ScipRange {
+  return {
+    startLine: tuple[0], startCharacter: tuple[1],
+    endLine: tuple[2], endCharacter: tuple[3],
+  };
 }
 
 function parseTypedRange(
@@ -209,7 +230,18 @@ function parseDocument(value: unknown): ScipDocument | undefined {
   if (!object) return undefined;
   const relativePath = stringValue(field(object, "relativePath", "relative_path"));
   if (!relativePath) return undefined;
-  const language = stringValue(object.language);
+  // The generated SCIP protobuf decoder encodes Language enum values as
+  // numeric strings ("19" = PHP). Treating that as a programming-language
+  // name makes semantic PHP documents invisible to coverage and file filters.
+  // Prefer the verified PHP enum; other numeric enum values conservatively
+  // fall back to their source filename extension, never a fake "19" language.
+  const rawLanguage = object.language;
+  const textualLanguage = stringValue(rawLanguage);
+  const language = (rawLanguage === 19 || textualLanguage === "19")
+    ? "php"
+    : (typeof rawLanguage === "number" || /^\d+$/.test(textualLanguage ?? ""))
+      ? inferCodeLanguageFromPath(relativePath)
+      : textualLanguage;
   return {
     relativePath,
     ...(language ? { language } : {}),
@@ -381,6 +413,7 @@ interface RegistrationCallSite {
 interface SourceRegistrations {
   nodes: CodeNode[];
   callSites: Map<string, RegistrationCallSite>;
+  containments: Array<{ from: string; to: string; location: CodeSourceLocation }>;
 }
 
 function sourceRegistrationNodes(
@@ -391,10 +424,11 @@ function sourceRegistrationNodes(
 ): SourceRegistrations {
   const nodes: CodeNode[] = [];
   const callSites = new Map<string, RegistrationCallSite>();
+  const containments: SourceRegistrations["containments"] = [];
   // Only JavaScript-family files have TypeScript-compatible syntax trees.
   // Large inputs remain searchable through semantic SCIP without an unbounded parse.
   if (!/\.(?:[cm]?[jt]s|[jt]sx)$/i.test(document.relativePath)
-    || source.length > MAX_REGISTRATION_SOURCE_LENGTH) return { nodes, callSites };
+    || source.length > MAX_REGISTRATION_SOURCE_LENGTH) return { nodes, callSites, containments };
 
   const semanticImplementationNames = new Set(
     semanticNodes
@@ -411,7 +445,12 @@ function sourceRegistrationNodes(
     true,
     /\.[jt]sx$/i.test(document.relativePath) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
-  const handlers: Array<{ ownerId: string; callback: ts.ArrowFunction | ts.FunctionExpression }> = [];
+  const handlers: Array<{
+    ownerId: string;
+    callback: ts.ArrowFunction | ts.FunctionExpression;
+    name: string;
+    depth: number;
+  }> = [];
   const visitRegistration = (syntaxNode: ts.Node): void => {
     if (nodes.length >= MAX_SOURCE_REGISTRATIONS_PER_DOCUMENT) return;
     if (ts.isCallExpression(syntaxNode)
@@ -447,7 +486,7 @@ function sourceRegistrationNodes(
         });
         const callback = syntaxNode.arguments[2];
         if (callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
-          handlers.push({ ownerId, callback });
+          handlers.push({ ownerId, callback, name, depth: 0 });
         }
       }
     }
@@ -455,13 +494,49 @@ function sourceRegistrationNodes(
   };
   visitRegistration(sourceFile);
 
-  // Walk each verified callback body without crossing another function or
-  // class boundary. Nested callbacks have their own lexical owner and must
-  // never create a fictitious edge from the enclosing registration handler.
-  for (const { ownerId, callback } of handlers) {
+  // Walk verified callback bodies without crossing lexical function boundaries.
+  // Inline callback arguments have their own AST owner. A parent -> child
+  // "contains" edge is source nesting, NEVER a transitive call assertion.
+  let callbackCount = 0;
+  for (let index = 0; index < handlers.length; index += 1) {
+    const { ownerId, callback, name, depth } = handlers[index]!;
     const visitDirectCalls = (syntaxNode: ts.Node): void => {
       if (callSites.size >= MAX_REGISTRATION_CALL_SITES_PER_DOCUMENT) return;
       if (ts.isFunctionLike(syntaxNode) || ts.isClassDeclaration(syntaxNode) || ts.isClassExpression(syntaxNode)) return;
+      if (ts.isCallExpression(syntaxNode)
+        && depth < MAX_REGISTRATION_CALLBACK_DEPTH
+        && callbackCount < MAX_REGISTRATION_INLINE_CALLBACKS_PER_DOCUMENT) {
+        for (const argument of syntaxNode.arguments) {
+          if (!ts.isArrowFunction(argument) && !ts.isFunctionExpression(argument)) continue;
+          if (callbackCount >= MAX_REGISTRATION_INLINE_CALLBACKS_PER_DOCUMENT) break;
+          const start = sourcePositionAtOffset(lineStarts, argument.getStart(sourceFile));
+          const end = sourcePositionAtOffset(lineStarts, argument.getEnd());
+          const canonicalIdentity =
+            `source-registration-callback:${document.relativePath}:local ${name}:${start.line}:${start.column}`;
+          const nestedOwnerId = stableId("node", canonicalIdentity);
+          const location: CodeSourceLocation = {
+            path: document.relativePath,
+            startLine: start.line,
+            startColumn: start.column,
+            endLine: end.line,
+            endColumn: end.column,
+          };
+          nodes.push({
+            id: nestedOwnerId,
+            kind: "function",
+            name: `${name} inline callback`,
+            canonicalIdentity,
+            ...(document.language ? { language: document.language } : {}),
+            location,
+            lexicalExtent: location,
+            signature: "inline callback argument (lexical scope only)",
+            provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }],
+          });
+          containments.push({ from: ownerId, to: nestedOwnerId, location });
+          handlers.push({ ownerId: nestedOwnerId, callback: argument, name, depth: depth + 1 });
+          callbackCount += 1;
+        }
+      }
       if (ts.isCallExpression(syntaxNode) || ts.isNewExpression(syntaxNode)) {
         const callee = syntaxNode.expression;
         const token = ts.isIdentifier(callee) ? callee
@@ -475,7 +550,7 @@ function sourceRegistrationNodes(
     };
     visitDirectCalls(callback.body);
   }
-  return { nodes, callSites };
+  return { nodes, callSites, containments };
 }
 
 function isCallOccurrence(source: string, lineStarts: readonly number[], range: ScipRange): boolean {
@@ -581,6 +656,19 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const language = normalizeCodeLanguage(document.language ?? inferCodeLanguageFromPath(document.relativePath));
     semanticFileCountByLanguage.set(language, (semanticFileCountByLanguage.get(language) ?? 0) + 1);
   }
+  const eligiblePhpPaths = input.phpEligibleFilePaths
+    ? new Set(input.phpEligibleFilePaths.map((path) => path.replaceAll("\\", "/").replace(/^\.\//, "")))
+    : undefined;
+  const nativeIndexedFirstPartyPhpPaths = eligiblePhpPaths
+    ? new Set(input.index.documents
+      .filter((document) => normalizeCodeLanguage(
+        document.language ?? inferCodeLanguageFromPath(document.relativePath),
+      ) === "php" && eligiblePhpPaths.has(document.relativePath.replaceAll("\\", "/").replace(/^\.\//, "")))
+      .map((document) => document.relativePath.replaceAll("\\", "/").replace(/^\.\//, "")))
+    : undefined;
+  if (eligiblePhpPaths && !semanticFileCountByLanguage.has("php")) {
+    semanticFileCountByLanguage.set("php", 0);
+  }
 
   const definitions: DefinitionRecord[] = [];
   const nodeBySymbol = new Map<string, CodeNode>();
@@ -643,6 +731,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
 
   const registrationNodes: CodeNode[] = [];
   const registrationCallsByDocument = new Map<ScipDocument, Map<string, RegistrationCallSite>>();
+  const registrationContainments: SourceRegistrations["containments"] = [];
   for (const document of input.index.documents) {
     const source = input.sourceTextByPath?.get(document.relativePath);
     if (!source) continue;
@@ -654,9 +743,50 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     );
     registrationNodes.push(...registrations.nodes);
     registrationCallsByDocument.set(document, registrations.callSites);
+    registrationContainments.push(...registrations.containments);
+  }
+
+  // PHP SCIP gives reliable symbol and reference positions, but not the
+  // enclosing lexical ranges that the generic SCIP ownership path uses.
+  // Pair a named PHP AST function/method with a native SCIP definition ONLY
+  // when the name token matches the same file and source position. Anonymous
+  // scopes are barriers: never credit their calls to an outer method.
+  const phpOwnersByDocument = new Map<ScipDocument, Array<{
+    range: ScipRange; ownerId: string | undefined;
+  }>>();
+  if (input.phpLexicalScopes) {
+    for (const document of input.index.documents) {
+      const scopes = input.phpLexicalScopes.get(document.relativePath);
+      if (!scopes?.length) continue;
+      const documentDefinitions = definitionsByDocument.get(document) ?? [];
+      const owners = scopes.map((scope) => {
+        const extent = tupleRange(scope.range);
+        if (scope.type === "anonymous" || !scope.nameRange || !scope.name) {
+          return { range: extent, ownerId: undefined };
+        }
+        const nameRange = tupleRange(scope.nameRange);
+        const candidates = documentDefinitions.filter((definition) => {
+          const definitionRange = definition.occurrence.range;
+          const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+          return definitionRange && node
+            && (node.kind === "method" || node.kind === "function" || node.kind === "constructor")
+            && definitionRange.startLine === nameRange.startLine
+            && definitionRange.startCharacter === nameRange.startCharacter
+            && rangeContains(nameRange, definitionRange)
+            && node.name.toLowerCase() === scope.name!.toLowerCase();
+        });
+        return { range: extent, ownerId: candidates.length === 1 ? candidates[0]!.nodeId : undefined };
+      }).sort((left, right) => rangeSpan(left.range) - rangeSpan(right.range));
+      phpOwnersByDocument.set(document, owners);
+    }
   }
 
   const relations = new Map<string, CodeRelation>();
+  for (const containment of registrationContainments) {
+    addRelation(relations, containment.from, containment.to, "contains", 1,
+      [{ location: containment.location, label: "AST verified inline callback lexical scope" }],
+      [{ providerId, fidelity: "syntax", freshness: "fresh" }]);
+  }
   const nativeReferenceCounts = new Map<string, number>();
   for (const node of nodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
   for (const node of externalNodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
@@ -740,10 +870,18 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         }], [{ providerId, fidelity: "semantic-call", freshness: "fresh" }]);
         continue;
       }
-      const owners = documentDefinitions
-        .filter((definition) => definition.occurrence.enclosingRange && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))
-        .sort((left, right) => rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!));
-      const owner = owners[0]?.nodeId;
+      const phpOwners = phpOwnersByDocument.get(document);
+      const lexical = phpOwners?.find((scope) => rangeContains(scope.range, occurrence.range!));
+      // If PHP AST knows this reference belongs to an anonymous function or
+      // an unmatched function, fail closed rather than using an outer owner.
+      const owner = lexical
+        ? lexical.ownerId
+        : phpOwners
+          ? undefined
+          : documentDefinitions
+            .filter((definition) => definition.occurrence.enclosingRange
+              && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))
+            .sort((left, right) => rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!))[0]?.nodeId;
       if (!owner) continue;
       const relationKind = source && lineStarts && isInstantiationOccurrence(source, lineStarts, occurrence.range)
         ? "instantiates"
@@ -787,9 +925,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([language, fileCount]) => ({
           language,
-          fileCount,
-          semanticEligibleFileCount: fileCount,
-          semanticIndexedFileCount: fileCount,
+          fileCount: language === "php" && eligiblePhpPaths ? eligiblePhpPaths.size : fileCount,
+          semanticEligibleFileCount: language === "php" && eligiblePhpPaths ? eligiblePhpPaths.size : fileCount,
+          semanticIndexedFileCount: language === "php" && nativeIndexedFirstPartyPhpPaths
+            ? nativeIndexedFirstPartyPhpPaths.size : fileCount,
           fidelity,
           providerIds: [providerId],
           degraded: false,

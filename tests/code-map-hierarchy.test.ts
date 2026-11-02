@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
@@ -108,4 +109,80 @@ test("filesystem inventory is provider-neutral and skips generated/dependency/ru
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Composer root vendor is excluded from the first-party tree but remains opt-in for explicit diagnostics", async () => {
+  const root = mkdtempSync(join(tmpdir(), "questboard-composer-inventory-"));
+  try {
+    mkdirSync(join(root, "src", "vendor"), { recursive: true });
+    mkdirSync(join(root, "vendor", "some-package"), { recursive: true });
+    writeFileSync(join(root, "src", "main.php"), "<?php function main() {}\n");
+    writeFileSync(join(root, "src", "vendor", "firstparty.php"), "<?php\n");
+    writeFileSync(join(root, "vendor", "some-package", "External.php"), "<?php\n");
+    writeFileSync(join(root, "composer.json"), "{}\n");
+    writeFileSync(join(root, "composer.lock"), "{}\n");
+
+    const regular = await new FileSystemCodeFileInventory().listFiles(root);
+    assert.equal(regular.some((file) => file.path === "vendor/some-package/External.php"), false);
+    assert.ok(regular.some((file) => file.path === "src/vendor/firstparty.php"),
+      "nested first-party directory names are not dependency scope");
+    const diagnostic = await new FileSystemCodeFileInventory({
+      includeComposerDependencies: true,
+    }).listFiles(root);
+    assert.ok(diagnostic.some((file) => file.path === "vendor/some-package/External.php"));
+    const graph = materializeCodeFileHierarchy({
+      ...semanticGraph(),
+      nodes: [{
+        id: "external-target",
+        kind: "class",
+        name: "External",
+        canonicalIdentity: "scip-external:some-package/External#",
+        provenance: [{ providerId: "scip-php", fidelity: "semantic-reference" }],
+      }],
+      relations: [],
+    }, regular);
+    assert.ok(graph.nodes.some((node) => node.id === "external-target"),
+      "native external semantic identities remain queryable without inventory vendor file nodes");
+    assert.equal(graph.nodes.some((node) => node.kind === "file"
+      && node.location?.path === "vendor/some-package/External.php"), false);
+
+    rmSync(join(root, "composer.lock"));
+    const withoutComposerLock = await new FileSystemCodeFileInventory().listFiles(root);
+    assert.ok(withoutComposerLock.some((file) => file.path === "vendor/some-package/External.php"),
+      "non-Composer vendor directory stays a normal source directory");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("file hierarchy preserves the first provider language for extensionless files", () => {
+  const graph: CodeGraphSnapshot = {
+    ...semanticGraph(),
+    nodes: [
+      { id: "provider-symbol", kind: "class", name: "ForeignClass",
+        canonicalIdentity: "src/foreign.inc#ForeignClass",
+        language: "php", location: { path: "src/foreign.inc", startLine: 1 } },
+    ],
+    relations: [],
+  };
+  const materialized = materializeCodeFileHierarchy(graph, [{ path: "src/foreign.inc" }]);
+  assert.equal(materialized.nodes.find((node) =>
+    node.kind === "file" && node.location?.path === "src/foreign.inc")?.language, "php");
+});
+
+test("file-only hierarchy handles 20k independent paths without quadratic language lookups", () => {
+  const fileCount = 20_000;
+  const files = Array.from({ length: fileCount }, (_, i) => ({
+    path: `src/group-${Math.floor(i / 1_000)}/file-${i}.php`,
+  }));
+  const graph: CodeGraphSnapshot = {
+    ...semanticGraph(), nodes: [], relations: [],
+  };
+  const startedAt = performance.now();
+  const materialized = materializeCodeFileHierarchy(graph, files);
+  const durationMs = performance.now() - startedAt;
+  assert.equal(materialized.nodes.length, fileCount);
+  assert.equal(materialized.relations.length, 0);
+  assert.ok(materialized.nodes.every((node) => node.language === "php"));
+  assert.ok(durationMs < 5_000, `20k file-only nodes took ${durationMs.toFixed(0)} ms`);
 });

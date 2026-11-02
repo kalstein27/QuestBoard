@@ -123,8 +123,11 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
 
     const indexedAt = this.#now();
     const indexArtifactSha256 = scipArtifactSha256(indexPath);
+    const eligiblePhpPaths = phpFiles.map((entry) => entry.path);
     if (this.#graphLoader) {
-      return await this.#graphLoader.load({ indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256 });
+      return await this.#graphLoader.load({
+        indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256, eligiblePhpPaths,
+      });
     }
     const index = await this.#indexReader.read(indexPath);
     return normalizeScipGraph({
@@ -135,6 +138,7 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
       sourceTextByPath: readIndexedSourceText(request.rootPath, index),
       providerId: this.providerId,
       indexArtifactSha256,
+      phpEligibleFilePaths: eligiblePhpPaths,
     });
   }
 }

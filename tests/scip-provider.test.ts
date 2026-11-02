@@ -14,6 +14,7 @@ import {
   type ScipProcessRunner,
 } from "../src/adapters/code-intelligence/scip-provider.js";
 import type { CodeGraphSnapshot } from "../src/application/code-intelligence.js";
+import { scipArtifactSha256 } from "../src/adapters/code-intelligence/scip-provider.js";
 import { parseScipJsonIndex } from "../src/adapters/code-intelligence/scip-normalizer.js";
 
 interface Call {
@@ -21,6 +22,20 @@ interface Call {
   args: readonly string[];
   options: ScipProcessRunOptions;
 }
+
+test("SCIP artifact digest uses fixed-size reads and preserves exact SHA-256", () => {
+  const root = mkdtempSync(join(tmpdir(), "questboard-scip-hash-"));
+  try {
+    const indexPath = join(root, "index.scip");
+    const binary = Buffer.alloc(1024 * 1024 + 17, 0xa7);
+    writeFileSync(indexPath, binary);
+    assert.equal(scipArtifactSha256(indexPath),
+      createHash("sha256").update(binary).digest("hex"));
+    assert.equal(scipArtifactSha256(join(root, "missing.scip")), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 class FakeRunner implements ScipProcessRunner {
   readonly calls: Call[] = [];

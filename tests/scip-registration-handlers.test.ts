@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeScipGraph, parseScipJsonIndex } from "../src/adapters/code-intelligence/scip-normalizer.js";
+import { queryCodeGraph } from "../src/application/code-map-query.js";
 
 const FILE = "src/server/tools.ts";
 const ROOT = "/workspace/registration-fixture";
@@ -183,4 +184,90 @@ test("a callback in a class or nested function is not assigned to its outer regi
   const out = graph.relations.filter((edge) => edge.from === id && edge.kind === "calls");
   assert.equal(out.length, 1);
   assert.equal(out[0]?.to, externalId(graph, TARGETS.mapping));
+});
+
+test("ten SCIP-resolved nested callback calls retain their true lexical owner and zero synthetic parent calls", () => {
+  const names = [
+    "planStep", "checkStep", "startStep", "readStep", "saveStep",
+    "finishStep", "reportStep", "auditStep", "notifyStep", "releaseStep",
+  ];
+  const symbol = (name: string) => `scip-typescript npm external 1.0.0 util.ts/${name}().`;
+  const source = [
+    'registerTool("command_run", {}, async () => {',
+    "  return withErrorMapping(ctx, async () => {",
+    ...names.map((name) => `    ${name}();`),
+    "    const deferred = () => anonymousTarget();",
+    "    return withErrorMapping(ctx, async () => nestedTarget());",
+    "  });",
+    "});",
+    'registerTool("operation_status", {}, async () => logStatus());',
+  ].join("\n");
+  const graph = graphFor(source, [
+    { symbol: TARGETS.mapping, token: "withErrorMapping", nth: 0 },
+    { symbol: TARGETS.mapping, token: "withErrorMapping", nth: 1 },
+    ...names.map((name) => ({ symbol: symbol(name), token: name })),
+    { symbol: TARGETS.nested, token: "nestedTarget" },
+    { symbol: TARGETS.anonymous, token: "anonymousTarget" },
+    { symbol: TARGETS.status, token: "logStatus" },
+  ]);
+  const handler = registrationId(graph, "command_run");
+  const other = registrationId(graph, "operation_status");
+  const childrenOf = (id: string) => graph.relations.filter((edge) => edge.from === id && edge.kind === "contains");
+  const first = childrenOf(handler);
+  assert.equal(first.length, 1, "only the inline argument callback is a direct lexical child");
+  const inner = first[0]!.to;
+  const second = childrenOf(inner);
+  assert.equal(second.length, 1, "a second-level argument callback has its own lexical owner");
+  const deeper = second[0]!.to;
+  const hierarchy = queryCodeGraph(graph, "scip-typescript", {
+    operation: "hierarchy", nodeId: handler, direction: "children", limit: 10,
+  });
+  assert.equal(hierarchy.operation, "hierarchy");
+  assert.deepEqual(hierarchy.entries.map((entry) => entry.node.id), [inner]);
+  const nestedHierarchy = queryCodeGraph(graph, "scip-typescript", {
+    operation: "hierarchy", nodeId: inner, direction: "children", limit: 10,
+  });
+  assert.equal(nestedHierarchy.operation, "hierarchy");
+  assert.ok(nestedHierarchy.entries.some((entry) => entry.node.id === deeper));
+  const queriedCallees = queryCodeGraph(graph, "scip-typescript", {
+    operation: "relations", nodeId: inner, semantic: "callees", limit: 30,
+  });
+  assert.equal(queriedCallees.operation, "relations");
+  assert.ok(queriedCallees.entries.some((entry) => entry.node.id === externalId(graph, symbol("planStep"))));
+  assert.ok(queriedCallees.entries.some((entry) => entry.node.id === externalId(graph, symbol("releaseStep"))));
+  const rootCallees = queryCodeGraph(graph, "scip-typescript", {
+    operation: "relations", nodeId: handler, semantic: "callees", limit: 30,
+  });
+  assert.equal(rootCallees.operation, "relations");
+  assert.ok(rootCallees.entries.every((entry) => !names.some((name) => entry.node.id === externalId(graph, symbol(name)))));
+  assert.ok(graph.nodes.some((node) => node.id === inner
+    && node.canonicalIdentity.startsWith("source-registration-callback:")
+    && node.canonicalIdentity.includes(":local ")
+    && node.provenance?.[0]?.fidelity === "syntax"));
+
+  const nestedCalls = graph.relations.filter((edge) => edge.from === inner && edge.kind === "calls");
+  for (const name of names) {
+    const target = externalId(graph, symbol(name));
+    const edge = nestedCalls.find((item) => item.to === target);
+    assert.ok(edge, `SCIP-resolved ${name} should belong to the inline callback`);
+    assert.equal(edge.confidence, 1);
+    assert.equal(edge.evidence?.[0]?.location.path, FILE);
+    assert.deepEqual(edge.provenance, [
+      { providerId: "scip-typescript", fidelity: "semantic-call", freshness: "fresh" },
+    ]);
+    assert.equal(graph.relations.some((item) => item.from === handler && item.to === target), false,
+      `handler must not claim ${name} as a direct call`);
+    assert.equal(graph.relations.some((item) => item.from === other && item.to === target), false,
+      `unrelated handler must not inherit ${name}`);
+  }
+  assert.ok(graph.relations.some((edge) => edge.from === deeper
+    && edge.to === externalId(graph, TARGETS.nested) && edge.kind === "calls"));
+  assert.equal(graph.relations.some((edge) => edge.from === inner
+    && edge.to === externalId(graph, TARGETS.nested) && edge.kind === "calls"), false);
+  assert.equal(graph.relations.some((edge) => edge.to === externalId(graph, TARGETS.anonymous)
+    && edge.kind === "calls"), false, "assigned but uninvoked callbacks are not represented as direct calls");
+  assert.ok(graph.relations.some((edge) => edge.from === other
+    && edge.to === externalId(graph, TARGETS.status) && edge.kind === "calls"));
+  assert.equal(graph.nodes.filter((node) => node.canonicalIdentity.startsWith("source-registration:")).length, 2);
+  assert.equal(graph.nodes.filter((node) => node.canonicalIdentity.startsWith("source-registration-callback:")).length, 2);
 });
