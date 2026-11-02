@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { migrateSourceStructureBindings, SqliteSourceStructureBindingStore } from "./source-structure-binding-store.js";
 import type {
   Activity,
   ActivityType,
@@ -284,6 +285,7 @@ type TaskCodeScopeBindingRow = {
 
 export class SqliteQuestBoardRepository implements QuestBoardRepository {
   private readonly db: DatabaseSync;
+  readonly sourceStructureBindings: SqliteSourceStructureBindingStore;
   readonly databaseId: string;
   private transactionDepth = 0;
 
@@ -292,6 +294,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec("PRAGMA busy_timeout = 5000");
     this.migrate();
+    this.sourceStructureBindings = new SqliteSourceStructureBindingStore(this.db);
     this.databaseId = this.ensureDatabaseId();
   }
 
@@ -1499,6 +1502,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         `);
       });
     }
+    migrateSourceStructureBindings(this.db);
   }
 
   private ensureDatabaseId(): string {

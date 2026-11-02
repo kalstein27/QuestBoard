@@ -1,0 +1,6 @@
+{
+  "name": "synthetic/source-flow-s1",
+  "description": "Entirely synthetic, non-production Source Structure Sync S1 fixture",
+  "type": "project",
+  "autoload": { "psr-4": { "Synthetic\\SourceFlow\\": "src/" } }
+}
