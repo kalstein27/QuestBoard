@@ -33,6 +33,8 @@ export interface PersistedCodeMapSnapshotEnvelope {
 
 export interface CodeMapPersistedSnapshotStore {
   load(projectId: string): unknown | undefined;
+  /** Cheap transaction-time revision pin; never deserialize a raw graph. */
+  revisionToken?(projectId: string): string | undefined;
   save(projectId: string, snapshot: PersistedCodeMapSnapshotEnvelope): void;
 }
 

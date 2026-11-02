@@ -39,6 +39,10 @@ import type {
   UpdateTaskInput,
 } from "../application/quest-board-service.js";
 import type { CodeMapService } from "../application/code-map-service.js";
+import type { SourceStructureFlowSyncService } from "../application/source-structure-flow-sync.js";
+import { SourceStructureChannelError } from "../application/source-structure-channel.js";
+import { SourceStructureSelectionError } from "../application/source-structure-sync-graph.js";
+import { SourceStructureBindingConflict } from "../application/source-structure-binding.js";
 import { CodeMapAugmentationError, type CodeMapAugmentationService } from "../application/code-map-augmentation.js";
 import {
   CODE_SCOPE_BINDING_KINDS,
@@ -67,6 +71,11 @@ export interface QuestBoardHttpServerOptions {
   daemonIdentity?: QuestBoardDaemonIdentity;
   codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  sourceStructureFlowSyncService?: SourceStructureFlowSyncService;
+  /** Must authenticate the actual request and project. Actor headers alone do not grant access. */
+  authorizeSourceStructureApply?: (
+    request: IncomingMessage, projectId: string, claimedActor: ActorRef,
+  ) => ActorRef | undefined;
   codeMapAugmentationService?: CodeMapAugmentationService;
   codeScopeBindingService?: CodeScopeBindingService;
   agentFocusService?: AgentFocusService;
@@ -78,8 +87,15 @@ export function createQuestBoardHttpServer(
   options: QuestBoardHttpServerOptions = {},
 ): Server {
   return createServer((request, response) => {
-    void handleRequest(service, options, request, response).catch((error: unknown) => {
-      sendError(response, error);
+    const cancellation = new AbortController();
+    // IncomingMessage 'close' also fires after the body is fully read. The
+    // response close event is the reliable signal of a disconnected reader.
+    request.once("aborted", () => cancellation.abort());
+    response.once("close", () => {
+      if (!response.writableEnded) cancellation.abort();
+    });
+    void handleRequest(service, options, request, response, cancellation.signal).catch((error: unknown) => {
+      if (!response.destroyed && !cancellation.signal.aborted) sendError(response, error);
     });
   });
 }
@@ -89,6 +105,7 @@ async function handleRequest(
   options: QuestBoardHttpServerOptions,
   request: IncomingMessage,
   response: ServerResponse,
+  readAbortSignal: AbortSignal,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -118,6 +135,7 @@ async function handleRequest(
         result: await executeQuestBoardAgentTool(
           {
             service,
+            readAbortSignal,
             ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
             ...(options.codeMapAugmentationService
               ? { codeMapAugmentationService: options.codeMapAugmentationService }
@@ -128,6 +146,9 @@ async function handleRequest(
             ...(options.agentFocusService ? { agentFocusService: options.agentFocusService } : {}),
             ...(options.codeMapInvestigationSyncService
               ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
+              : {}),
+            ...(options.sourceStructureFlowSyncService
+              ? { sourceStructureFlowSyncService: options.sourceStructureFlowSyncService }
               : {}),
           },
           name,
@@ -158,6 +179,9 @@ async function handleRequest(
         ...(options.codeMapInvestigationSyncService
           ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService }
           : {}),
+        ...(options.sourceStructureFlowSyncService
+          ? { sourceStructureFlowSyncService: options.sourceStructureFlowSyncService }
+          : {}),
       },
       sessionId,
     ).handle(body.message);
@@ -175,6 +199,7 @@ async function handleRequest(
     sendJson(response, 200, await executeQuestBoardAgentTool(
       {
         service,
+        readAbortSignal,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
       },
       "questboard_get_code_map_status",
@@ -187,9 +212,10 @@ async function handleRequest(
   if (codeMapSubsystemsMatch && method === "GET") {
     const projectId = decodePathPart(codeMapSubsystemsMatch[1]);
     service.getProject(projectId);
-    sendJson(response, 200, executeQuestBoardAgentTool(
+    sendJson(response, 200, await executeQuestBoardAgentTool(
       {
         service,
+        readAbortSignal,
         ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
       },
       "questboard_get_code_map_subsystems",
@@ -212,8 +238,8 @@ async function handleRequest(
       return;
     }
     const body = await readJsonObject(request);
-    sendJson(response, 200, executeQuestBoardAgentTool(
-      { service, codeMapService: options.codeMapService },
+    sendJson(response, 200, await executeQuestBoardAgentTool(
+      { service, readAbortSignal, codeMapService: options.codeMapService },
       "questboard_query_code_map_subsystems",
       { ...body, projectId },
     ));
@@ -332,6 +358,62 @@ async function handleRequest(
     }
   }
 
+  const structureMatch = pathname.match(/^\/projects\/([^/]+)\/source-structure\/flow-sync\/(candidates|preview|apply)$/);
+  if (structureMatch) {
+    const projectId = decodePathPart(structureMatch[1]);
+    const action = structureMatch[2];
+    service.getProject(projectId);
+    if (!options.sourceStructureFlowSyncService || !options.codeMapService) {
+      sendJson(response, 503, { error: {
+        code: "source_structure_sync_unavailable", message: "Source Structure sync is not available",
+      } });
+      return;
+    }
+    const runtime = {
+      service, readAbortSignal, codeMapService: options.codeMapService,
+      sourceStructureFlowSyncService: options.sourceStructureFlowSyncService,
+    };
+    if (action === "candidates" && method === "GET") {
+      sendJson(response, 200, await executeQuestBoardAgentTool(runtime,
+        "questboard_list_source_structure_candidates", {
+          projectId,
+          ...(optionalQueryText(url, "offset") ? { offset: Number(optionalQueryText(url, "offset")) } : {}),
+          ...(optionalQueryText(url, "limit") ? { limit: Number(optionalQueryText(url, "limit")) } : {}),
+          ...(optionalQueryText(url, "pathPrefix") ? { pathPrefix: optionalQueryText(url, "pathPrefix") } : {}),
+          ...(optionalQueryText(url, "expectedSnapshotId")
+            ? { expectedSnapshotId: optionalQueryText(url, "expectedSnapshotId") } : {}),
+          ...(optionalQueryText(url, "expectedSourceIndexedAt")
+            ? { expectedSourceIndexedAt: optionalQueryText(url, "expectedSourceIndexedAt") } : {}),
+        }));
+      return;
+    }
+    if ((action === "preview" || action === "apply") && method === "POST") {
+      const body = await readJsonObject(request);
+      if (action === "preview") {
+        sendJson(response, 200, await executeQuestBoardAgentTool(runtime,
+          "questboard_preview_source_structure_flow_sync", { ...body, projectId }));
+        return;
+      }
+      // Only the host-injected verifier may authenticate a mutation.
+      // The daemon client header, x-questboard-actor-* and approved:true are NOT authority.
+      const claimedActor = requireActor(request);
+      const id = mutationOptions(request).requestId;
+      if (!id) throw new SourceStructureChannelError(
+        "source_structure_bad_request", "Source Structure apply requires explicit idempotency request id");
+      const authority = options.authorizeSourceStructureApply;
+      const context = {
+        ...runtime,
+        ...(authority ? { sourceStructureApplyAuthority: (p: string, claimed: ActorRef) =>
+          authority(request, p, claimed) } : {}),
+      };
+      sendJson(response, 200, await executeQuestBoardAgentTool(context,
+        "questboard_apply_source_structure_flow_sync", {
+          ...body, projectId, actor: claimedActor, requestId: id,
+        }));
+      return;
+    }
+  }
+
   const codeMapSyncMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/investigation-sync\/(preview|apply)$/);
   if (codeMapSyncMatch && method === "POST") {
     const projectId = decodePathPart(codeMapSyncMatch[1]);
@@ -354,13 +436,34 @@ async function handleRequest(
       ...optionalBooleanProperty(body, "recreateDetached"),
     };
     if (codeMapSyncMatch[2] === "preview") {
-      sendJson(response, 200, { preview: sync.preview(projectId, selection) });
+      const codeMap = options.codeMapService;
+      if (codeMap?.isolatedReadsEnabled) {
+        const source = await codeMap.investigationPreviewSourceAsync(projectId, selection.codeNodeIds, readAbortSignal);
+        sendJson(response, 200, { preview: sync.previewTrustedProjection(projectId, source, selection) });
+      } else {
+        sendJson(response, 200, { preview: sync.preview(projectId, selection) });
+      }
       return;
     }
 
     const requestId = mutationOptions(request).requestId;
     if (!requestId) {
       throw new TypeError("Sync apply requires x-questboard-request-id or idempotency-key header");
+    }
+    if (options.codeMapService?.isolatedReadsEnabled) {
+      const codeMap = options.codeMapService;
+      const revision = codeMap.snapshotRevisionToken(projectId);
+      const source = await codeMap.investigationPreviewSourceAsync(projectId, selection.codeNodeIds, readAbortSignal);
+      readAbortSignal.throwIfAborted();
+      const assertCurrent = () => codeMap.assertSnapshotRevision(projectId, revision);
+      assertCurrent();
+      sendJson(response, 200, {
+        result: sync.apply(projectId, {
+          ...selection,
+          expectedProjectionFingerprint: requireString(body, "expectedProjectionFingerprint"),
+        }, requireActor(request), requestId, { source, assertCurrent }),
+      });
+      return;
     }
     sendJson(response, 200, {
       result: sync.apply(
@@ -420,7 +523,7 @@ async function handleRequest(
       return;
     }
     const body = await readJsonObject(request);
-    sendJson(response, 200, executeQuestBoardAgentTool(
+    sendJson(response, 200, await executeQuestBoardAgentTool(
       { service, codeMapService: options.codeMapService },
       "questboard_query_code_map_continuations",
       { ...body, projectId },
@@ -442,7 +545,7 @@ async function handleRequest(
       return;
     }
     const body = await readJsonObject(request);
-    sendJson(response, 200, executeQuestBoardAgentTool(
+    sendJson(response, 200, await executeQuestBoardAgentTool(
       {
         service,
         codeMapService: options.codeMapService,
@@ -553,25 +656,28 @@ async function handleRequest(
       const taskId = optionalQueryText(url, "taskId");
       const codeNodeId = optionalQueryText(url, "codeNodeId");
       sendJson(response, 200, {
-        codeScopeBindings: options.codeScopeBindingService.list(projectId, {
-          ...(taskId ? { taskId } : {}),
-          ...(codeNodeId ? { codeNodeId } : {}),
-        }),
+        codeScopeBindings: options.codeMapService?.isolatedReadsEnabled
+          ? options.codeScopeBindingService.listAnchorsWithoutGraph(projectId)
+            .filter((binding) => !taskId || binding.taskId === taskId)
+            .filter((binding) => !codeNodeId || binding.codeNodeId === codeNodeId)
+            .map((binding) => ({ ...binding, state: "unverified", validation: "not_checked" }))
+          : options.codeScopeBindingService.list(projectId, {
+            ...(taskId ? { taskId } : {}),
+            ...(codeNodeId ? { codeNodeId } : {}),
+          }),
       });
       return;
     }
     if (method === "POST") {
       const body = await readJsonObject(request);
+      const input = { projectId, taskId: requireString(body, "taskId"),
+        codeNodeId: requireString(body, "codeNodeId"),
+        ...optionalEnumProperty(body, "kind", CODE_SCOPE_BINDING_KINDS) };
+      const pinned = options.codeMapService?.isolatedReadsEnabled
+        ? await options.codeMapService.pinnedNodeForMutation(projectId, input.codeNodeId)
+        : undefined;
       const binding = options.codeScopeBindingService.attach(
-        {
-          projectId,
-          taskId: requireString(body, "taskId"),
-          codeNodeId: requireString(body, "codeNodeId"),
-          ...optionalEnumProperty(body, "kind", CODE_SCOPE_BINDING_KINDS),
-        },
-        requireActor(request),
-        mutationOptions(request),
-      );
+        input, requireActor(request), mutationOptions(request), pinned);
       sendJson(response, 201, { codeScopeBinding: binding });
       return;
     }
@@ -581,8 +687,7 @@ async function handleRequest(
   if (createScopedTaskMatch && method === "POST" && options.codeScopeBindingService) {
     const projectId = decodePathPart(createScopedTaskMatch[1]);
     const body = await readJsonObject(request);
-    sendJson(response, 201, options.codeScopeBindingService.createTaskForScope(
-      {
+    const input = {
         projectId,
         codeNodeId: requireString(body, "codeNodeId"),
         ...optionalEnumProperty(body, "kind", CODE_SCOPE_BINDING_KINDS),
@@ -596,10 +701,12 @@ async function handleRequest(
           ...optionalEnumProperty(body, "priority", TASK_PRIORITIES),
           ...optionalStringArrayProperty(body, "tags"),
         },
-      },
-      requireActor(request),
-      mutationOptions(request),
-    ));
+    };
+    const pinned = options.codeMapService?.isolatedReadsEnabled
+      ? await options.codeMapService.pinnedNodeForMutation(projectId, input.codeNodeId)
+      : undefined;
+    sendJson(response, 201, options.codeScopeBindingService.createTaskForScope(
+      input, requireActor(request), mutationOptions(request), pinned));
     return;
   }
 
@@ -621,16 +728,43 @@ async function handleRequest(
   const codeScopeRelinkMatch = pathname.match(/^\/code-scope-bindings\/([^/]+)\/relink$/);
   if (codeScopeRelinkMatch && method === "POST" && options.codeScopeBindingService) {
     const body = await readJsonObject(request);
+    const bindingId = decodePathPart(codeScopeRelinkMatch[1]);
+    const trusted = options.codeMapService?.isolatedReadsEnabled
+      ? await options.codeMapService.pinnedRelinkForMutation(
+        options.codeScopeBindingService.getBindingForRelink(bindingId))
+      : undefined;
     sendJson(response, 200, {
       codeScopeBinding: options.codeScopeBindingService.relink(
-        decodePathPart(codeScopeRelinkMatch[1]),
+        bindingId,
         requireActor(request),
         {
           ...mutationOptions(request),
           ...optionalPositiveIntegerProperty(body, "expectedRevision"),
         },
+        trusted,
       ),
     });
+    return;
+  }
+
+  const sourceTreeMatch = pathname.match(/^\/projects\/([^/]+)\/code-map\/source-tree$/);
+  if (sourceTreeMatch && method === "GET") {
+    const projectId = decodePathPart(sourceTreeMatch[1]);
+    service.getProject(projectId);
+    if (!options.codeMapService) {
+      sendJson(response, 503, { error: { code: "code_map_unavailable", message: "Code Map is disabled" } });
+      return;
+    }
+    const offsetText = optionalQueryText(url, "offset");
+    const limitText = optionalQueryText(url, "limit");
+    const sourcePathPrefix = optionalQueryText(url, "pathPrefix");
+    const sourceSnapshotId = optionalQueryText(url, "expectedSnapshotId");
+    sendJson(response, 200, { page: await options.codeMapService.sourceTreePageAsync(projectId, {
+      ...(sourcePathPrefix ? { pathPrefix: sourcePathPrefix } : {}),
+      ...(offsetText !== undefined ? { offset: Number(offsetText) } : {}),
+      ...(limitText !== undefined ? { limit: Number(limitText) } : {}),
+      ...(sourceSnapshotId ? { expectedSnapshotId: sourceSnapshotId } : {}),
+    }, readAbortSignal) });
     return;
   }
 
@@ -645,6 +779,32 @@ async function handleRequest(
     const provider = codeMapService?.providerId ?? availability?.provider;
 
     if (method === "GET") {
+      if (codeMapService?.isolatedReadsEnabled) {
+        const bootstrap = await codeMapService.webBootstrapAsync(projectId, readAbortSignal);
+        sendJson(response, 200, {
+          enabled, available, indexed: bootstrap.indexed,
+          ...(provider ? { provider } : {}),
+          capabilities: codeMapService.capabilities,
+          ...(availability?.reason ? { reason: availability.reason } : {}),
+          ...(availability?.message ? { message: availability.message } : {}),
+          ...(availability?.missingExecutables ? { missingExecutables: availability.missingExecutables } : {}),
+          ...(bootstrap.snapshotState ?? {}),
+          ...(bootstrap.snapshotIdentity ?? {}),
+          ...(bootstrap.hydrationDiagnostic ?? {}),
+          ...(bootstrap.providerCapabilities ? { providerCapabilities: bootstrap.providerCapabilities } : {}),
+          ...(bootstrap.indexedAt ? { indexedAt: bootstrap.indexedAt } : {}),
+          ...(bootstrap.nodeCount !== undefined ? { nodeCount: bootstrap.nodeCount } : {}),
+          ...(bootstrap.relationCount !== undefined ? { relationCount: bootstrap.relationCount } : {}),
+          nodeKinds: bootstrap.nodeKinds,
+          boundedSourceTree: true,
+          graph: null,
+          projection: bootstrap.projection ?? null,
+          manualRelations: bootstrap.manualRelations,
+          codeScopeBindings: options.codeScopeBindingService?.listAnchorsWithoutGraph(projectId)
+            .map((binding) => ({ ...binding, state: "unverified", validation: "not_checked" })) ?? [],
+        });
+        return;
+      }
       const cached = codeMapService?.getCached(projectId);
       const snapshotState = codeMapService?.snapshotLifecycleState(projectId);
       const hydrationDiagnostic = codeMapService?.hydrationDiagnostic(projectId);
@@ -672,6 +832,13 @@ async function handleRequest(
     }
 
     if (method === "POST") {
+      if (codeMapService?.isolatedReadsEnabled) {
+        sendJson(response, 409, { error: {
+          code: "code_map_legacy_full_refresh_disabled",
+          message: "Use POST /projects/:id/code-map/refresh then bounded queries; full graph responses are disabled",
+        } });
+        return;
+      }
       if (!codeMapService) {
         sendJson(response, 503, {
           enabled,
@@ -1393,6 +1560,24 @@ function sendNoContent(response: ServerResponse): void {
 }
 
 function sendError(response: ServerResponse, error: unknown): void {
+  if (error instanceof SourceStructureChannelError) {
+    const statusCode = error.code === "source_structure_apply_unauthorized" ? 403
+      : error.code === "source_structure_sync_unavailable" ? 503 : 400;
+    sendJson(response, statusCode, { error: { code: error.code, message: error.message } });
+    return;
+  }
+  if (error instanceof SourceStructureSelectionError) {
+    sendJson(response, error.code.includes("stale") ? 409 : 400, { error: {
+      code: error.code, message: "Source Structure selection is invalid or its pinned source changed",
+    } });
+    return;
+  }
+  if (error instanceof SourceStructureBindingConflict) {
+    sendJson(response, 409, { error: {
+      code: error.code, message: "Source Structure binding or Flow target requires review",
+    } });
+    return;
+  }
   if (error instanceof CodeMapQueryError) {
     const statusCode = error.code === "code_map_not_indexed"
       || error.code === "code_map_subsystem_snapshot_stale"

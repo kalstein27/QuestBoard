@@ -10,6 +10,7 @@ import { FileSystemCodeFileInventory } from "../adapters/code-intelligence/file-
 import { ScipPhpProvider } from "../adapters/code-intelligence/scip-php-provider.js";
 import {
   ExecFileScipProcessRunner,
+  loadScipGraphInProcess,
   ScipTypeScriptCodeIntelligenceProvider,
 } from "../adapters/code-intelligence/scip-provider.js";
 import { createHash } from "node:crypto";
@@ -323,6 +324,10 @@ export function createConfiguredCodeMapService(
       {
         storageRoot: config.storageRoot,
         indexerExecutable: config.executable,
+        // The complete index pipeline already lives in a disposable process.
+        // Avoid a second worker's full-graph structured clone inside it.
+        ...(env.QUESTBOARD_CODE_MAP_ISOLATED_CHILD === "1"
+          ? { graphLoader: { load: loadScipGraphInProcess } } : {}),
       },
     );
     return createCompositeService([
@@ -335,6 +340,8 @@ export function createConfiguredCodeMapService(
 
   const provider = new ScipPhpProvider(new ExecFileScipProcessRunner(), {
     storageRoot: config.storageRoot,
+    ...(env.QUESTBOARD_CODE_MAP_ISOLATED_CHILD === "1"
+      ? { graphLoader: { load: loadScipGraphInProcess } } : {}),
     ...(env.QUESTBOARD_SCIP_PHP_EXECUTABLE?.trim()
       ? { indexerExecutable: env.QUESTBOARD_SCIP_PHP_EXECUTABLE.trim() }
       : {}),

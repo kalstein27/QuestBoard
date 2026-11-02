@@ -74,6 +74,19 @@ import {
   type CodeSourceSubsystemQueryInput,
 } from "../application/code-map-subsystem-read.js";
 import { CODE_SOURCE_SUBSYSTEM_RELATION_KINDS } from "../application/code-map-subsystems.js";
+import type { SourceStructureFlowSyncService } from "../application/source-structure-flow-sync.js";
+import {
+  SourceStructureChannelError,
+  listSourceStructureCandidates,
+  listSourceStructureCandidatesAsync,
+  resolveSourceStructureSelection,
+  sourceStructureApplyActor,
+  sourceStructureApplyRequestFields,
+  sourceStructureChannelSelection,
+  type SourceStructureApplyAuthority,
+} from "../application/source-structure-channel.js";
+import { SourceStructureSelectionError } from "../application/source-structure-sync-graph.js";
+import { SourceStructureBindingConflict } from "../application/source-structure-binding.js";
 
 
 const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
@@ -86,8 +99,13 @@ export interface QuestBoardAgentToolDefinition {
 
 export interface QuestBoardAgentToolContext {
   service: QuestBoardService;
+  /** Transport-owned cancellation; never accepted through tool JSON. */
+  readAbortSignal?: AbortSignal;
   codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  sourceStructureFlowSyncService?: SourceStructureFlowSyncService;
+  /** Trusted runtime-only permission. Never constructed from an MCP tool argument. */
+  sourceStructureApplyAuthority?: SourceStructureApplyAuthority;
   codeMapAugmentationService?: CodeMapAugmentationService;
   codeScopeBindingService?: CodeScopeBindingService;
   agentFocusService?: AgentFocusService;
@@ -1130,6 +1148,76 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_list_source_structure_candidates",
+    description: "List a bounded pinned page of source subsystems for explicitly selected Source Structure Flow sync; read-only. No source body is returned.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        offset: { type: "integer", minimum: 0, maximum: 1000000 },
+        limit: { type: "integer", minimum: 1, maximum: 12 },
+        pathPrefix: { type: "string", maxLength: 256 },
+        expectedSnapshotId: { type: "string", minLength: 1, maxLength: 256 },
+        expectedSourceIndexedAt: { type: "string", minLength: 1, maxLength: 128 },
+      },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_preview_source_structure_flow_sync",
+    description: "Preview bounded Source Structure Flow changes from server-owned normalized Code Map facts. Requires an exact page/pin and selected subsystem IDs; never writes Flow.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        selectionKey: { type: "string", minLength: 1, maxLength: 512 },
+        offset: { type: "integer", minimum: 0, maximum: 1000000 },
+        limit: { type: "integer", minimum: 1, maximum: 12 },
+        pathPrefix: { type: "string", maxLength: 256 },
+        selectedSubsystemIds: { type: "array", minItems: 1, maxItems: 12,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        selectedRawAnchorIds: { type: "array", maxItems: 12,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        selectedRelationIds: { type: "array", maxItems: 24,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        expectedSnapshotId: { type: "string", minLength: 1, maxLength: 256 },
+        expectedSourceIndexedAt: { type: "string", minLength: 1, maxLength: 128 },
+      },
+      required: ["projectId", "selectionKey", "selectedSubsystemIds",
+        "expectedSnapshotId", "expectedSourceIndexedAt"],
+    },
+  },
+  {
+    name: "questboard_apply_source_structure_flow_sync",
+    description: "Atomically apply an exact Source Structure preview ONLY when the host transport separately verifies actor identity and project mutation permission; otherwise fail closed.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        selectionKey: { type: "string", minLength: 1, maxLength: 512 },
+        offset: { type: "integer", minimum: 0, maximum: 1000000 },
+        limit: { type: "integer", minimum: 1, maximum: 12 },
+        pathPrefix: { type: "string", maxLength: 256 },
+        selectedSubsystemIds: { type: "array", minItems: 1, maxItems: 12,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        selectedRawAnchorIds: { type: "array", maxItems: 12,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        selectedRelationIds: { type: "array", maxItems: 24,
+          uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
+        expectedSnapshotId: { type: "string", minLength: 1, maxLength: 256 },
+        expectedSourceIndexedAt: { type: "string", minLength: 1, maxLength: 128 },
+        expectedSelectionFingerprint: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        expectedSelectionRevision: { oneOf: [{ type: "integer", minimum: 1 }, { type: "null" }] },
+        approved: { const: true },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "selectionKey", "selectedSubsystemIds", "expectedSnapshotId",
+        "expectedSourceIndexedAt", "expectedSelectionFingerprint",
+        "expectedSelectionRevision", "approved", "requestId", "actor"],
+    },
+  },
+  {
     name: "questboard_preview_code_map_investigation_sync",
     description: "Preview extraction/synchronization of Code Map architecture projection nodes and relations into the Investigation graph without mutating it. Partial selection uses architecture node IDs returned by a full sync preview, not raw CodeGraphSnapshot IDs from questboard_query_code_map.",
     inputSchema: {
@@ -1498,32 +1586,28 @@ export function executeQuestBoardAgentTool(
         ),
       };
     case "questboard_query_code_map":
-      return {
-        query: requireCodeMapService(context).query(
+      return requireCodeMapService(context).queryAsync(
           requireString(args, "projectId"),
           codeMapQueryInput(args),
-        ),
-      };
+          context.readAbortSignal,
+        ).then((query) => ({ query }));
     case "questboard_query_code_map_continuations":
-      return {
-        query: requireCodeMapService(context).queryContinuations(
+      return requireCodeMapService(context).queryContinuationsAsync(
           requireString(args, "projectId"),
           codeMapContinuationQueryInput(args),
-        ),
-      };
+          context.readAbortSignal,
+        ).then((query) => ({ query }));
     case "questboard_get_code_map_subsystems":
-      return {
-        subsystems: requireCodeMapService(context).sourceSubsystems(
+      return requireCodeMapService(context).sourceSubsystemsAsync(
           requireString(args, "projectId"),
-        ),
-      };
+          context.readAbortSignal,
+        ).then((subsystems) => ({ subsystems }));
     case "questboard_query_code_map_subsystems":
-      return {
-        query: requireCodeMapService(context).querySourceSubsystems(
+      return requireCodeMapService(context).querySourceSubsystemsAsync(
           requireString(args, "projectId"),
           codeMapSubsystemQueryInput(args),
-        ),
-      };
+          context.readAbortSignal,
+        ).then((query) => ({ query }));
     case "questboard_get_code_map_status":
       return codeMapAgentStatus(context, service, requireString(args, "projectId"))
         .then((codeMap) => ({ codeMap }));
@@ -1534,18 +1618,17 @@ export function executeQuestBoardAgentTool(
       const project = service.getProject(projectId);
       const codeMap = requireCodeMapService(context);
       const refresh = codeMap.refreshJob(projectId);
-      const cached = codeMap.getCached(projectId);
-      return {
+      const format = (indexed: boolean) => ({
         refresh: refresh
           ? {
               ...refresh,
-              lastGoodSnapshotAvailable: Boolean(cached),
+              lastGoodSnapshotAvailable: indexed,
               recommendedNextAction: recommendCodeMapNextAction({
                 projectId,
                 surface: "refresh",
                 enabled: true,
                 rootPathConfigured: Boolean(project.rootPath),
-                indexed: Boolean(cached),
+                indexed,
                 refresh,
               }),
             }
@@ -1557,11 +1640,14 @@ export function executeQuestBoardAgentTool(
                 surface: "refresh",
                 enabled: true,
                 rootPathConfigured: Boolean(project.rootPath),
-                indexed: Boolean(cached),
+                indexed,
               }),
             }
           : {}),
-      };
+      });
+      return codeMap.isolatedReadsEnabled
+        ? codeMap.snapshotReadSummary(projectId).then((snapshot) => format(snapshot.indexed))
+        : format(Boolean(codeMap.getCached(projectId)));
     }
     case "questboard_get_code_map_provider_capabilities": {
       const projectId = requireString(args, "projectId");
@@ -1599,28 +1685,37 @@ export function executeQuestBoardAgentTool(
         .then((installRequest) => ({ installRequest }));
     }
     case "questboard_list_code_scope_bindings":
-      return {
-        codeScopeBindings: requireCodeScopeBindingService(context).list(
-          requireString(args, "projectId"),
-          {
-            ...optionalStringProperty(args, "taskId"),
-            ...optionalStringProperty(args, "codeNodeId"),
-          },
-        ),
+    {
+      const projectId = requireString(args, "projectId");
+      const filter = {
+        ...optionalStringProperty(args, "taskId"),
+        ...optionalStringProperty(args, "codeNodeId"),
       };
+      const bindings = requireCodeScopeBindingService(context);
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        return { codeScopeBindings: bindings.listAnchorsWithoutGraph(projectId)
+          .filter(item => filter.taskId === undefined || item.taskId === filter.taskId)
+          .filter(item => filter.codeNodeId === undefined || item.codeNodeId === filter.codeNodeId)
+          .map(item => ({ ...item, state: "unverified", validation: "not_checked" })) };
+      }
+      return { codeScopeBindings: bindings.list(projectId, filter) };
+    }
     case "questboard_attach_task_code_scope":
-      return {
-        codeScopeBinding: requireCodeScopeBindingService(context).attach(
-          {
-            projectId: requireString(args, "projectId"),
-            taskId: requireString(args, "taskId"),
-            codeNodeId: requireString(args, "codeNodeId"),
-            ...optionalEnumProperty(args, "kind", CODE_SCOPE_BINDING_KINDS),
-          },
-          requireActor(args),
-          mutationOptions(args),
-        ),
+    {
+      const input = {
+        projectId: requireString(args, "projectId"),
+        taskId: requireString(args, "taskId"),
+        codeNodeId: requireString(args, "codeNodeId"),
+        ...optionalEnumProperty(args, "kind", CODE_SCOPE_BINDING_KINDS),
       };
+      const actor = requireActor(args), options = mutationOptions(args);
+      const bindings = requireCodeScopeBindingService(context);
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        return context.codeMapService.pinnedNodeForMutation(input.projectId, input.codeNodeId)
+          .then((pinned) => ({ codeScopeBinding: bindings.attach(input, actor, options, pinned) }));
+      }
+      return { codeScopeBinding: bindings.attach(input, actor, options) };
+    }
     case "questboard_detach_task_code_scope":
       return requireCodeScopeBindingService(context).detach(
         requireString(args, "bindingId"),
@@ -1631,19 +1726,25 @@ export function executeQuestBoardAgentTool(
         },
       );
     case "questboard_relink_task_code_scope":
-      return {
-        codeScopeBinding: requireCodeScopeBindingService(context).relink(
-          requireString(args, "bindingId"),
-          requireActor(args),
-          {
-            ...mutationOptions(args),
-            ...optionalPositiveIntegerProperty(args, "expectedRevision"),
-          },
-        ),
+    {
+      const bindingId = requireString(args, "bindingId");
+      const actor = requireActor(args);
+      const options = {
+        ...mutationOptions(args),
+        ...optionalPositiveIntegerProperty(args, "expectedRevision"),
       };
+      const bindings = requireCodeScopeBindingService(context);
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        const sourceBinding = bindings.getBindingForRelink(bindingId);
+        return context.codeMapService.pinnedRelinkForMutation(sourceBinding)
+          .then(trusted => ({ codeScopeBinding:
+            bindings.relink(bindingId, actor, options, trusted) }));
+      }
+      return { codeScopeBinding: bindings.relink(bindingId, actor, options) };
+    }
     case "questboard_create_task_for_code_scope":
-      return requireCodeScopeBindingService(context).createTaskForScope(
-        {
+    {
+      const input = {
           projectId: requireString(args, "projectId"),
           codeNodeId: requireString(args, "codeNodeId"),
           ...optionalEnumProperty(args, "kind", CODE_SCOPE_BINDING_KINDS),
@@ -1657,10 +1758,15 @@ export function executeQuestBoardAgentTool(
             ...optionalEnumProperty(args, "priority", TASK_PRIORITIES),
             ...optionalStringArrayProperty(args, "tags"),
           },
-        },
-        requireActor(args),
-        mutationOptions(args),
-      );
+      };
+      const actor = requireActor(args), options = mutationOptions(args);
+      const bindings = requireCodeScopeBindingService(context);
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        return context.codeMapService.pinnedNodeForMutation(input.projectId, input.codeNodeId)
+          .then((pinned) => bindings.createTaskForScope(input, actor, options, pinned));
+      }
+      return bindings.createTaskForScope(input, actor, options);
+    }
     case "questboard_get_agent_focus":
       return {
         focus: requireAgentFocusService(context).latest(requireString(args, "projectId")),
@@ -1729,23 +1835,105 @@ export function executeQuestBoardAgentTool(
           ...optionalPositiveIntegerProperty(args, "expectedRevision"),
         },
       );
+    case "questboard_list_source_structure_candidates": {
+      const projectId = requireString(args, "projectId");
+      service.getProject(projectId);
+      const codeMap = requireCodeMapService(context);
+      return codeMap.isolatedReadsEnabled
+        ? listSourceStructureCandidatesAsync(codeMap, args, context.readAbortSignal).then((candidates) => ({ candidates }))
+        : { candidates: listSourceStructureCandidates(codeMap, args) };
+    }
+    case "questboard_preview_source_structure_flow_sync": {
+      const selection = sourceStructureChannelSelection(args);
+      service.getProject(selection.projectId);
+      const codeMap = requireCodeMapService(context);
+      const sync = requireSourceStructureFlowSync(context);
+      if (codeMap.isolatedReadsEnabled) {
+        return codeMap.sourceStructurePreviewGraphAsync(selection.projectId, selection, context.readAbortSignal)
+          .then((graph) => ({
+            preview: sync.previewTrustedProjection(selection.projectId, selection.selectionKey, graph),
+          }));
+      }
+      const pinned = resolveSourceStructureSelection(codeMap, selection);
+      return {
+        preview: sync.preview(selection.projectId, selection.selectionKey, pinned),
+      };
+    }
+    case "questboard_apply_source_structure_flow_sync": {
+      const selection = sourceStructureChannelSelection(args);
+      service.getProject(selection.projectId);
+      const claimedActor = requireActor(args);
+      const actor = sourceStructureApplyActor(context.sourceStructureApplyAuthority,
+        selection.projectId, claimedActor);
+      const fields = sourceStructureApplyRequestFields(args);
+      const codeMap = requireCodeMapService(context);
+      const sync = requireSourceStructureFlowSync(context);
+      if (codeMap.isolatedReadsEnabled) {
+        const revision = codeMap.snapshotRevisionToken(selection.projectId);
+        return codeMap.sourceStructureApplySourceAsync(selection.projectId, selection, context.readAbortSignal)
+          .then(({ selection: pinned, graph }) => {
+            context.readAbortSignal?.throwIfAborted();
+            const assertCurrent = () => codeMap.assertSnapshotRevision(selection.projectId, revision);
+            assertCurrent();
+            return { result: sync.apply({
+              projectId: selection.projectId, selectionKey: selection.selectionKey,
+              selection: pinned,
+              expectedSnapshotId: selection.expectedSnapshotId,
+              expectedSourceIndexedAt: selection.expectedSourceIndexedAt,
+              ...fields, actor,
+            }, { graph, assertCurrent }) };
+          });
+      }
+      const pinned = resolveSourceStructureSelection(codeMap, selection);
+      return {
+        result: sync.apply({
+          projectId: selection.projectId, selectionKey: selection.selectionKey,
+          selection: pinned,
+          expectedSnapshotId: selection.expectedSnapshotId,
+          expectedSourceIndexedAt: selection.expectedSourceIndexedAt,
+          ...fields, actor,
+        }),
+      };
+    }
     case "questboard_preview_code_map_investigation_sync": {
       const sync = requireCodeMapInvestigationSyncService(context);
-      return {
-        preview: sync.preview(requireString(args, "projectId"), codeMapSyncSelection(args)),
-      };
+      const projectId = requireString(args, "projectId");
+      const selection = codeMapSyncSelection(args);
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        return context.codeMapService.investigationPreviewSourceAsync(projectId, selection.codeNodeIds, context.readAbortSignal)
+          .then((source) => ({ preview: sync.previewTrustedProjection(projectId, source, selection) }));
+      }
+      return { preview: sync.preview(projectId, selection) };
     }
     case "questboard_apply_code_map_investigation_sync": {
       const sync = requireCodeMapInvestigationSyncService(context);
+      const projectId = requireString(args, "projectId");
+      const selection = {
+        ...codeMapSyncSelection(args),
+        expectedProjectionFingerprint: requireString(args, "expectedProjectionFingerprint"),
+      };
+      const actor = requireActor(args);
+      const requestId = requireString(args, "requestId");
+      if (context.codeMapService?.isolatedReadsEnabled) {
+        const codeMap = context.codeMapService;
+        const revision = codeMap.snapshotRevisionToken(projectId);
+        return codeMap.investigationPreviewSourceAsync(projectId, selection.codeNodeIds, context.readAbortSignal)
+          .then((source) => {
+            context.readAbortSignal?.throwIfAborted();
+            const assertCurrent = () => codeMap.assertSnapshotRevision(projectId, revision);
+            assertCurrent();
+            return { result: sync.apply(projectId, selection, actor, requestId,
+              { source, assertCurrent }) };
+          });
+      }
       return {
         result: sync.apply(
-          requireString(args, "projectId"),
+          projectId,
           {
-            ...codeMapSyncSelection(args),
-            expectedProjectionFingerprint: requireString(args, "expectedProjectionFingerprint"),
+            ...selection,
           },
-          requireActor(args),
-          requireString(args, "requestId"),
+          actor,
+          requestId,
         ),
       };
     }
@@ -1762,6 +1950,13 @@ export function executeQuestBoardAgentTool(
 }
 
 export function describeQuestBoardError(error: unknown): { code: string; message: string } {
+  if (error instanceof SourceStructureChannelError) return { code: error.code, message: error.message };
+  if (error instanceof SourceStructureSelectionError) return {
+    code: error.code, message: "Source Structure selection is invalid or its pinned source changed",
+  };
+  if (error instanceof SourceStructureBindingConflict) return {
+    code: error.code, message: "Source Structure binding or Flow target requires review",
+  };
   if (error instanceof QuestBoardRemoteToolError) return { code: error.code, message: error.message };
   if (error instanceof CodeMapQueryError) return { code: error.code, message: error.message };
   if (error instanceof CodeProviderLifecycleError) return { code: error.code, message: error.message };
@@ -1786,6 +1981,14 @@ export function describeQuestBoardError(error: unknown): { code: string; message
 function normalizeAgentToolRuntime(runtime: QuestBoardAgentToolRuntime): QuestBoardAgentToolContext {
   if ("service" in runtime) return runtime;
   return { service: runtime };
+}
+
+function requireSourceStructureFlowSync(context: QuestBoardAgentToolContext): SourceStructureFlowSyncService {
+  if (!context.sourceStructureFlowSyncService) {
+    throw new SourceStructureChannelError("source_structure_sync_unavailable",
+      "Source Structure sync is not available in this runtime");
+  }
+  return context.sourceStructureFlowSyncService;
 }
 
 function codeMapProviderStatusSummary(report: CodeMapProviderCapabilityReport): Record<string, unknown> {
@@ -1819,20 +2022,20 @@ async function codeMapAgentStatus(
 ): Promise<Record<string, unknown>> {
   const project = service.getProject(projectId);
   const codeMap = context.codeMapService;
-  const cached = codeMap?.getCached(projectId);
-  const snapshotState = codeMap?.snapshotLifecycleState(projectId);
-  const hydrationDiagnostic = codeMap?.hydrationDiagnostic(projectId);
-  const snapshotIdentity = codeMap?.snapshotIdentity(projectId);
-  const providerCapabilities = codeMap
-    ? await codeMap.providerCapabilitiesWithPreflight(projectId, project.rootPath)
-    : undefined;
+  const summary = codeMap ? await codeMap.snapshotReadSummary(projectId) : { indexed: false };
+  const snapshotState = 'snapshotState' in summary ? summary.snapshotState : undefined;
+  const hydrationDiagnostic = 'hydrationDiagnostic' in summary ? summary.hydrationDiagnostic : undefined;
+  const snapshotIdentity = 'snapshotIdentity' in summary ? summary.snapshotIdentity : undefined;
+  const providerCapabilities = codeMap && !summary.indexed
+    ? await codeMap.unindexedProviderCapabilities(projectId, project.rootPath)
+    : ('providerCapabilities' in summary ? summary.providerCapabilities : undefined);
   const refresh = codeMap?.refreshJob(projectId);
   const recommendedNextAction = recommendCodeMapNextAction({
     projectId,
     surface: "status",
     enabled: Boolean(codeMap),
     rootPathConfigured: Boolean(project.rootPath),
-    indexed: Boolean(cached),
+    indexed: summary.indexed,
     ...(snapshotState ?? {}),
     ...(providerCapabilities ? { providerCapabilities } : {}),
     ...(refresh ? { refresh } : {}),
@@ -1842,14 +2045,14 @@ async function codeMapAgentStatus(
     enabled: Boolean(codeMap),
     available: Boolean(codeMap),
     rootPathConfigured: Boolean(project.rootPath),
-    indexed: Boolean(cached),
+    indexed: summary.indexed,
     ...(codeMap ? { provider: codeMap.providerId, capabilities: codeMap.capabilities } : {}),
-    ...(cached
+    ...(summary.indexed
       ? {
-          indexedAt: cached.graph.indexedAt,
-          nodeCount: cached.graph.nodes.length,
-          relationCount: cached.graph.relations.length,
-          projectionQuality: cached.projection.quality,
+          indexedAt: summary.indexedAt,
+          nodeCount: summary.nodeCount,
+          relationCount: summary.relationCount,
+          projectionQuality: summary.projectionQuality,
         }
       : {}),
     ...(snapshotState ?? {}),
@@ -1864,7 +2067,7 @@ function refreshCodeMapForAgent(
   context: QuestBoardAgentToolContext,
   service: QuestBoardService,
   projectId: string,
-): { refresh: Record<string, unknown> } {
+): { refresh: Record<string, unknown> } | Promise<{ refresh: Record<string, unknown> }> {
   const project = service.getProject(projectId);
   const codeMap = requireCodeMapService(context);
   if (!project.rootPath) {
@@ -1874,7 +2077,7 @@ function refreshCodeMapForAgent(
     );
   }
   const refresh = codeMap.startRefresh({ projectId, rootPath: project.rootPath });
-  return {
+  const result = (indexed: boolean): { refresh: Record<string, unknown> } => ({
     refresh: {
       projectId,
       provider: codeMap.providerId,
@@ -1883,17 +2086,22 @@ function refreshCodeMapForAgent(
       phase: refresh.phase,
       startedAt: refresh.startedAt,
       updatedAt: refresh.updatedAt,
-      lastGoodSnapshotAvailable: Boolean(codeMap.getCached(projectId)),
+      lastGoodSnapshotAvailable: indexed,
       recommendedNextAction: recommendCodeMapNextAction({
         projectId,
         surface: "refresh",
         enabled: true,
         rootPathConfigured: true,
-        indexed: Boolean(codeMap.getCached(projectId)),
+        indexed,
         refresh,
       }),
     },
-  };
+  });
+  // Older in-memory service integrations retain a synchronous agent contract.
+  // Only the daemon's configured isolated read mode returns a Promise.
+  return codeMap.isolatedReadsEnabled
+    ? codeMap.snapshotReadSummary(projectId).then((snapshot) => result(snapshot.indexed))
+    : result(Boolean(codeMap.getCached(projectId)));
 }
 
 function requireCodeMapService(context: QuestBoardAgentToolContext): CodeMapService {

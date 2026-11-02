@@ -48,6 +48,7 @@ const MUTATING_TOOLS = new Set([
   "questboard_relink_task_code_scope",
   "questboard_create_task_for_code_scope",
   "questboard_apply_code_map_investigation_sync",
+  "questboard_apply_source_structure_flow_sync",
   "questboard_apply_migration_batch",
 ]);
 

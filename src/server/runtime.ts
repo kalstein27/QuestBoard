@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { QuestBoardService } from "../application/quest-board-service.js";
 import type { CodeMapService } from "../application/code-map-service.js";
 import type { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
+import type { SourceStructureFlowSyncService } from "../application/source-structure-flow-sync.js";
 import type { CodeMapAugmentationService } from "../application/code-map-augmentation.js";
 import type { CodeScopeBindingService } from "../application/code-scope-binding.js";
 import type { AgentFocusService } from "../application/agent-focus.js";
@@ -24,6 +25,7 @@ export interface QuestBoardHttpRuntimeOptions {
   daemonIdentity?: QuestBoardDaemonIdentity;
   codeMapService?: CodeMapService;
   codeMapInvestigationSyncService?: CodeMapInvestigationSyncService;
+  sourceStructureFlowSyncService?: SourceStructureFlowSyncService;
   codeMapAugmentationService?: CodeMapAugmentationService;
   codeScopeBindingService?: CodeScopeBindingService;
   agentFocusService?: AgentFocusService;
@@ -56,6 +58,7 @@ export async function startQuestBoardHttpRuntime(
     ...(options.daemonIdentity ? { daemonIdentity: options.daemonIdentity } : {}),
     ...(options.codeMapService ? { codeMapService: options.codeMapService } : {}),
     ...(options.codeMapInvestigationSyncService ? { codeMapInvestigationSyncService: options.codeMapInvestigationSyncService } : {}),
+    ...(options.sourceStructureFlowSyncService ? { sourceStructureFlowSyncService: options.sourceStructureFlowSyncService } : {}),
     ...(options.codeMapAugmentationService ? { codeMapAugmentationService: options.codeMapAugmentationService } : {}),
     ...(options.codeScopeBindingService ? { codeScopeBindingService: options.codeScopeBindingService } : {}),
     ...(options.agentFocusService ? { agentFocusService: options.agentFocusService } : {}),

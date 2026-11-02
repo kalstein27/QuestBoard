@@ -3,6 +3,7 @@ import { computeCodeMapSnapshotIdentity, type CodeMapSnapshotIdentity } from "./
 import {
   assertValidCodeGraphSnapshot,
   type CodeGraphSnapshot,
+  type CodeNode,
   type CodeIndexRequest,
   type CodeIntelligenceProvider,
 } from "./code-intelligence.js";
@@ -63,8 +64,77 @@ import {
   type PersistedCodeMapSnapshotEnvelope,
 } from "./code-map-persistence.js";
 import type { CodeMapRefreshJobReceipt } from "./code-map-persistence.js";
+import type { SourceStructureChannelSelection } from "./source-structure-channel.js";
+import type { SourceStructureSyncGraph } from "./source-structure-sync-graph.js";
+import type {
+  TaskCodeScopeBinding, CodeScopePinnedRelink,
+} from "./code-scope-binding.js";
+import type { SourceStructureSelection } from "./source-structure-sync-graph.js";
+import {
+  createCodeMapSourceTreePage,
+  type CodeMapSourceTreeRequest,
+  type CodeMapSourceTreePage,
+} from "./code-map-web-read.js";
 
 export type CodeMapRefreshMode = "full" | "incremental" | "cache-hit";
+export type CodeMapIsolatedReadOperation =
+  "query" | "continuations" | "subsystems" | "subsystem_read" | "status"
+  | "source_structure_preview" | "source_structure_apply" | "web_bootstrap"
+  | "source_tree" | "investigation_preview" | "code_scope_relink";
+export interface SourceStructureApplySource {
+  graph: SourceStructureSyncGraph;
+  selection: SourceStructureSelection;
+}
+export interface CodeMapIsolatedReadRequest {
+  projectId: string;
+  rootPath: string;
+  operation: CodeMapIsolatedReadOperation;
+  input?: unknown;
+  manualRelations: readonly ReturnType<CodeMapManualRelationReader["listCodeMapManualRelations"]>[number][];
+}
+export type CodeMapIsolatedReadExecutor = (request: CodeMapIsolatedReadRequest, signal?: AbortSignal) => Promise<unknown>;
+
+export interface CodeMapSnapshotReadSummary {
+  indexed: boolean;
+  indexedAt?: string;
+  nodeCount?: number;
+  relationCount?: number;
+  projectionQuality?: CodeArchitectureProjection["quality"];
+  snapshotState?: CodeMapSnapshotLifecycleState;
+  snapshotIdentity?: CodeMapSnapshotIdentity;
+  hydrationDiagnostic?: CodeMapHydrationDiagnostic;
+  providerCapabilities?: CodeMapProviderCapabilityReport;
+}
+export interface CodeMapWebBootstrap extends CodeMapSnapshotReadSummary {
+  /** Light compatibility-only lens; no raw member/relation ID arrays. */
+  projection?: {
+    projectId: string;
+    sourceIndexedAt: string;
+    quality: CodeArchitectureProjection["quality"];
+    nodes: readonly (Pick<CodeArchitectureProjection["nodes"][number], "id" | "kind" | "title"> & { memberCount: number })[];
+    relations: readonly (Pick<CodeArchitectureProjection["relations"][number], "id" | "from" | "to" | "kind"> & { sourceRelationCount: number })[];
+  };
+  nodeKinds: readonly string[];
+  manualRelations: readonly CodeMapManualRelationView[];
+}
+export interface CodeMapInvestigationPreviewSource {
+  projection: CodeArchitectureProjection;
+  /** Only requested raw IDs that actually exist. Never the full raw graph. */
+  matchedRawCodeNodeIds: readonly string[];
+}
+/** Bounded IPC receipt from a separate indexing process, never a full graph. */
+export interface CodeMapIsolatedRefreshReceipt {
+  projectId: string;
+  indexedAt: string;
+  snapshotId: string;
+  mode: CodeMapRefreshMode;
+  nodeCount: number;
+  relationCount: number;
+  changedCodeNodeCount: number;
+  changedArchitectureNodeCount: number;
+}
+export type CodeMapIsolatedRefreshExecutor =
+  (request: CodeIndexRequest) => Promise<CodeMapIsolatedRefreshReceipt>;
 
 export interface CodeMapSnapshot {
   /** Canonical provider-neutral Code Map source of truth. */
@@ -276,6 +346,263 @@ export class CodeMapService {
   readonly #hydrationAttempted = new Set<string>();
   readonly #refreshJobs = new Map<string, CodeMapRefreshJobReceipt>();
   readonly #refreshTasks = new Map<string, Promise<void>>();
+  #isolatedRefreshExecutor: CodeMapIsolatedRefreshExecutor | undefined;
+  #isolatedReadExecutor: CodeMapIsolatedReadExecutor | undefined;
+
+  /** Opt in only for daemon background refresh; direct refresh keeps its tested contract. */
+  setIsolatedRefreshExecutor(executor: CodeMapIsolatedRefreshExecutor): void {
+    if (this.#isolatedRefreshExecutor) throw new Error("Code Map isolated refresh executor already configured");
+    this.#isolatedRefreshExecutor = executor;
+  }
+
+  /** Isolate graph-heavy *read* work while preserving existing sync domain APIs. */
+  setIsolatedReadExecutor(executor: CodeMapIsolatedReadExecutor): void {
+    if (this.#isolatedReadExecutor) throw new Error("Code Map isolated read executor already configured");
+    this.#isolatedReadExecutor = executor;
+  }
+
+  get isolatedReadsEnabled(): boolean {
+    return Boolean(this.#isolatedReadExecutor);
+  }
+
+  async #isolatedRead<T>(
+    projectId: string, operation: CodeMapIsolatedReadOperation, input?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    const executor = this.#isolatedReadExecutor;
+    if (!executor) return undefined;
+    // Use only a root resolved from the server-owned Project registry, never
+    // accept a client-supplied file system path through the read transport.
+    const rootPath = this.#persistence?.rootPathForProject?.(projectId);
+    if (!rootPath) throw new CodeMapQueryError("code_map_not_indexed",
+      "Code Map has no trusted project root for isolated read");
+    return await executor({
+      projectId, rootPath, operation,
+      ...(input !== undefined ? { input } : {}),
+      manualRelations: this.#manualRelations?.listCodeMapManualRelations(projectId) ?? [],
+    }, signal) as T;
+  }
+
+  async queryAsync(projectId: string, input: CodeMapQueryInput, signal?: AbortSignal): Promise<CodeMapQueryResult> {
+    return await this.#isolatedRead<CodeMapQueryResult>(projectId, "query", input, signal)
+      ?? this.query(projectId, input);
+  }
+
+  async queryContinuationsAsync(
+    projectId: string, input: CodeMapContinuationQueryInput, signal?: AbortSignal,
+  ): Promise<CodeMapContinuationResult> {
+    return await this.#isolatedRead<CodeMapContinuationResult>(projectId, "continuations", input, signal)
+      ?? this.queryContinuations(projectId, input);
+  }
+
+  async querySourceSubsystemsAsync(
+    projectId: string, input: CodeSourceSubsystemQueryInput, signal?: AbortSignal,
+  ): Promise<CodeSourceSubsystemQueryResult> {
+    return await this.#isolatedRead<CodeSourceSubsystemQueryResult>(projectId, "subsystems", input, signal)
+      ?? this.querySourceSubsystems(projectId, input);
+  }
+
+  async sourceSubsystemsAsync(projectId: string, signal?: AbortSignal): Promise<CodeSourceSubsystemRead> {
+    return await this.#isolatedRead<CodeSourceSubsystemRead>(projectId, "subsystem_read", undefined, signal)
+      ?? this.sourceSubsystems(projectId);
+  }
+
+  /** A bounded, server-owned pinned source selection for read-only Flow preview.
+   * Never exposes a raw CodeGraphSnapshot to the daemon or the client. */
+  async sourceStructurePreviewGraphAsync(
+    projectId: string, selection: SourceStructureChannelSelection, signal?: AbortSignal,
+  ): Promise<SourceStructureSyncGraph> {
+    if (!this.#isolatedReadExecutor) {
+      throw new CodeMapQueryError("code_map_query_invalid",
+        "Source Structure isolated preview requires an isolated Code Map reader");
+    }
+    if (selection.projectId !== projectId) {
+      throw new CodeMapQueryError("code_map_query_invalid", "Source Structure project identity mismatch");
+    }
+    const result = await this.#isolatedRead<SourceStructureSyncGraph>(
+      projectId, "source_structure_preview", selection, signal,
+    );
+    if (!result || result.projectId !== projectId
+      || result.snapshotId !== selection.expectedSnapshotId
+      || result.sourceIndexedAt !== selection.expectedSourceIndexedAt) {
+      throw new CodeMapQueryError("code_map_snapshot_changed",
+        "Source Structure isolated preview snapshot identity changed");
+    }
+    return result;
+  }
+
+  /** Web initial read with no full graph or full six-role member lists in IPC. */
+  async webBootstrapAsync(projectId: string, signal?: AbortSignal): Promise<CodeMapWebBootstrap> {
+    return await this.#isolatedRead<CodeMapWebBootstrap>(projectId, "web_bootstrap", undefined, signal)
+      ?? this.webBootstrap(projectId);
+  }
+
+  /** Both page and graph are derived in the SAME disposable child from one
+   * exact pinned snapshot. Never trust a client-created subsystem page. */
+  async sourceStructureApplySourceAsync(
+    projectId: string, selection: SourceStructureChannelSelection, signal?: AbortSignal,
+  ): Promise<SourceStructureApplySource> {
+    if (!this.#isolatedReadExecutor || selection.projectId !== projectId) {
+      throw new CodeMapQueryError("code_map_query_invalid",
+        "Source Structure apply requires a trusted isolated reader");
+    }
+    const result = await this.#isolatedRead<SourceStructureApplySource>(
+      projectId, "source_structure_apply", selection, signal,
+    );
+    if (!result || result.graph.projectId !== projectId
+      || result.graph.snapshotId !== selection.expectedSnapshotId
+      || result.graph.sourceIndexedAt !== selection.expectedSourceIndexedAt
+      || result.selection.expectedSnapshotId !== selection.expectedSnapshotId
+      || result.selection.expectedSourceIndexedAt !== selection.expectedSourceIndexedAt) {
+      throw new CodeMapQueryError("code_map_snapshot_changed",
+        "Source Structure apply read returned a different snapshot");
+    }
+    return result;
+  }
+
+  async sourceTreePageAsync(
+    projectId: string, input: CodeMapSourceTreeRequest, signal?: AbortSignal,
+  ): Promise<CodeMapSourceTreePage> {
+    return await this.#isolatedRead<CodeMapSourceTreePage>(projectId, "source_tree", input, signal)
+      ?? this.sourceTreePage(projectId, input);
+  }
+
+  /** Called only inside the disposable read process when isolated mode is on. */
+  async webBootstrap(projectId: string): Promise<CodeMapWebBootstrap> {
+    const summary = await this.snapshotReadSummary(projectId);
+    const cached = this.getCached(projectId);
+    return {
+      ...summary,
+      nodeKinds: cached ? [...new Set(cached.graph.nodes.map((node) => node.kind))].sort() : [],
+      manualRelations: cached ? this.manualRelations(projectId) : [],
+      ...(cached ? { projection: {
+        projectId: cached.projection.projectId,
+        sourceIndexedAt: cached.projection.sourceIndexedAt,
+        quality: cached.projection.quality,
+        nodes: cached.projection.nodes.map(({ id, kind, title, memberNodeIds }) =>
+          ({ id, kind, title, memberCount: memberNodeIds.length })),
+        relations: cached.projection.relations.map(({ id, from, to, kind, sourceRelationIds }) =>
+          ({ id, from, to, kind, sourceRelationCount: sourceRelationIds.length })),
+      } } : {}),
+    };
+  }
+
+  sourceTreePage(projectId: string, input: CodeMapSourceTreeRequest): CodeMapSourceTreePage {
+    const cached = this.getCached(projectId);
+    if (!cached) throw new CodeMapQueryError("code_map_not_indexed", "Code Map is not indexed");
+    return createCodeMapSourceTreePage(cached.graph, this.#snapshotIdentities.get(projectId), input);
+  }
+
+  async investigationPreviewSourceAsync(
+    projectId: string, requestedCodeNodeIds?: readonly string[], signal?: AbortSignal,
+  ): Promise<CodeMapInvestigationPreviewSource> {
+    return await this.#isolatedRead<CodeMapInvestigationPreviewSource>(
+      projectId, "investigation_preview", requestedCodeNodeIds ?? [], signal,
+    ) ?? this.investigationPreviewSource(projectId, requestedCodeNodeIds);
+  }
+
+  /** Exact compatibility projection and raw-ID validation evidence, evaluated
+   * inside the disposable worker in isolated mode. Apply retains its own CAS. */
+  investigationPreviewSource(
+    projectId: string, requestedCodeNodeIds?: readonly string[],
+  ): CodeMapInvestigationPreviewSource {
+    const cached = this.getCached(projectId);
+    if (!cached) throw new CodeMapQueryError("code_map_not_indexed", "Code Map is not indexed");
+    const selected = new Set(requestedCodeNodeIds ?? []);
+    return {
+      projection: cached.projection,
+      matchedRawCodeNodeIds: selected.size
+        ? cached.graph.nodes.filter((node) => selected.has(node.id)).map((node) => node.id) : [],
+    };
+  }
+
+  async snapshotReadSummary(projectId: string, signal?: AbortSignal): Promise<CodeMapSnapshotReadSummary> {
+    const isolated = await this.#isolatedRead<CodeMapSnapshotReadSummary>(projectId, "status", undefined, signal);
+    if (isolated) return isolated;
+    const cached = this.getCached(projectId);
+    const snapshotState = this.snapshotLifecycleState(projectId);
+    const snapshotIdentity = this.snapshotIdentity(projectId);
+    const hydrationDiagnostic = this.hydrationDiagnostic(projectId);
+    const providerCapabilities = this.providerCapabilities(projectId);
+    return {
+      indexed: Boolean(cached),
+      ...(cached ? {
+        indexedAt: cached.graph.indexedAt,
+        nodeCount: cached.graph.nodes.length,
+        relationCount: cached.graph.relations.length,
+        projectionQuality: cached.projection.quality,
+      } : {}),
+      ...(snapshotState ? { snapshotState } : {}),
+      ...(snapshotIdentity ? { snapshotIdentity } : {}),
+      ...(hydrationDiagnostic ? { hydrationDiagnostic } : {}),
+      ...(providerCapabilities ? { providerCapabilities } : {}),
+    };
+  }
+
+  /** Pre-index provider discovery does not hydrate any giant cached raw graph. */
+  snapshotRevisionToken(projectId: string): string {
+    const token = this.#persistence?.store.revisionToken?.(projectId);
+    if (!token) throw new CodeMapQueryError("code_map_not_indexed",
+      "Trusted persisted Code Map snapshot revision is unavailable");
+    return token;
+  }
+
+  assertSnapshotRevision(projectId: string, expected: string): void {
+    if (this.snapshotRevisionToken(projectId) !== expected) {
+      throw new CodeMapQueryError("code_map_snapshot_changed",
+        "Trusted Code Map snapshot changed while preparing the mutation");
+    }
+  }
+
+  /** A single native exact-node fact from a pinned child, coupled with the
+   * synchronous revision fence that must run inside the SQLite transaction. */
+  async pinnedNodeForMutation(
+    projectId: string, nodeId: string,
+  ): Promise<{ node: CodeNode; assertCurrent: () => void }> {
+    if (!this.#isolatedReadExecutor) {
+      throw new CodeMapQueryError("code_map_query_invalid",
+        "Pinned CodeScope mutation requires an isolated Code Map reader");
+    }
+    const revision = this.snapshotRevisionToken(projectId);
+    const result = await this.queryAsync(projectId, {
+      operation: "get_node", nodeId, limit: 1,
+    });
+    if (result.operation !== "get_node" || result.node.id !== nodeId || !result.snapshotId) {
+      throw new CodeMapQueryError("code_map_snapshot_changed",
+        "Pinned CodeScope node does not match the trusted source");
+    }
+    const assertCurrent = () => this.assertSnapshotRevision(projectId, revision);
+    assertCurrent();
+    return { node: result.node, assertCurrent };
+  }
+
+  async pinnedRelinkForMutation(binding: TaskCodeScopeBinding): Promise<CodeScopePinnedRelink> {
+    if (!this.#isolatedReadExecutor) {
+      throw new CodeMapQueryError("code_map_query_invalid",
+        "Pinned CodeScope relink requires an isolated Code Map reader");
+    }
+    const revision = this.snapshotRevisionToken(binding.projectId);
+    const result = await this.#isolatedRead<{
+      snapshotId: string; analysis: CodeScopePinnedRelink["analysis"];
+    }>(binding.projectId, "code_scope_relink", binding);
+    if (!result?.snapshotId || !result.analysis?.state) {
+      throw new CodeMapQueryError("code_map_snapshot_changed",
+        "CodeScope relink analysis has no trusted source identity");
+    }
+    const assertCurrent = () => this.assertSnapshotRevision(binding.projectId, revision);
+    assertCurrent();
+    return { binding, analysis: result.analysis, assertCurrent };
+  }
+
+  /** Pre-index provider discovery does not hydrate any giant cached raw graph. */
+  async unindexedProviderCapabilities(
+    projectId: string, canonicalRootPath?: string,
+  ): Promise<CodeMapProviderCapabilityReport | undefined> {
+    const rootPath = canonicalRootPath ?? this.#persistence?.rootPathForProject?.(projectId);
+    if (!this.#providerRegistry) return undefined;
+    const preflight = await inspectCodeMapPreflight(rootPath, this.#preflightInventory);
+    return this.#providerRegistry.report(undefined, rootPath, preflight);
+  }
 
   constructor(
     provider: CodeIntelligenceProvider,
@@ -538,7 +865,22 @@ export class CodeMapService {
     this.#persistRefreshJob(indexing);
 
     try {
-      const refreshed = await this.refresh(request);
+      const isolated = this.#isolatedRefreshExecutor
+        ? await this.#isolatedRefreshExecutor(request)
+        : undefined;
+      // Child has already written a fully pinned immutable snapshot. Do not
+      // pass or deserialize the graph through IPC. Existing sync readers still
+      // hydrate lazily on their next request (migration to child read API is P2).
+      if (isolated) {
+        if (isolated.projectId !== request.projectId || !isolated.snapshotId
+          || !isolated.indexedAt || !Number.isSafeInteger(isolated.nodeCount)
+          || isolated.nodeCount < 0 || !Number.isSafeInteger(isolated.relationCount)
+          || isolated.relationCount < 0) {
+          throw new Error("Isolated Code Map receipt is invalid");
+        }
+        this.invalidate(request.projectId);
+      }
+      const refreshed = isolated ? undefined : await this.refresh(request);
       const finishedAt = this.#now();
       const completed: CodeMapRefreshJobReceipt = {
         ...indexing,
@@ -546,12 +888,12 @@ export class CodeMapService {
         phase: "complete",
         updatedAt: finishedAt,
         finishedAt,
-        indexedAt: refreshed.graph.indexedAt,
-        mode: refreshed.mode,
-        nodeCount: refreshed.graph.nodes.length,
-        relationCount: refreshed.graph.relations.length,
-        changedCodeNodeCount: refreshed.changedCodeNodeIds.length,
-        changedArchitectureNodeCount: refreshed.changedArchitectureNodeIds.length,
+        indexedAt: isolated?.indexedAt ?? refreshed!.graph.indexedAt,
+        mode: isolated?.mode ?? refreshed!.mode,
+        nodeCount: isolated?.nodeCount ?? refreshed!.graph.nodes.length,
+        relationCount: isolated?.relationCount ?? refreshed!.graph.relations.length,
+        changedCodeNodeCount: isolated?.changedCodeNodeCount ?? refreshed!.changedCodeNodeIds.length,
+        changedArchitectureNodeCount: isolated?.changedArchitectureNodeCount ?? refreshed!.changedArchitectureNodeIds.length,
       };
       this.#refreshJobs.set(request.projectId, completed);
       this.#persistRefreshJob(completed);

@@ -305,19 +305,46 @@ export class CodeMapInvestigationSyncService {
     return this.previewProjection(snapshot.projection, normalized);
   }
 
+  /** The projection is supplied only by a trusted server-owned P2 read child.
+   * SQLite binding comparison remains in the daemon; the full raw graph does not. */
+  previewTrustedProjection(
+    projectId: string,
+    source: { projection: CodeArchitectureProjection; matchedRawCodeNodeIds: readonly string[] },
+    selection: CodeMapInvestigationSyncSelection = {},
+  ): CodeMapInvestigationSyncPreview {
+    if (!this.repository.getProject(projectId) || source.projection.projectId !== projectId) {
+      throw new CodeMapInvestigationSyncError("code_map_sync_project_mismatch",
+        "Trusted Investigation sync projection project identity mismatch");
+    }
+    const normalized = this.normalizeSelection(
+      source.projection, new Set(source.matchedRawCodeNodeIds), selection,
+    );
+    return this.previewProjection(source.projection, normalized);
+  }
+
   apply(
     projectId: string,
     input: CodeMapInvestigationSyncApplyInput,
     actor: ActorRef,
     requestId: string,
+    trusted?: {
+      source: { projection: CodeArchitectureProjection; matchedRawCodeNodeIds: readonly string[] };
+      assertCurrent: () => void;
+    },
   ): CodeMapInvestigationSyncResult {
-    const snapshot = this.snapshot(projectId);
-    const projection = snapshot.projection;
+    const snapshot = trusted ? undefined : this.snapshot(projectId);
+    const projection = trusted?.source.projection ?? snapshot!.projection;
+    if (projection.projectId !== projectId) {
+      throw new CodeMapInvestigationSyncError("code_map_sync_project_mismatch",
+        "Trusted projection does not match the selected project");
+    }
     const projectionFingerprint = fingerprintCodeMapInvestigationProjection(projection);
     if (projectionFingerprint !== input.expectedProjectionFingerprint) {
       throw new CodeMapSyncPreviewStaleError();
     }
-    const selection = this.normalizeSelection(projection, new Set(snapshot.graph.nodes.map((node) => node.id)), input);
+    const selection = this.normalizeSelection(projection,
+      new Set(trusted?.source.matchedRawCodeNodeIds
+        ?? snapshot!.graph.nodes.map((node) => node.id)), input);
     const normalizedRequestId = normalizeSyncRequestId(requestId);
     const request: MutationRequest = {
       requestId: normalizedRequestId,
@@ -338,8 +365,8 @@ export class CodeMapInvestigationSyncService {
     };
 
     return this.repository.runIdempotentMutation(request, () => {
-      const freshSnapshot = this.snapshot(projectId);
-      const freshProjection = freshSnapshot.projection;
+      trusted?.assertCurrent();
+      const freshProjection = trusted?.source.projection ?? this.snapshot(projectId).projection;
       if (fingerprintCodeMapInvestigationProjection(freshProjection) !== input.expectedProjectionFingerprint) {
         throw new CodeMapSyncPreviewStaleError();
       }
@@ -354,7 +381,9 @@ export class CodeMapInvestigationSyncService {
         );
         if (hasRecreatableDetachedBinding) throw new CodeMapSyncDetachedRequiresConfirmationError();
       }
-      return this.applyPreview(freshProjection, preview, actor);
+      const result = this.applyPreview(freshProjection, preview, actor);
+      trusted?.assertCurrent();
+      return result;
     }).value;
   }
 

@@ -192,6 +192,40 @@ export async function runQuestBoardCli(
           actor,
         }));
         break;
+      case "source-structure-candidates":
+        result = await execute("questboard_list_source_structure_candidates", compact({
+          projectId: requiredFlag(parsed.flags, "project"),
+          offset: optionalBoundedIntegerFlag(parsed.flags, "offset", 0, 1000000),
+          limit: optionalBoundedIntegerFlag(parsed.flags, "limit", 1, 12),
+          pathPrefix: parsed.flags.get("path-prefix"),
+          expectedSnapshotId: parsed.flags.get("snapshot"),
+          expectedSourceIndexedAt: parsed.flags.get("indexed-at"),
+        }));
+        break;
+      case "source-structure-preview":
+        result = await execute("questboard_preview_source_structure_flow_sync",
+          sourceStructureFlags(parsed.flags));
+        break;
+      case "source-structure-apply": {
+        if (!parsed.flags.has("approved")) {
+          throw new TypeError("Source Structure apply requires explicit --approved");
+        }
+        if (!parsed.flags.has("request-id")) {
+          throw new TypeError("Source Structure apply requires explicit --request-id");
+        }
+        const hasRevision = parsed.flags.has("selection-revision");
+        const newSelection = parsed.flags.has("new-selection");
+        if (hasRevision === newSelection) {
+          throw new TypeError("Choose --selection-revision N or --new-selection");
+        }
+        result = await execute("questboard_apply_source_structure_flow_sync", {
+          ...sourceStructureFlags(parsed.flags),
+          expectedSelectionFingerprint: requiredFlag(parsed.flags, "selection-fingerprint"),
+          expectedSelectionRevision: newSelection ? null : requiredPositiveIntegerFlag(parsed.flags, "selection-revision"),
+          actor, requestId: requiredFlag(parsed.flags, "request-id"), approved: true,
+        });
+        break;
+      }
       default:
         throw new TypeError(`Unknown command: ${command}`);
     }
@@ -220,7 +254,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       continue;
     }
     const key = token.slice(2);
-    if (["help", "clear-blocked", "clear-guardrail"].includes(key)) {
+    if (["help", "clear-blocked", "clear-guardrail", "approved", "new-selection"].includes(key)) {
       flags.set(key, "true");
       continue;
     }
@@ -247,6 +281,37 @@ function compact<T extends Record<string, unknown>>(value: T): Record<string, un
 function splitTags(value: string | undefined): string[] | undefined {
   if (value === undefined) return undefined;
   return value.split(",").map((tag) => tag.trim()).filter(Boolean);
+}
+
+function optionalBoundedIntegerFlag(
+  flags: Map<string, string>, key: string, min: number, max: number,
+): number | undefined {
+  if (!flags.has(key)) return undefined;
+  const number = Number(requiredFlag(flags, key));
+  if (!Number.isSafeInteger(number) || number < min || number > max) {
+    throw new TypeError(`--${key} must be an integer between ${min} and ${max}`);
+  }
+  return number;
+}
+
+function sourceStructureFlags(flags: Map<string, string>): Record<string, unknown> {
+  const csv = (key: string): string[] | undefined => {
+    const value = flags.get(key);
+    if (value === undefined) return undefined;
+    return value.split(",").map((item) => item.trim());
+  };
+  return compact({
+    projectId: requiredFlag(flags, "project"),
+    selectionKey: requiredFlag(flags, "selection-key"),
+    offset: optionalBoundedIntegerFlag(flags, "offset", 0, 1000000),
+    limit: optionalBoundedIntegerFlag(flags, "limit", 1, 12),
+    pathPrefix: flags.get("path-prefix"),
+    selectedSubsystemIds: csv("subsystems") ?? [],
+    selectedRawAnchorIds: csv("anchors"),
+    selectedRelationIds: csv("relations"),
+    expectedSnapshotId: requiredFlag(flags, "snapshot"),
+    expectedSourceIndexedAt: requiredFlag(flags, "indexed-at"),
+  });
 }
 
 function checkpointClearableFlag(
@@ -306,6 +371,10 @@ function helpText(): string {
     "  add-artifact TASK_ID --type file|url|commit|screenshot|operation|log|other --title TITLE --locator VALUE [--description TEXT]",
     "  relations TASK_ID",
     "  add-relation --from-type task|artifact --from ID --to-type task|artifact --to ID --kind KIND [--label TEXT]",
+    "  source-structure-candidates --project ID [--offset N --limit N --path-prefix RELATIVE --snapshot PIN --indexed-at TIME]",
+    "  source-structure-preview --project ID --selection-key KEY --subsystems ID[,ID] --snapshot PIN --indexed-at TIME [--anchors ID[,ID] --relations ID[,ID] --offset N --limit N --path-prefix RELATIVE]",
+    "  source-structure-apply (same selection flags) --selection-fingerprint SHA256 (--new-selection | --selection-revision N) --approved --request-id ID",
+    "  Source Structure apply additionally requires a separately authenticated daemon-side permission. CLI --actor-* flags alone are never authorization.",
     "",
     "  Mutations generate an idempotency request id automatically. Use --request-id ID only to replay/debug an exact request.",
   ].join("\n");

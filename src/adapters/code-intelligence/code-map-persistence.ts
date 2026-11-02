@@ -69,6 +69,19 @@ export class FileSystemCodeMapPersistedSnapshotStore implements CodeMapPersisted
     this.#storageRoot = resolve(storageRoot);
   }
 
+  revisionToken(projectId: string): string | undefined {
+    const path = projectSnapshotPath(this.#storageRoot, projectId);
+    try {
+      const stat = statSync(path, { bigint: true });
+      if (!stat.isFile()) return undefined;
+      // Snapshot writers always create a new inode and atomically rename.
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
   load(projectId: string): unknown | undefined {
     const path = projectSnapshotPath(this.#storageRoot, projectId);
     if (!existsSync(path)) return undefined;

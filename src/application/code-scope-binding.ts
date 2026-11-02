@@ -59,6 +59,16 @@ export interface CodeScopeBindingMutationOptions {
   requestId?: string;
   expectedRevision?: number;
 }
+/** Only built by a trusted server-owned P2 exact-node read, never from JSON. */
+export interface CodeScopePinnedNode {
+  node: CodeNode;
+  assertCurrent: () => void;
+}
+export interface CodeScopePinnedRelink {
+  binding: TaskCodeScopeBinding;
+  analysis: Pick<TaskCodeScopeBindingView, "state" | "staleReason" | "codeNode" | "relink">;
+  assertCurrent: () => void;
+}
 
 export interface CodeScopeBindingListFilter {
   taskId?: string;
@@ -99,6 +109,8 @@ function bindingState(
     ? { state: "stale", staleReason: "target_identity_changed", codeNode: node }
     : { state: "stale", staleReason: "target_missing" };
 }
+
+export { bindingState as analyzeCodeScopeBinding };
 
 function relinkFallbackCandidates(
   binding: TaskCodeScopeBinding,
@@ -166,20 +178,38 @@ export class CodeScopeBindingService {
       .map((binding) => this.view(binding, graph));
   }
 
+  /** Lightweight Web bootstrap metadata. Graph-dependent validity is unknown,
+   * not guessed; regular list()/mutation paths still verify exact node identity. */
+  listAnchorsWithoutGraph(projectId: string): Array<TaskCodeScopeBinding & { task: Task }> {
+    if (!this.repository.getProject(projectId)) throw new EntityNotFoundError("Project", projectId);
+    return this.repository.listTaskCodeScopeBindings(projectId).map((binding) => {
+      const task = this.repository.getTask(binding.taskId);
+      if (!task) throw new EntityNotFoundError("Task", binding.taskId);
+      return { ...binding, task };
+    });
+  }
+
   attach(
     input: AttachTaskCodeScopeInput,
     actor: ActorRef,
     options: CodeScopeBindingMutationOptions = {},
+    trusted?: CodeScopePinnedNode,
   ): TaskCodeScopeBindingView {
     return this.runMutation("code-scope.binding.attach", actor, options.requestId, input, () => {
+      trusted?.assertCurrent();
       const task = this.requireTaskInProject(input.taskId, input.projectId);
-      const graph = this.requireGraph(input.projectId);
-      const node = this.requireNode(graph, input.codeNodeId);
+      const graph = trusted ? undefined : this.requireGraph(input.projectId);
+      const node = trusted?.node ?? this.requireNode(graph!, input.codeNodeId);
+      if (node.id !== input.codeNodeId) throw new CodeScopeBindingError(
+        "code_map_node_not_found", "Pinned Code Map node identity mismatch");
       const kind = requireKind(input.kind ?? "targets");
       const existing = this.repository.listTaskCodeScopeBindings(input.projectId).find((binding) =>
         binding.taskId === task.id && binding.codeNodeId === node.id && binding.kind === kind,
       );
-      if (existing) return this.view(existing, graph);
+      if (existing) {
+        trusted?.assertCurrent();
+        return trusted ? this.viewTrustedNode(existing, node) : this.view(existing, graph);
+      }
       const timestamp = this.now();
       const binding: TaskCodeScopeBinding = {
         id: this.newId(),
@@ -197,7 +227,9 @@ export class CodeScopeBindingService {
         updatedAt: timestamp,
         revision: 1,
       };
-      return this.view(this.repository.createTaskCodeScopeBinding(binding), graph);
+      const created = this.repository.createTaskCodeScopeBinding(binding);
+      trusted?.assertCurrent();
+      return trusted ? this.viewTrustedNode(created, node) : this.view(created, graph);
     });
   }
 
@@ -221,6 +253,7 @@ export class CodeScopeBindingService {
     bindingId: string,
     actor: ActorRef,
     options: CodeScopeBindingMutationOptions = {},
+    trusted?: CodeScopePinnedRelink,
   ): TaskCodeScopeBindingView {
     return this.runMutation("code-scope.binding.relink", actor, options.requestId, {
       bindingId,
@@ -228,9 +261,28 @@ export class CodeScopeBindingService {
     }, () => {
       const binding = this.repository.getTaskCodeScopeBinding(bindingId);
       if (!binding) throw new EntityNotFoundError("Task CodeScope binding", bindingId);
-      const graph = this.requireGraph(binding.projectId);
-      const view = this.view(binding, graph);
-      if (view.state === "active") return view;
+      trusted?.assertCurrent();
+      if (options.expectedRevision !== undefined && binding.revision !== options.expectedRevision) {
+        throw new EntityRevisionConflictError("Task CodeScope binding",
+          binding.id, options.expectedRevision, binding.revision);
+      }
+      if (trusted && (binding.projectId !== trusted.binding.projectId
+        || binding.id !== trusted.binding.id || binding.revision !== trusted.binding.revision
+        || binding.codeNodeId !== trusted.binding.codeNodeId
+        || binding.codeCanonicalIdentity !== trusted.binding.codeCanonicalIdentity
+        || binding.codePath !== trusted.binding.codePath
+        || binding.codeSignature !== trusted.binding.codeSignature)) {
+        throw new CodeScopeBindingError("code_scope_relink_conflict",
+          "CodeScope binding changed while checking its trusted relink candidate");
+      }
+      const graph = trusted ? undefined : this.requireGraph(binding.projectId);
+      const view = trusted
+        ? { ...binding, ...trusted.analysis, task: this.requireTaskInProject(binding.taskId, binding.projectId) }
+        : this.view(binding, graph);
+      if (view.state === "active") {
+        trusted?.assertCurrent();
+        return view;
+      }
       if (view.state !== "relinkable" || !view.relink) {
         throw new CodeScopeBindingError("code_scope_relink_unavailable", `CodeScope binding ${bindingId} has no unique relink target`);
       }
@@ -254,10 +306,12 @@ export class CodeScopeBindingService {
         updatedAt: this.now(),
         revision: binding.revision + 1,
       };
-      return this.view(this.repository.updateTaskCodeScopeBinding(
+      const updatedBinding = this.repository.updateTaskCodeScopeBinding(
         updated,
         options.expectedRevision ?? binding.revision,
-      ), graph);
+      );
+      trusted?.assertCurrent();
+      return trusted ? this.viewTrustedNode(updatedBinding, target) : this.view(updatedBinding, graph);
     });
   }
 
@@ -265,11 +319,15 @@ export class CodeScopeBindingService {
     input: CreateTaskForCodeScopeInput,
     actor: ActorRef,
     options: CodeScopeBindingMutationOptions = {},
+    trusted?: CodeScopePinnedNode,
   ): { task: Task; binding: TaskCodeScopeBindingView } {
     return this.runMutation("code-scope.task.create", actor, options.requestId, input, () => {
+      trusted?.assertCurrent();
       if (!this.repository.getProject(input.projectId)) throw new EntityNotFoundError("Project", input.projectId);
-      const graph = this.requireGraph(input.projectId);
-      const node = this.requireNode(graph, input.codeNodeId);
+      const graph = trusted ? undefined : this.requireGraph(input.projectId);
+      const node = trusted?.node ?? this.requireNode(graph!, input.codeNodeId);
+      if (node.id !== input.codeNodeId) throw new CodeScopeBindingError(
+        "code_map_node_not_found", "Pinned Code Map node identity mismatch");
       const kind = requireKind(input.kind ?? "targets");
       const task = this.tasks.createTask({ ...input.task, projectId: input.projectId }, actor);
       const timestamp = this.now();
@@ -289,8 +347,22 @@ export class CodeScopeBindingService {
         updatedAt: timestamp,
         revision: 1,
       };
-      return { task, binding: this.view(this.repository.createTaskCodeScopeBinding(binding), graph) };
+      const created = this.repository.createTaskCodeScopeBinding(binding);
+      trusted?.assertCurrent();
+      return { task, binding: trusted
+        ? this.viewTrustedNode(created, node) : this.view(created, graph) };
     });
+  }
+
+  private viewTrustedNode(binding: TaskCodeScopeBinding, node: CodeNode): TaskCodeScopeBindingView {
+    const task = this.requireTaskInProject(binding.taskId, binding.projectId);
+    return { ...binding, task, state: "active", codeNode: node };
+  }
+
+  getBindingForRelink(bindingId: string): TaskCodeScopeBinding {
+    const binding = this.repository.getTaskCodeScopeBinding(bindingId);
+    if (!binding) throw new EntityNotFoundError("Task CodeScope binding", bindingId);
+    return binding;
   }
 
   private view(binding: TaskCodeScopeBinding, graph: CodeGraphSnapshot | undefined): TaskCodeScopeBindingView {

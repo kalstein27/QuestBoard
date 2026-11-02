@@ -18,6 +18,7 @@ export * from "./application/code-map-subsystem-read.js";
 export * from "./application/source-structure-sync-graph.js";
 export * from "./application/source-structure-binding.js";
 export * from "./application/source-structure-flow-sync.js";
+export * from "./application/source-structure-channel.js";
 export * from "./application/code-map-overlay.js";
 export * from "./application/code-map-service.js";
 export * from "./application/code-map-persistence.js";

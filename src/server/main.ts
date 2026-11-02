@@ -3,6 +3,8 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { QuestBoardService } from "../application/quest-board-service.js";
 import { CodeMapInvestigationSyncService } from "../application/code-map-investigation-sync.js";
+import { SourceStructureFlowSyncService } from "../application/source-structure-flow-sync.js";
+import { SourceStructureChannelError } from "../application/source-structure-channel.js";
 import { CodeMapAugmentationService } from "../application/code-map-augmentation.js";
 import { CodeScopeBindingService } from "../application/code-scope-binding.js";
 import { AgentFocusService } from "../application/agent-focus.js";
@@ -10,6 +12,8 @@ import { createStderrConcurrencyDiagnosticSink } from "../observability/concurre
 import { SqliteQuestBoardRepository } from "../storage/sqlite/sqlite-quest-board-repository.js";
 import { createConfiguredCodeMapRuntime, withManagedServiceCodeMapDefault } from "./code-map-config.js";
 import { pinQuestBoardDaemonIdentity, QUESTBOARD_DAEMON_PROTOCOL } from "./daemon-identity.js";
+import { createIsolatedCodeMapReadExecutor } from "./code-map-isolated-read.js";
+import { createIsolatedCodeMapRefreshExecutor } from "./code-map-isolated-refresh.js";
 import { startQuestBoardHttpRuntime } from "./runtime.js";
 import {
   parseManagedServiceHealthPort,
@@ -36,8 +40,36 @@ const service = new QuestBoardService(repository, undefined, undefined, createSt
 service.setDiagnosticContext({ daemonGenerationId, databaseId: repository.databaseId });
 const codeMapEnv = withManagedServiceCodeMapDefault(process.env, managedServiceMode);
 const codeMapRuntime = createConfiguredCodeMapRuntime(codeMapEnv, repository);
+// Heavy background refreshes run in a disposable process. Keep direct service
+// APIs unchanged and allow an explicit opt-out during phased rollout.
+if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_REFRESH !== "0") {
+  codeMapRuntime.service.setIsolatedRefreshExecutor(
+    createIsolatedCodeMapRefreshExecutor(codeMapEnv),
+  );
+}
+if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_READ !== "0") {
+  // Bounded reads and server-owned P2 mutation preflights use disposable
+  // workers. Flow Apply still commits synchronously in SQLite, with an exact
+  // persisted-snapshot revision fence before and after transactional writes.
+  codeMapRuntime.service.setIsolatedReadExecutor(
+    createIsolatedCodeMapReadExecutor(codeMapEnv),
+  );
+}
 const codeMapInvestigationSyncService = codeMapRuntime.service
   ? new CodeMapInvestigationSyncService(codeMapRuntime.service, repository)
+  : undefined;
+const sourceStructureFlowSyncService = codeMapRuntime.service
+  ? new SourceStructureFlowSyncService(repository, {
+      read(projectId) {
+        const cached = codeMapRuntime.service!.getCached(projectId);
+        const snapshotId = codeMapRuntime.service!.snapshotIdentity(projectId)?.snapshotId;
+        if (!cached || !snapshotId) {
+          throw new SourceStructureChannelError("source_structure_not_indexed",
+            "An exact trusted Code Map snapshot is required for Source Structure sync");
+        }
+        return { graph: cached.graph, snapshotId };
+      },
+    })
   : undefined;
 const codeMapAugmentationService = codeMapRuntime.service
   ? new CodeMapAugmentationService(codeMapRuntime.service, repository)
@@ -66,6 +98,7 @@ const httpRuntime = await startQuestBoardHttpRuntime(service, {
   daemonIdentity,
   ...(codeMapRuntime.service ? { codeMapService: codeMapRuntime.service } : {}),
   ...(codeMapInvestigationSyncService ? { codeMapInvestigationSyncService } : {}),
+  ...(sourceStructureFlowSyncService ? { sourceStructureFlowSyncService } : {}),
   ...(codeMapAugmentationService ? { codeMapAugmentationService } : {}),
   ...(codeScopeBindingService ? { codeScopeBindingService } : {}),
   agentFocusService,
