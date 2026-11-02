@@ -3,6 +3,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -20,7 +21,11 @@ import type {
   CodeMapSourceStateProvider,
   PersistedCodeMapSnapshotEnvelope,
 } from "../../application/code-map-persistence.js";
-import { DEFAULT_CODE_MAP_IGNORED_DIRECTORIES } from "./file-inventory.js";
+import {
+  DEFAULT_CODE_MAP_IGNORED_DIRECTORIES,
+  gitCodeMapPaths,
+  safeCodeMapPath,
+} from "./file-inventory.js";
 
 // Bounded configurable limit for large code snapshots.
 function maxSnapshotBytes(): number {
@@ -182,6 +187,29 @@ export class FileSystemCodeMapSourceStateProvider implements CodeMapSourceStateP
 
   sourceManifestFingerprint(rootPath: string): string {
     const root = realpathSync.native(resolve(rootPath));
+    const gitPaths = gitCodeMapPaths(root);
+    if (gitPaths) {
+      const hash = createHash("sha256");
+      const excludeComposerVendor = existsSync(join(root, "composer.json"))
+        && existsSync(join(root, "composer.lock"));
+      let count = 0;
+      for (const path of gitPaths) {
+        if (excludeComposerVendor && path.startsWith("vendor/")) continue;
+        if (path.split("/").some((segment) => this.#ignoredDirectories.has(segment))) continue;
+        const full = resolve(root, path);
+        let metadata;
+        try {
+          metadata = lstatSync(full, { bigint: true });
+        } catch { continue; }
+        if (!metadata.isFile()) continue;
+        if (++count > this.#maxFiles) {
+          throw new Error("Code Map source manifest exceeded the configured file cap");
+        }
+        hash.update(path).update("\0").update(String(metadata.size)).update("\0")
+          .update(String(metadata.mtimeNs)).update("\n");
+      }
+      return hash.digest("hex");
+    }
     const directories = [root];
     const entries: string[] = [];
 
@@ -198,6 +226,7 @@ export class FileSystemCodeMapSourceStateProvider implements CodeMapSourceStateP
         }
         if (!child.isFile()) continue;
         const relativePath = portableRelativePath(root, absolutePath);
+        if (!safeCodeMapPath(relativePath)) continue;
         const metadata = statSync(absolutePath, { bigint: true });
         entries.push(`${relativePath}\0${metadata.size}\0${metadata.mtimeNs}`);
         if (entries.length > this.#maxFiles) {

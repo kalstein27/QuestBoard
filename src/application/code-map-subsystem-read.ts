@@ -183,6 +183,8 @@ export interface CodeSourceSubsystemReadQuality {
 export interface CodeSourceSubsystemRead {
   projectId: string;
   sourceIndexedAt: string;
+  /** The shared MCP/HTTP overview may omit optional samples to stay under a byte cap. */
+  responseTruncation?: { reason: "response_byte_cap"; maxBytes: number };
   identityNamespaces: {
     rawNode: "code:node:*";
     compatibilityArchitectureNode: "code-map:node:*";

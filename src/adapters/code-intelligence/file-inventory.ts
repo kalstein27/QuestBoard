@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { CodeFileInventory, CodeFileInventoryEntry } from "../../application/code-map-hierarchy.js";
@@ -19,7 +20,40 @@ export const DEFAULT_CODE_MAP_IGNORED_DIRECTORIES = new Set([
   ".idea",
   ".vscode",
   "DerivedData",
+  ".venv",
+  "venv",
+  "__pycache__",
 ]);
+
+/** Credentials are never source-tree entries, even when accidentally tracked. */
+export function safeCodeMapPath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  const parts = normalized.split("/");
+  if (!parts.length || parts.some((part) => !part || part === "." || part === "..")) return false;
+  if (parts.some((part) => DEFAULT_CODE_MAP_IGNORED_DIRECTORIES.has(part))) return false;
+  const name = parts.at(-1)!.toLowerCase();
+  if (name === ".env" || name.startsWith(".env.")
+      || /\.(?:key|pem|p12|pfx|der)$/.test(name)) return false;
+  return true;
+}
+
+/** Git correctly honors nested .gitignore and per-user excludes. */
+export function gitCodeMapPaths(root: string): readonly string[] | undefined {
+  let top: string;
+  try {
+    top = execFileSync("git", ["-C", root, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch { return undefined; }
+  if (realpathSync.native(top) !== realpathSync.native(root)) return undefined;
+  const output = execFileSync("git", [
+    "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+  ], {
+    encoding: "buffer", timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return [...new Set(output.toString("utf8").split("\0").filter(safeCodeMapPath))].sort();
+}
 
 export interface FileSystemCodeFileInventoryOptions {
   maxFiles?: number;
@@ -57,6 +91,22 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
     const excludeComposerVendor = !this.#includeComposerDependencies
       && existsSync(join(root, "composer.json"))
       && existsSync(join(root, "composer.lock"));
+    // Explicit diagnostic inventory still walks vendor even when Git ignores it.
+    const gitPaths = this.#includeComposerDependencies ? undefined : gitCodeMapPaths(root);
+    if (gitPaths) {
+      const files: CodeFileInventoryEntry[] = [];
+      for (const path of gitPaths) {
+        if (excludeComposerVendor && path.startsWith("vendor/")) continue;
+        try {
+          if (!lstatSync(resolve(root, path)).isFile()) continue;
+        } catch { continue; } // A tracked path may have been deleted locally.
+        files.push({ path });
+        if (files.length > this.#maxFiles) {
+          throw new Error("Code Map file inventory exceeded the configured file cap");
+        }
+      }
+      return files;
+    }
     const directories = [root];
     const files: CodeFileInventoryEntry[] = [];
 
@@ -75,7 +125,9 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
           continue;
         }
         if (!entry.isFile()) continue;
-        files.push({ path: portableRelativePath(root, absolutePath) });
+        const path = portableRelativePath(root, absolutePath);
+        if (!safeCodeMapPath(path)) continue;
+        files.push({ path });
         if (files.length > this.#maxFiles) {
           throw new Error(`Code Map file inventory exceeded ${this.#maxFiles} files under ${rootPath}`);
         }

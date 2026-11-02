@@ -74,6 +74,7 @@ import {
   type CodeSourceSubsystemQueryInput,
 } from "../application/code-map-subsystem-read.js";
 import { CODE_SOURCE_SUBSYSTEM_RELATION_KINDS } from "../application/code-map-subsystems.js";
+import { boundCodeMapSubsystemOverview } from "../application/code-map-subsystem-transport.js";
 import type { SourceStructureFlowSyncService } from "../application/source-structure-flow-sync.js";
 import {
   SourceStructureChannelError,
@@ -863,7 +864,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_code_map_subsystems",
-    description: "Read the bounded evidence-backed Source subsystems / Calls view without returning the full raw graph. Subsystems and relations use a separate deterministic code-subsystem:* derived namespace; notable navigation always terminates at canonical raw code:node:* IDs. Calls are primary structural evidence, actual raw instantiates/implements are auxiliary, and broad depends_on/external/name/path inference is excluded. Raw relation ownership is preserved.",
+    description: "Read a response-byte-bounded Source subsystems / Calls overview without the raw graph. Large responses omit some notable/evidence samples and set responseTruncation.reason=response_byte_cap; retrieve full details using paged questboard_query_code_map_subsystems. Subsystems/relations use code-subsystem:* identities; calls are evidence-backed, not guessed from names or paths.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1601,7 +1602,7 @@ export function executeQuestBoardAgentTool(
       return requireCodeMapService(context).sourceSubsystemsAsync(
           requireString(args, "projectId"),
           context.readAbortSignal,
-        ).then((subsystems) => ({ subsystems }));
+        ).then((subsystems) => ({ subsystems: boundCodeMapSubsystemOverview(subsystems) }));
     case "questboard_query_code_map_subsystems":
       return requireCodeMapService(context).querySourceSubsystemsAsync(
           requireString(args, "projectId"),
