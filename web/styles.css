@@ -231,10 +231,11 @@ main { min-width: 0; }
 .flow-group-membership-select { width: 100%; min-width: 0; }
 @media (pointer: coarse) { .investigation-group-head { min-height: 44px; padding: 6px 9px; } }
 .investigation-edges { position: absolute; inset: 0; z-index: 2; overflow: visible; pointer-events: none; }
-.investigation-nodes { position: absolute; inset: 0; z-index: 3; }
+.investigation-nodes { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+/* The full-size node layer must not intercept work-group headers or their buttons. */
 .investigation-node {
   position: absolute; width: 230px; min-height: 116px; padding: 11px 12px;
-  display: grid; align-content: start; gap: 7px; user-select: none; touch-action: auto;
+  display: grid; align-content: start; gap: 7px; user-select: none; touch-action: none; pointer-events: auto;
   border: 1px solid #303743; border-radius: 9px; background: rgba(20,24,30,.96);
   box-shadow: 0 9px 22px rgba(0,0,0,.28); cursor: default;
 }
@@ -259,11 +260,11 @@ main { min-width: 0; }
 .investigation-graph-node > .investigation-node-head { padding: 12px 12px 8px; }
 .investigation-graph-identity { min-width: 0; display: grid; gap: 4px; }
 .graph-node-type { color: #98a4ff; }
-.investigation-graph-description { margin: 0; padding: 0 12px 11px; color: #929aa6; font-size: 10px; line-height: 1.45; user-select: text; }
+.investigation-graph-description { margin: 0; padding: 0 12px 11px; color: #929aa6; font-size: 10px; line-height: 1.45; user-select: none; }
 .graph-icon-button, .graph-item-action, .graph-add-button { border: 1px solid #2e3540; background: #11151a; color: #9aa3af; cursor: pointer; }
 .graph-icon-button { width: 25px; height: 25px; border-radius: 6px; }
 .investigation-item-list { display: grid; border-top: 1px solid #252c35; }
-.investigation-item { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #252c35; background: rgba(10,13,17,.32); user-select: text; }
+.investigation-item { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #252c35; background: rgba(10,13,17,.32); user-select: none; }
 .investigation-item:hover { background: rgba(116,134,255,.035); }
 .investigation-item-single-task { cursor: pointer; touch-action: manipulation; }
 .investigation-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
@@ -951,9 +952,13 @@ main { min-height: 0; overflow: hidden; }
   .task-status-icon-in_progress { animation: none; }
 }
 
-.investigation-graph-node { min-height: 0; }
+.investigation-graph-node {
+  width: max-content; min-width: 270px; max-width: 330px; min-height: 0; height: auto;
+}
 .investigation-graph-node > .investigation-node-head { padding: 10px; }
-.investigation-graph-description, .investigation-item-description, .investigation-item-links { display: none; }
+.investigation-graph-description { display: -webkit-box; overflow-wrap: anywhere; }
+.investigation-item-description { display: block; overflow-wrap: anywhere; }
+.investigation-item-links { display: grid; }
 .investigation-item { padding: 6px 10px; }
 .investigation-item-head {
   position: relative; top: auto; right: auto; z-index: 3;
@@ -961,11 +966,18 @@ main { min-height: 0; overflow: hidden; }
 }
 .investigation-item-title {
   display: block; flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow-wrap: anywhere; white-space: normal;
 }
-.investigation-item-actions { display: none; pointer-events: auto; }
+.investigation-graph-node .investigation-node-title {
+  white-space: normal; overflow-wrap: anywhere;
+}
+.investigation-item-actions {
+  display: flex; opacity: 0; visibility: hidden; pointer-events: none;
+}
 .investigation-item:hover .investigation-item-actions,
-.investigation-item:focus-within .investigation-item-actions { display: flex; }
+.investigation-item:focus-within .investigation-item-actions {
+  opacity: 1; visibility: visible; pointer-events: auto;
+}
 .graph-add-button { width: 26px; height: 24px; margin: 4px 7px 7px; padding: 0; text-align: center; }
 .graph-add-button { opacity: 0; transition: opacity .12s ease, background .12s ease; }
 .investigation-graph-node:hover > .graph-add-button,
@@ -1108,19 +1120,13 @@ main { min-height: 0; overflow: hidden; }
 }
 
 @media (pointer: coarse) {
-  .investigation-item-actions {
-    display: flex;
-    position: absolute; top: 50%; right: 0; z-index: 6;
-    transform: translateY(-50%);
-    opacity: 0; visibility: hidden; pointer-events: none;
-  }
-  .investigation-item:hover .investigation-item-actions {
-    display: flex; opacity: 0; visibility: hidden; pointer-events: none;
-  }
+  /* Touch cannot hover a hidden control to reveal it. Keep item actions reachable. */
+  .investigation-item-actions,
+  .investigation-item:hover .investigation-item-actions,
   .investigation-item:focus-within .investigation-item-actions {
-    display: flex; opacity: 1; visibility: visible; pointer-events: auto;
+    display: flex; position: static; transform: none;
+    opacity: 1; visibility: visible; pointer-events: auto;
   }
-  .investigation-item:focus-within .investigation-item-title { padding-right: 106px; }
   .investigation-graph-node > .investigation-node-head .graph-icon-button,
   .graph-add-button,
   .investigation-link-remove { opacity: 1; }

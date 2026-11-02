@@ -3003,6 +3003,7 @@ function attachInvestigationGroupDrag(head, shell, group) {
     }).filter(Boolean);
     if (groupStarts.length === 0) return;
 
+    event.preventDefault();
     head.setPointerCapture(event.pointerId);
     head.classList.add("dragging-group");
     const startClientX = event.clientX;
@@ -3230,6 +3231,7 @@ function investigationGraphNode(graphNode, position) {
   });
   head.append(identity, edit);
   card.append(head);
+  if (graphNode.description) card.append(node("p", "investigation-graph-description", graphNode.description));
 
   const items = state.investigationGraphItems
     .filter((item) => item.nodeId === graphNode.id)
@@ -3243,7 +3245,8 @@ function investigationGraphNode(graphNode, position) {
   addItem.title = "Add item";
   addItem.addEventListener("click", () => void addInvestigationItemFromPrompt(graphNode.id));
   card.append(addItem);
-  attachInvestigationDrag(card, "investigation_node", graphNode.id, head);
+  // Drag from the card body as well as its header, but never from interactive controls.
+  attachInvestigationDrag(card, "investigation_node", graphNode.id);
   card.addEventListener("click", (event) => {
     if (card._suppressClick || event.target.closest("button")) {
       card._suppressClick = false;
@@ -3444,6 +3447,7 @@ function investigationGraphItem(item) {
   actions.append(edit, task, connect);
   head.append(title, actions);
   wrapper.append(head);
+  if (item.description) wrapper.append(node("p", "investigation-item-description", item.description));
 
   if (taskLinks.length > 0) {
     const chips = node("div", "investigation-task-chips");
@@ -3785,13 +3789,27 @@ function chooseInvestigationCandidate(promptTitle, candidates, labeler) {
 }
 
 function attachInvestigationDrag(card, entityType, entityId, dragRegion = card) {
+  // Capture-phase guard also covers linked Task rows, whose click handler is
+  // nested inside the draggable card. A stale drag must not eat a later menu click.
+  card.addEventListener("click", (event) => {
+    if (!card._suppressClick) return;
+    const recent = Date.now() - (card._dragEndAt || 0) < 400;
+    card._suppressClick = false;
+    if (recent) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
   dragRegion.classList.add("investigation-node-drag-region");
   dragRegion.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || state.investigationHistoryBusy) return;
-    if (event.target instanceof Element && event.target.closest("button, input, textarea, select, a")) return;
+    if (event.target instanceof Element && event.target.closest(
+      "button, input, textarea, select, a, [contenteditable], [data-flow-no-drag]"
+    )) return;
     const key = boardNodeKey(entityType, entityId);
     const start = state.displayPositions.get(key);
     if (!start) return;
+    event.preventDefault(); // Prevent native text selection on card titles and item content.
     dragRegion.setPointerCapture(event.pointerId);
     card.classList.add("dragging-node");
     const startClientX = event.clientX;
@@ -3819,8 +3837,9 @@ function attachInvestigationDrag(card, entityType, entityId, dragRegion = card) 
       dragRegion.removeEventListener("pointerup", onEnd);
       dragRegion.removeEventListener("pointercancel", onEnd);
       card.classList.remove("dragging-node");
-      if (moved) {
+      if (moved && endEvent.type === "pointerup") {
         card._suppressClick = true;
+        card._dragEndAt = Date.now();
         void commitInvestigationMove(entityType, entityId, start, latest);
       }
     };
@@ -3853,6 +3872,7 @@ function bindInvestigationViewportGestures() {
     if (state.viewMode !== "investigation") return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (event.target instanceof Element && event.target.closest(".investigation-node, .investigation-controls, button, input, textarea, select, a")) return;
+    event.preventDefault();
     board.setPointerCapture(event.pointerId);
     state.investigationPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     beginInvestigationGesture();
