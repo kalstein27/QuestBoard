@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ScipPhpLexicalScope } from "./scip-normalizer.js";
+import type { ScipPhpLexicalScope, ScipPhpTypedMethodCall } from "./scip-normalizer.js";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 12 * 1024 * 1024;
@@ -40,6 +40,10 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
   const documents = object.documents as Record<string, unknown>;
   const scopes = new Map<string, readonly ScipPhpLexicalScope[]>();
   let total = 0;
+  let totalCalls = 0;
+  const validName = (value: unknown, max: number): value is string =>
+    typeof value === "string" && value.length > 0 && value.length <= max
+    && !/[\r\n\0]/.test(value);
   for (const [path, list] of Object.entries(documents)) {
     if (!paths.has(path) || !Array.isArray(list)) throw new Error("Unexpected PHP AST document");
     const items: ScipPhpLexicalScope[] = [];
@@ -52,14 +56,30 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
         throw new Error("Invalid PHP lexical scope range or type");
       }
       if (scope.type === "anonymous") {
+        if (scope.calls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope has unsupported data");
         items.push({ type: "anonymous", range: scope.range });
-      } else if (typeof scope.name === "string" && scope.name.length > 0 && scope.name.length <= 255
-        && isRange(scope.nameRange)) {
+      } else if (validName(scope.name, 255) && isRange(scope.nameRange)) {
+        if (scope.className !== undefined && (scope.type !== "method" || !validName(scope.className, 1024))) {
+          throw new Error("Invalid PHP lexical class identity");
+        }
+        const calls: ScipPhpTypedMethodCall[] = [];
+        if (scope.calls !== undefined && !Array.isArray(scope.calls)) throw new Error("Invalid PHP typed calls");
+        for (const raw of (scope.calls ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid PHP typed call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) {
+            throw new Error("Invalid PHP typed call identity or range");
+          }
+          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange });
+          if (++totalCalls > 100000) throw new Error("PHP typed call count exceeds cap");
+        }
         items.push({
           type: scope.type as "method" | "function",
           name: scope.name,
           nameRange: scope.nameRange,
           range: scope.range,
+          ...(scope.className ? { className: scope.className as string } : {}),
+          ...(calls.length ? { calls } : {}),
         });
       } else throw new Error("Invalid PHP lexical named scope");
       total++;

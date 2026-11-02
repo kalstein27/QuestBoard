@@ -33,11 +33,21 @@ interface ScipRange {
 }
 
 /** PHP Parser 5 lexical functions/methods, with anonymous nested scopes acting as ownership barriers. */
+export interface ScipPhpTypedMethodCall {
+  className: string;
+  name: string;
+  nameRange: readonly [number, number, number, number];
+}
+
 export interface ScipPhpLexicalScope {
   type: "function" | "method" | "anonymous";
   range: readonly [number, number, number, number];
   name?: string;
   nameRange?: readonly [number, number, number, number];
+  /** Fully qualified class, resolved by PHP Parser NameResolver. */
+  className?: string;
+  /** Directly owned AST method calls with a statically proved receiver type. */
+  calls?: readonly ScipPhpTypedMethodCall[];
 }
 
 interface ScipOccurrence {
@@ -754,6 +764,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpOwnersByDocument = new Map<ScipDocument, Array<{
     range: ScipRange; ownerId: string | undefined;
   }>>();
+  const phpMethodsByQualifiedName = new Map<string, string | null>();
+  const phpTypedCalls: Array<{ document: ScipDocument; ownerId: string; call: ScipPhpTypedMethodCall }> = [];
+  const qualifiedMethodKey = (className: string, methodName: string): string =>
+    className.replace(/^\\+/, "").toLowerCase() + "::" + methodName.toLowerCase();
   if (input.phpLexicalScopes) {
     for (const document of input.index.documents) {
       const scopes = input.phpLexicalScopes.get(document.relativePath);
@@ -775,7 +789,20 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
             && rangeContains(nameRange, definitionRange)
             && node.name.toLowerCase() === scope.name!.toLowerCase();
         });
-        return { range: extent, ownerId: candidates.length === 1 ? candidates[0]!.nodeId : undefined };
+        const ownerId = candidates.length === 1 ? candidates[0]!.nodeId : undefined;
+        if (ownerId && scope.type === "method" && scope.className) {
+          const key = qualifiedMethodKey(scope.className, scope.name);
+          const previous = phpMethodsByQualifiedName.get(key);
+          phpMethodsByQualifiedName.set(key, previous === undefined ? ownerId : previous === ownerId ? ownerId : null);
+        }
+        if (ownerId && scope.calls) {
+          for (const call of scope.calls) {
+            if (rangeContains(extent, tupleRange(call.nameRange))) {
+              phpTypedCalls.push({ document, ownerId, call });
+            }
+          }
+        }
+        return { range: extent, ownerId };
       }).sort((left, right) => rangeSpan(left.range) - rangeSpan(right.range));
       phpOwnersByDocument.set(document, owners);
     }
@@ -892,6 +919,28 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         [{ location: nativeLocation(document.relativePath, occurrence.range), label: "SCIP native reference occurrence" }],
         [{ providerId, fidelity, freshness: "fresh" }]);
     }
+  }
+
+  // Recover only AST-proven receiver calls whose exact target is a single
+  // native SCIP method definition. Do not manufacture target nodes or treat
+  // an unresolved/dynamic receiver as a semantic call.
+  for (const { document, ownerId, call } of phpTypedCalls) {
+    const target = phpMethodsByQualifiedName.get(qualifiedMethodKey(call.className, call.name));
+    if (!target || target === ownerId) continue;
+    const location = tupleRange(call.nameRange);
+    const innermost = phpOwnersByDocument.get(document)?.find((entry) => rangeContains(entry.range, location));
+    if (!innermost || innermost.ownerId !== ownerId) continue;
+    const competingNative = document.occurrences.some((occurrence) =>
+      (occurrence.symbolRoles & SCIP_ROLE_DEFINITION) === 0 && occurrence.range
+      && occurrence.range.startLine === location.startLine
+      && occurrence.range.startCharacter === location.startCharacter
+      && (nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
+        ?? externalNodeBySymbol.get(occurrence.symbol)?.id) !== target);
+    if (competingNative) continue;
+    addRelation(relations, ownerId, target, "calls", 1, [{
+      location: nativeLocation(document.relativePath, location),
+      label: "PHP AST statically typed receiver; SCIP-verified method definition",
+    }], [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
 
   const snapshot: CodeGraphSnapshot = {
