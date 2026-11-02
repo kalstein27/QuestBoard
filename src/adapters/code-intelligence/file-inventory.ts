@@ -100,10 +100,14 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
         try {
           if (!lstatSync(resolve(root, path)).isFile()) continue;
         } catch { continue; } // A tracked path may have been deleted locally.
-        files.push({ path });
-        if (files.length > this.#maxFiles) {
-          throw new Error("Code Map file inventory exceeded the configured file cap");
+        if (files.length >= this.#maxFiles) {
+          process.emitWarning(
+            "Code Map file inventory truncated to " + this.#maxFiles + " files; some files are omitted",
+            { code: "QUESTBOARD_CODE_MAP_INVENTORY_TRUNCATED" },
+          );
+          break;
         }
+        files.push({ path });
       }
       return files;
     }
@@ -127,10 +131,14 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
         if (!entry.isFile()) continue;
         const path = portableRelativePath(root, absolutePath);
         if (!safeCodeMapPath(path)) continue;
-        files.push({ path });
-        if (files.length > this.#maxFiles) {
-          throw new Error(`Code Map file inventory exceeded ${this.#maxFiles} files under ${rootPath}`);
+        if (files.length >= this.#maxFiles) {
+          process.emitWarning(
+            "Code Map file inventory truncated to " + this.#maxFiles + " files; some files are omitted",
+            { code: "QUESTBOARD_CODE_MAP_INVENTORY_TRUNCATED" },
+          );
+          return files.sort((left, right) => left.path.localeCompare(right.path));
         }
+        files.push({ path });
       }
     }
 

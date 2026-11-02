@@ -6,6 +6,7 @@ import {
   type CodeRelationKind,
 } from "./code-intelligence.js";
 import type { CodeMapPreflightReport } from "./code-map-preflight.js";
+import { configuredCodeMapExclusionPrefixes, isConfiguredCodeMapExcluded } from "./code-map-exclusions.js";
 
 export const CODE_PROVIDER_HEALTH_STATES = ["ready", "missing_executable", "degraded"] as const;
 export type CodeProviderHealthState = (typeof CODE_PROVIDER_HEALTH_STATES)[number];
@@ -79,7 +80,7 @@ export interface CodeLanguageCapabilityReport {
   eligibleFileCount: number | null;
   indexedFileCount: number;
   excludedFileCount: number;
-  exclusionReason: "provider_project_scope" | null;
+  exclusionReason: "provider_project_scope" | "configured_path_prefix" | null;
   symbolCount: number;
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
@@ -362,6 +363,7 @@ export class CodeMapProviderRegistry {
     const languages = [...new Set(graph.nodes
       .filter((node) => node.kind === "file")
       .map((node) => normalizeCodeLanguage(node.language)))].sort();
+    const configuredExclusionPrefixes = configuredCodeMapExclusionPrefixes();
     const reports = languages.map((language): CodeLanguageCapabilityReport => {
       const facts = languageFacts(graph, language);
       const configuredForLanguage = providers.filter((provider) =>
@@ -370,9 +372,22 @@ export class CodeMapProviderRegistry {
         .filter((provider) => provider.languages.includes(language) && !provider.available && provider.installOption)
         .map((provider) => provider.installOption!);
       const graphCoverage = graph.coverage?.languages.find((entry) => entry.language === language);
-      const eligibleFileCount = graphCoverage?.semanticEligibleFileCount ?? null;
+      // A configured prefix is a deliberate indexing exclusion, never a missing
+      // semantic fact. Do not subtract a file that already has semantic symbols.
+      // When a provider already declares scope exclusions, trust that stronger
+      // count instead of guessing which excluded files overlap our prefixes.
+      const declaredExclusions = graphCoverage?.semanticExcludedFileCount ?? 0;
+      const configuredExclusions = declaredExclusions === 0 ? facts.files.filter((file) => {
+        const path = file.location?.path;
+        return path && !facts.indexedFilePaths.has(path)
+          && isConfiguredCodeMapExcluded(path, configuredExclusionPrefixes);
+      }).length : 0;
+      const declaredEligibleFileCount = graphCoverage?.semanticEligibleFileCount ?? null;
       const indexedFileCount = graphCoverage?.semanticIndexedFileCount ?? facts.indexedFilePaths.size;
-      const excludedFileCount = graphCoverage?.semanticExcludedFileCount ?? 0;
+      const eligibleFileCount = configuredExclusions > 0
+        ? Math.max(indexedFileCount, (declaredEligibleFileCount ?? facts.files.length) - configuredExclusions)
+        : declaredEligibleFileCount;
+      const excludedFileCount = declaredExclusions + configuredExclusions;
       const fidelity = maxFidelity([
         facts.fidelity,
         graphCoverage?.fidelity ?? "file-only",
@@ -397,7 +412,8 @@ export class CodeMapProviderRegistry {
         eligibleFileCount,
         indexedFileCount,
         excludedFileCount,
-        exclusionReason: graphCoverage?.semanticExclusionReason ?? null,
+        exclusionReason: configuredExclusions > 0 ? "configured_path_prefix"
+          : graphCoverage?.semanticExclusionReason ?? null,
         symbolCount: facts.symbols.length,
         fidelity,
         providerIds: facts.providerIds,

@@ -203,7 +203,12 @@ export class FileSystemCodeMapSourceStateProvider implements CodeMapSourceStateP
         } catch { continue; }
         if (!metadata.isFile()) continue;
         if (++count > this.#maxFiles) {
-          throw new Error("Code Map source manifest exceeded the configured file cap");
+          hash.update("truncated:git:" + this.#maxFiles + "\n");
+          process.emitWarning(
+            "Code Map source manifest truncated to " + this.#maxFiles + " files; freshness is checked for a subset",
+            { code: "QUESTBOARD_CODE_MAP_MANIFEST_TRUNCATED" },
+          );
+          break;
         }
         hash.update(path).update("\0").update(String(metadata.size)).update("\0")
           .update(String(metadata.mtimeNs)).update("\n");
@@ -228,10 +233,16 @@ export class FileSystemCodeMapSourceStateProvider implements CodeMapSourceStateP
         const relativePath = portableRelativePath(root, absolutePath);
         if (!safeCodeMapPath(relativePath)) continue;
         const metadata = statSync(absolutePath, { bigint: true });
-        entries.push(`${relativePath}\0${metadata.size}\0${metadata.mtimeNs}`);
-        if (entries.length > this.#maxFiles) {
-          throw new Error(`Code Map source manifest exceeded ${this.#maxFiles} files`);
+        if (entries.length >= this.#maxFiles) {
+          entries.push("truncated:filesystem:" + this.#maxFiles);
+          process.emitWarning(
+            "Code Map source manifest truncated to " + this.#maxFiles + " files; freshness is checked for a subset",
+            { code: "QUESTBOARD_CODE_MAP_MANIFEST_TRUNCATED" },
+          );
+          directories.length = 0;
+          break;
         }
+        entries.push(`${relativePath}\0${metadata.size}\0${metadata.mtimeNs}`);
       }
     }
 
