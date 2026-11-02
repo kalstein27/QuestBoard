@@ -195,6 +195,7 @@ export function materializeCodeFileHierarchy(
     indexedAt: graph.indexedAt,
     nodes,
     relations,
+    ...(graph.unresolvedPhpMethodCalls ? { unresolvedPhpMethodCalls: graph.unresolvedPhpMethodCalls } : {}),
     ...(graph.providerRuns ? { providerRuns: graph.providerRuns } : {}),
     ...(graph.coverage ? { coverage: graph.coverage } : {}),
   };

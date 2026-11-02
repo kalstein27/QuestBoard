@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractPhpLexicalScopes } from "../src/adapters/code-intelligence/php-lexical-scopes.js";
+import { queryCodeGraph } from "../src/application/code-map-query.js";
 import { normalizeScipGraph, parseScipJsonIndex, type ScipPhpLexicalScope } from "../src/adapters/code-intelligence/scip-normalizer.js";
 
 const symbol = (owner: string, method: string) => "scip-php composer example/app 1.0.0 src/" + owner + ".php/" + owner + "#" + method + "().";
@@ -89,4 +94,148 @@ test("unresolved target, misaligned caller and anonymous ownership never manufac
 test("method case differences are allowed only with one exact class-qualified SCIP definition", () => {
   const graph = build([sample("app\\MODEL\\scoutschedule", "setscoutversion", 5)]);
   assert.equal(graph.relations.filter(edge => edge.kind === "calls")[0]?.to, scipId(graph, setter));
+});
+
+test("MCP callers query distinguishes zero verified calls from same-name unresolved PHP sites", () => {
+  const graph = build([sample("App\\Model\\ScoutSchedule", "setScoutVersion", 5)]);
+  graph.unresolvedPhpMethodCalls = [{ name: "setscoutversion", count: 3 }];
+  const result = queryCodeGraph(graph, "scip-php", {
+    operation: "relations", semantic: "callers", nodeId: scipId(graph, otherSetter)!,
+  });
+  assert.equal(result.operation, "relations");
+  assert.equal(result.entries.length, 0);
+  assert.equal(result.unresolvedSameNameCallSiteCount, 3);
+  assert.equal(result.callersMayBeIncomplete, true);
+});
+
+const orderSources: Record<string, string> = {
+  "src/Order.php": [
+    "<?php", "namespace Domain;",
+    "final class Order {",
+    "public function setVersion(int $v): Order { return $this; }",
+    "public function setStatus(int $s): static { return $this; }", "}",
+  ].join("\n"),
+  "src/OtherOrder.php": [
+    "<?php", "namespace Domain;",
+    "final class OtherOrder {",
+    "public function setVersion(int $v): OtherOrder { return $this; }", "}",
+  ].join("\n"),
+  "src/OrderRepository.php": [
+    "<?php", "namespace Domain;",
+    "final class OrderRepository {",
+    "public static function findById(int $id): ?Order { return null; }",
+    "/** @return Order[] */",
+    "public static function findOpen(): array { return []; }",
+    "/** @return array<Order> */",
+    "public static function findMore(): array { return []; }",
+    "/** @return list<Order> */",
+    "public static function findList(): array { return []; }",
+    "public static function ambiguous(): Order|OtherOrder { return new Order(); }",
+    "}",
+  ].join("\n"),
+  "src/OrderService.php": [
+    "<?php", "namespace Domain;",
+    "final class OrderService {",
+    "public static function bump(int $id): void {",
+    "$order = OrderRepository::findById($id);",
+    "if ($order instanceof Order) { $order->setVersion(2); }",
+    "}",
+    "public static function bumpAll(): void {",
+    "$openOrders = OrderRepository::findOpen();",
+    "foreach ($openOrders as $order) { $order->setVersion(2); }",
+    "}",
+    "public static function reset(Order $order): void {",
+    "$order->setVersion(0)->setStatus(0);",
+    "}",
+    "public static function bumpMore(): void {",
+    "foreach (OrderRepository::findMore() as $order) { $order->setVersion(3); }",
+    "}",
+    "public static function bumpList(): void {",
+    "$orders = OrderRepository::findList();",
+    "foreach ($orders as $order) { $order->setVersion(4); }",
+    "}",
+    "public static function bumpVar(): void {",
+    "/** @var Order[] $orders */",
+    "$orders = getOrdersFromUnknownSource();",
+    "foreach ($orders as $order) { $order->setVersion(5); }",
+    "}",
+    "public static function skipUnknown(object $unknown): void {",
+    "$unknown->setVersion(1);",
+    "}",
+    "public static function skipUnion(): void {",
+    "$order = OrderRepository::ambiguous();",
+    "$order->setVersion(1);",
+    "}",
+    "public static function skipAfterBranch(): void {",
+    "if (true) { $order = new Order(); }",
+    "$order->setVersion(1);",
+    "}",
+    "public static function skipAfterLoop(): void {",
+    "foreach ([new Order()] as $order) { $order->setVersion(1); }",
+    "$order->setVersion(2);",
+    "}",
+    "}",
+  ].join("\n"),
+};
+
+test("real PHP AST: cross-file nullable native returns, docblock foreach and self/static fluent chains remain exact", async (t) => {
+  const autoload = process.env.QUESTBOARD_TEST_PHP_PARSER_AUTOLOAD;
+  if (!autoload) { t.skip("Set QUESTBOARD_TEST_PHP_PARSER_AUTOLOAD to a trusted installed PHP Parser 5 autoload.php"); return; }
+  const root = mkdtempSync(join(tmpdir(), "questboard-php-order-patterns-"));
+  try {
+    mkdirSync(join(root, "src")); mkdirSync(join(root, "vendor"));
+    writeFileSync(join(root, "vendor/autoload.php"), "<?php require " + JSON.stringify(autoload) + ";");
+    for (const [relative, source] of Object.entries(orderSources)) writeFileSync(join(root, relative), source);
+    const phpScopes = await extractPhpLexicalScopes(root, Object.keys(orderSources));
+    const documents = [...phpScopes].map(([relativePath, scopes]) => ({
+      relativePath,
+      language: "php",
+      symbols: scopes.filter((scope) => scope.type === "method" && scope.nameRange)
+        .map((scope) => ({
+          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#" + scope.name + "().",
+          kind: "Method", displayName: scope.name,
+        })),
+      occurrences: scopes.filter((scope) => scope.type === "method" && scope.nameRange)
+        .map((scope) => ({
+          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#" + scope.name + "().",
+          symbolRoles: 1,
+          range: [scope.nameRange![0], scope.nameRange![1], scope.nameRange![3]],
+        })),
+    }));
+    const graph = normalizeScipGraph({
+      projectId: "order-patterns",
+      rootPath: root,
+      indexedAt: "2026-11-02T00:00:00Z",
+      providerId: "scip-php",
+      index: parseScipJsonIndex({ documents }),
+      phpLexicalScopes: phpScopes,
+    });
+    const get = (className: string, methodName: string) => graph.nodes.find((node) =>
+      node.kind === "method" && node.name === methodName
+      && node.canonicalIdentity.includes(className + "#" + methodName));
+    const target = get("Domain\\Order", "setVersion");
+    const status = get("Domain\\Order", "setStatus");
+    assert.ok(target && status);
+    const callOwners = (id: string) => graph.relations.filter((edge) =>
+      edge.kind === "calls" && edge.to === id).map((edge) => ({
+        name: graph.nodes.find((node) => node.id === edge.from)?.name,
+        label: edge.evidence?.[0]?.label,
+      }));
+    const owners = callOwners(target.id);
+    for (const expected of ["bump", "bumpAll", "reset", "bumpMore", "bumpList", "bumpVar"]) {
+      assert.ok(owners.some((entry) => entry.name === expected), "missing " + expected);
+    }
+    assert.ok(callOwners(status.id).some((entry) => entry.name === "reset"), "native static fluent return");
+    for (const excluded of ["skipUnknown", "skipUnion", "skipAfterBranch", "skipAfterLoop"]) {
+      assert.ok(!owners.some((entry) => entry.name === excluded), "incorrect inferred call from " + excluded);
+    }
+    assert.ok(owners.some((entry) => entry.name === "bumpAll" && entry.label?.includes("docblock")));
+    assert.ok(graph.unresolvedPhpMethodCalls?.some((entry) => entry.name === "setversion" && entry.count >= 2));
+    const callers = queryCodeGraph(graph, "scip-php", { operation: "relations", semantic: "callers", nodeId: target.id });
+    assert.equal(callers.operation, "relations");
+    assert.ok((callers.unresolvedSameNameCallSiteCount ?? 0) >= 2);
+    assert.equal(callers.callersMayBeIncomplete, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

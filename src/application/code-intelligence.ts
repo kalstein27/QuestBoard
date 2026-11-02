@@ -159,6 +159,8 @@ export interface CodeGraphSnapshot {
   indexedAt: string;
   nodes: readonly CodeNode[];
   relations: readonly CodeRelation[];
+  /** Unresolved syntactic PHP object call sites grouped by method name; name-only, not attributed to a target. */
+  unresolvedPhpMethodCalls?: readonly { name: string; count: number }[];
   /** Native index audit, absent when an exact provider artifact is unavailable. */
   providerRuns?: readonly CodeProviderRunEvidence[];
   /** Optional mixed-provider fidelity/health summary. Facts remain canonical without it. */

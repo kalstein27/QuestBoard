@@ -226,6 +226,13 @@ function mergeProviderGraphs(
       .at(-1) ?? new Date(0).toISOString(),
     nodes,
     relations,
+    ...(contributions.some((contribution) => contribution.graph.unresolvedPhpMethodCalls !== undefined) ? {
+      unresolvedPhpMethodCalls: [...contributions
+        .flatMap((contribution) => contribution.graph.unresolvedPhpMethodCalls ?? [])
+        .reduce((counts, entry) => counts.set(entry.name, (counts.get(entry.name) ?? 0) + entry.count),
+          new Map<string, number>())].sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, count]) => ({ name, count })),
+    } : {}),
     ...(contributions.some((contribution) => contribution.graph.providerRuns?.length) ? {
       providerRuns: contributions.flatMap((contribution) => contribution.graph.providerRuns ?? [])
         .sort((a, b) => a.providerId.localeCompare(b.providerId)),

@@ -133,6 +133,10 @@ export type CodeMapQueryResult =
       direction: CodeMapQueryDirection;
       semantic?: CodeMapRelationSemantic;
       entries: readonly CodeMapRelationEntry[];
+      /** Count of same-name syntactic object calls whose receiver could not be proved, NOT confirmed calls to this node. */
+      unresolvedSameNameCallSiteCount?: number;
+      /** True if PHP caller lookup cannot establish completeness. Never interpret empty entries as zero usages. */
+      callersMayBeIncomplete?: boolean;
     })
   | (CodeMapQueryEnvelope & {
       operation: "neighborhood";
@@ -524,6 +528,11 @@ export function queryCodeGraph(
         ...(semantic ? { semantic } : {}),
         entries,
         truncated: matching.length > limit,
+        ...(semantic === "callers" && node.kind === "method" && node.language?.toLowerCase() === "php" ? {
+          unresolvedSameNameCallSiteCount:
+            graph.unresolvedPhpMethodCalls?.find((item) => item.name === node.name.toLowerCase())?.count ?? 0,
+          callersMayBeIncomplete: true,
+        } : {}),
       };
     }
     case "neighborhood": {

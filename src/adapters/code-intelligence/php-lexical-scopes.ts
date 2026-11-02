@@ -56,7 +56,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
         throw new Error("Invalid PHP lexical scope range or type");
       }
       if (scope.type === "anonymous") {
-        if (scope.calls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope has unsupported data");
+        if (scope.calls !== undefined || scope.unresolvedCalls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope has unsupported data");
         items.push({ type: "anonymous", range: scope.range });
       } else if (validName(scope.name, 255) && isRange(scope.nameRange)) {
         if (scope.className !== undefined && (scope.type !== "method" || !validName(scope.className, 1024))) {
@@ -70,8 +70,23 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) {
             throw new Error("Invalid PHP typed call identity or range");
           }
-          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange });
+          if (call.evidenceSource !== undefined && !["native", "docblock"].includes(String(call.evidenceSource))) {
+            throw new Error("Invalid PHP typed call evidence source");
+          }
+          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
+            ...(call.evidenceSource ? { evidenceSource: call.evidenceSource as "native" | "docblock" } : {}) });
           if (++totalCalls > 100000) throw new Error("PHP typed call count exceeds cap");
+        }
+        const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
+        if (scope.unresolvedCalls !== undefined && !Array.isArray(scope.unresolvedCalls)) {
+          throw new Error("Invalid PHP unresolved calls");
+        }
+        for (const raw of (scope.unresolvedCalls ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid PHP unresolved call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid PHP unresolved call range");
+          unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
+          if (++totalCalls > 100000) throw new Error("PHP call site count exceeds cap");
         }
         items.push({
           type: scope.type as "method" | "function",
@@ -80,6 +95,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           range: scope.range,
           ...(scope.className ? { className: scope.className as string } : {}),
           ...(calls.length ? { calls } : {}),
+          ...(unresolvedCalls.length ? { unresolvedCalls } : {}),
         });
       } else throw new Error("Invalid PHP lexical named scope");
       total++;

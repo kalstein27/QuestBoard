@@ -118,6 +118,8 @@ export function semanticFactsProvider(
           indexedAt: graph.indexedAt,
           nodes,
           relations,
+          ...(providerId === "scip-php" && graph.unresolvedPhpMethodCalls
+            ? { unresolvedPhpMethodCalls: graph.unresolvedPhpMethodCalls } : {}),
           ...(providerRuns?.length ? { providerRuns } : {}),
           ...(graph.coverage ? { coverage: graph.coverage } : {}),
         };

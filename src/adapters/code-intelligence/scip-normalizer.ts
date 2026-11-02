@@ -37,6 +37,12 @@ export interface ScipPhpTypedMethodCall {
   className: string;
   name: string;
   nameRange: readonly [number, number, number, number];
+  evidenceSource?: "native" | "docblock";
+}
+
+export interface ScipPhpUnresolvedMethodCall {
+  name: string;
+  nameRange: readonly [number, number, number, number];
 }
 
 export interface ScipPhpLexicalScope {
@@ -48,6 +54,7 @@ export interface ScipPhpLexicalScope {
   className?: string;
   /** Directly owned AST method calls with a statically proved receiver type. */
   calls?: readonly ScipPhpTypedMethodCall[];
+  unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
 }
 
 interface ScipOccurrence {
@@ -766,6 +773,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }>>();
   const phpMethodsByQualifiedName = new Map<string, string | null>();
   const phpTypedCalls: Array<{ document: ScipDocument; ownerId: string; call: ScipPhpTypedMethodCall }> = [];
+  const unresolvedPhpNames = new Map<string, number>();
   const qualifiedMethodKey = (className: string, methodName: string): string =>
     className.replace(/^\\+/, "").toLowerCase() + "::" + methodName.toLowerCase();
   if (input.phpLexicalScopes) {
@@ -799,6 +807,14 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           for (const call of scope.calls) {
             if (rangeContains(extent, tupleRange(call.nameRange))) {
               phpTypedCalls.push({ document, ownerId, call });
+            }
+          }
+        }
+        if (ownerId && scope.unresolvedCalls) {
+          for (const call of scope.unresolvedCalls) {
+            if (rangeContains(extent, tupleRange(call.nameRange))) {
+              const key = call.name.toLowerCase();
+              unresolvedPhpNames.set(key, (unresolvedPhpNames.get(key) ?? 0) + 1);
             }
           }
         }
@@ -939,7 +955,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     if (competingNative) continue;
     addRelation(relations, ownerId, target, "calls", 1, [{
       location: nativeLocation(document.relativePath, location),
-      label: "PHP AST statically typed receiver; SCIP-verified method definition",
+      label: call.evidenceSource === "docblock"
+        ? "PHP AST docblock-derived array element; SCIP-verified method definition"
+        : "PHP AST statically typed receiver; SCIP-verified method definition",
     }], [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
 
@@ -950,6 +968,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     indexedAt: input.indexedAt,
     nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values()],
     relations: [...relations.values()],
+    ...(providerId === "scip-php" ? {
+      unresolvedPhpMethodCalls: [...unresolvedPhpNames.entries()].sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, count]) => ({ name, count })),
+    } : {}),
     ...(input.indexArtifactSha256 ? {
       providerRuns: [{
         providerId,
