@@ -65,15 +65,22 @@ const state = {
   codeMapNavigationHistory: [],
   codeMapExpandedTreeKeys: new Set(),
   codeMapTreeVisibleCounts: new Map(),
+  codeMapLazyTreePages: new Map(),
+  codeMapLazyTreeLoading: new Set(),
+  codeMapLazyTreeChildren: new Map(),
+  codeMapLazyTreeError: null,
   codeMapSearchResults: null,
   codeMapSearchLoading: false,
   codeMapSearchTimer: null,
+  codeMapSearchAbort: null,
   codeMapSyncPreview: null,
   codeMapSyncResult: null,
   codeMapSyncLoading: false,
   codeMapSyncFocusNodeIds: [],
   codeMapSyncFocusDeadline: 0,
   codeMapSyncFocusCentered: false,
+  sourceStructure: { projectId: null, page: null, offset: 0, pathPrefix: "", selected: new Set(),
+    preview: null, loading: false, error: null, requestVersion: 0, readAbort: null },
   actor: loadActor(),
   busy: false,
   boardError: null,
@@ -98,11 +105,15 @@ function collectElements() {
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out", "investigation-code-lens",
     "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node", "investigation-add-group",
     "investigation-inspector", "investigation-inspector-title", "investigation-inspector-body", "investigation-inspector-close",
-    "code-map-board", "code-map-status", "code-map-refresh", "code-map-sync", "code-map-content",
+    "code-map-board", "code-map-status", "code-map-refresh", "code-map-sync", "source-structure-open", "code-map-content",
     "code-map-search", "code-map-kind-filter", "code-map-language-filter", "code-map-back",
     "code-map-inspector", "code-map-inspector-kicker", "code-map-inspector-title", "code-map-inspector-body", "code-map-inspector-close",
     "code-map-sync-dialog", "code-map-sync-close", "code-map-sync-body", "code-map-sync-recreate-row",
     "code-map-sync-recreate-detached", "code-map-sync-open-investigation", "code-map-sync-apply",
+    "source-structure-dialog", "source-structure-close", "source-structure-path", "source-structure-search",
+    "source-structure-status", "source-structure-candidates", "source-structure-prev",
+    "source-structure-page", "source-structure-next", "source-structure-preview",
+    "source-structure-result", "source-structure-apply",
     "workspace-title", "workspace-context", "workspace-nav", "agent-focus-control", "agent-focus-status",
     "agent-focus-follow", "agent-focus-free", "agent-focus-return",
     "task-drawer", "drawer-status", "drawer-title", "drawer-body", "close-drawer-button",
@@ -124,6 +135,7 @@ function bindEvents() {
     localStorage.setItem("questboard.projectId", state.projectId ?? "");
     closeDrawer();
     resetCodeMapExplorerState();
+    resetSourceStructure();
     void loadBoard();
   });
   el["new-project-button"].addEventListener("click", openProjectDialog);
@@ -143,6 +155,28 @@ function bindEvents() {
   el["board-error-retry"].addEventListener("click", () => void refreshAll());
   el["code-map-refresh"].addEventListener("click", () => void refreshCodeMap());
   el["code-map-sync"].addEventListener("click", () => { pauseAgentFollow("code-sync"); void openCodeMapSyncPreview(); });
+  el["source-structure-open"].addEventListener("click", () => { pauseAgentFollow("source-structure"); void openSourceStructure(); });
+  el["source-structure-close"].addEventListener("click", () => el["source-structure-dialog"].close());
+  el["source-structure-dialog"].addEventListener("close", () => {
+    state.sourceStructure.readAbort?.abort();
+    state.sourceStructure.readAbort = null;
+    state.sourceStructure.requestVersion += 1;
+    state.sourceStructure.loading = false;
+  });
+  el["source-structure-search"].addEventListener("click", () => void loadSourceStructurePage(0,
+    el["source-structure-path"].value.trim()));
+  el["source-structure-path"].addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); void loadSourceStructurePage(0,
+      el["source-structure-path"].value.trim()); }
+  });
+  el["source-structure-prev"].addEventListener("click", () => void loadSourceStructurePage(
+    Math.max(0, state.sourceStructure.offset - 12), state.sourceStructure.pathPrefix));
+  el["source-structure-next"].addEventListener("click", () => {
+    const page = state.sourceStructure.page;
+    if (page?.hasMore) void loadSourceStructurePage(page.nextOffset, state.sourceStructure.pathPrefix);
+  });
+  el["source-structure-preview"].addEventListener("click", () => void previewSourceStructure());
+  // No Apply event handler by design: actor headers and UI confirmation cannot grant server permission.
   el["code-map-search"].addEventListener("input", () => { pauseAgentFollow("code-search"); scheduleCodeMapSearch(); });
   el["code-map-kind-filter"].addEventListener("change", () => { pauseAgentFollow("code-filter"); void runCodeMapSearch(); });
   el["code-map-language-filter"].addEventListener("change", () => { pauseAgentFollow("code-filter"); void runCodeMapSearch(); });
@@ -276,12 +310,12 @@ function resumeAgentFollow() {
 }
 
 function hasActiveUserNavigationContext() {
-  if (el["task-dialog"]?.open || el["project-dialog"]?.open || el["code-map-sync-dialog"]?.open) return true;
+  if (el["task-dialog"]?.open || el["project-dialog"]?.open || el["code-map-sync-dialog"]?.open || el["source-structure-dialog"]?.open) return true;
   return Boolean(el["task-drawer"]?.classList.contains("open") && state.taskDrawerOwner === "user");
 }
 
 function installAgentFollowManualOverride() {
-  const manualRootSelector = "#board-shell, #task-drawer, #task-dialog, #project-dialog, #code-map-sync-dialog";
+  const manualRootSelector = "#board-shell, #task-drawer, #task-dialog, #project-dialog, #code-map-sync-dialog, #source-structure-dialog";
   const manualTarget = (target) => target instanceof Element && Boolean(target.closest(manualRootSelector)) && !target.closest("#agent-focus-control");
   const markDrawerUserOwned = (target) => {
     if (target instanceof Element && target.closest("#task-drawer")) state.taskDrawerOwner = "user";
@@ -715,6 +749,7 @@ function renderViewSwitch() {
   el["investigation-add-group"].classList.toggle("hidden", !investigation);
   el["code-map-refresh"].classList.toggle("hidden", !codeMap);
   if (!codeMap) el["code-map-sync"].classList.add("hidden");
+  if (!codeMap) el["source-structure-open"].classList.add("hidden");
   const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
   const role = codeMap ? "Code context" : investigation ? "Work map" : "Work queue";
   const projectName = state.projects.find((project) => project.id === state.projectId)?.name;
@@ -727,10 +762,12 @@ function renderViewSwitch() {
 async function loadCodeMap() {
   if (!state.projectId) return;
   state.codeMapLoading = true;
+  resetSourceStructure();
   renderCodeMapBoard();
   const subsystemRead = loadCodeMapSubsystems();
   try {
     state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    if (state.codeMap.boundedSourceTree) await loadCodeMapSourceTreePage("", 0);
     await subsystemRead;
     state.codeMapIndexError = null;
   } finally {
@@ -755,7 +792,7 @@ async function loadCodeMapSubsystems() {
 
 async function loadCodeMapContext() {
   await loadCodeMap();
-  if (!state.codeMap.indexed || !state.codeMap.graph || !state.codeMap.projection) {
+  if (!state.codeMap.indexed || !state.codeMap.projection) {
     state.codeMapSyncPreview = null;
     renderBoard();
     return;
@@ -780,6 +817,7 @@ async function loadCodeMapSyncPreview(selection = {}) {
 
 async function refreshCodeMap() {
   if (!state.projectId || state.codeMapLoading) return;
+  resetSourceStructure();
   try {
     state.codeMapLoading = true;
     setBusy(true);
@@ -795,6 +833,10 @@ async function refreshCodeMap() {
       throw new Error(receipt?.error?.message || "Code indexing failed");
     }
     state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    if (state.codeMap.boundedSourceTree) {
+      state.codeMapLazyTreePages = new Map();
+      await loadCodeMapSourceTreePage("", 0);
+    }
     await loadCodeMapSubsystems();
     state.codeMapIndexError = null;
     toast(receipt.mode === "cache-hit" ? "Code is current" : "Code indexed");
@@ -802,6 +844,10 @@ async function refreshCodeMap() {
     state.codeMapIndexError = error.message || "Code indexing failed";
     try {
       state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+      if (state.codeMap.boundedSourceTree) {
+        state.codeMapLazyTreePages = new Map();
+        await loadCodeMapSourceTreePage("", 0);
+      }
       await loadCodeMapSubsystems();
     } catch {}
     fail(error);
@@ -817,6 +863,7 @@ function renderCodeMapBoard() {
   const map = state.codeMap;
   const action = el["code-map-refresh"];
   const syncAction = el["code-map-sync"];
+  const sourceAction = el["source-structure-open"];
   action.classList.toggle("hidden", state.viewMode !== "code-map");
   action.disabled = state.codeMapLoading || !map.available;
   action.textContent = state.codeMapLoading ? "Indexing…" : map.indexed ? "Re-index" : "Index code";
@@ -826,8 +873,10 @@ function renderCodeMapBoard() {
   syncAction.disabled = state.codeMapLoading || state.codeMapSyncLoading;
   syncAction.classList.toggle("primary", Boolean(map.indexed && map.projection));
   syncAction.classList.toggle("secondary", !map.indexed || !map.projection);
+  sourceAction.classList.toggle("hidden", state.viewMode !== "code-map" || !map.indexed);
+  sourceAction.disabled = state.codeMapLoading;
 
-  if (state.codeMapLoading && !map.graph) {
+  if (state.codeMapLoading && !map.graph && !map.boundedSourceTree) {
     el["code-map-status"].textContent = "Indexing source graph…";
     el["code-map-content"].replaceChildren(node("div", "code-map-state", "Building the raw Code Map…"));
     return;
@@ -846,7 +895,7 @@ function renderCodeMapBoard() {
     }
     return;
   }
-  if (!map.indexed || !map.graph) {
+  if (!map.indexed || (!map.graph && !map.boundedSourceTree)) {
     state.selectedCodeMapDetail = null;
     state.codeMapInspectorData = null;
     renderCodeMapInspector();
@@ -856,7 +905,8 @@ function renderCodeMapBoard() {
   }
 
   syncCodeMapSearchControls(map);
-  const timestamp = map.graph.indexedAt ? new Date(map.graph.indexedAt).toLocaleString() : "Indexed";
+  const indexedAt = map.graph?.indexedAt ?? map.indexedAt;
+  const timestamp = indexedAt ? new Date(indexedAt).toLocaleString() : "Indexed";
   const provider = map.provider && map.provider !== "unknown" ? `${map.provider} · ` : "";
   const indexFailed = Boolean(state.codeMapIndexError);
   const sourceStale = map.freshness === "stale";
@@ -879,7 +929,8 @@ function renderCodeMapBoard() {
   if (manualRelationsPanel) shell.append(manualRelationsPanel);
   const searchPanel = codeMapSearchPanel();
   if (searchPanel) shell.append(searchPanel);
-  shell.append(renderCodeMapSourceTree(map));
+  if (map.boundedSourceTree) shell.append(renderCodeMapLazySourceTree(map));
+  else shell.append(renderCodeMapSourceTree(map));
   const architectureLens = codeMapArchitectureLens(map);
   if (architectureLens) shell.append(architectureLens);
   el["code-map-content"].replaceChildren(shell);
@@ -888,6 +939,8 @@ function renderCodeMapBoard() {
 
 function resetCodeMapExplorerState() {
   if (state.codeMapSearchTimer) clearTimeout(state.codeMapSearchTimer);
+  state.codeMapSearchAbort?.abort();
+  state.codeMapSearchAbort = null;
   state.codeMapSearchTimer = null;
   state.selectedCodeMapDetail = null;
   state.codeMapInspectorData = null;
@@ -895,6 +948,10 @@ function resetCodeMapExplorerState() {
   state.codeMapNavigationHistory = [];
   state.codeMapExpandedTreeKeys = new Set();
   state.codeMapTreeVisibleCounts = new Map();
+  state.codeMapLazyTreePages = new Map();
+  state.codeMapLazyTreeLoading = new Set();
+  state.codeMapLazyTreeChildren = new Map();
+  state.codeMapLazyTreeError = null;
   state.codeMapSearchResults = null;
   state.codeMapSearchLoading = false;
   if (el["code-map-search"]) el["code-map-search"].value = "";
@@ -904,24 +961,30 @@ function resetCodeMapExplorerState() {
 
 function scheduleCodeMapSearch() {
   if (state.codeMapSearchTimer) clearTimeout(state.codeMapSearchTimer);
+  state.codeMapSearchAbort?.abort();
   state.codeMapSearchTimer = setTimeout(() => void runCodeMapSearch(), 180);
 }
 
-async function codeMapQuery(input) {
+async function codeMapQuery(input, signal) {
   if (!state.projectId) throw new Error("Select a project before querying Code Map");
   const result = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map/query`, {
     method: "POST",
     body: input,
+    signal,
   });
   return result.query;
 }
 
 async function runCodeMapSearch() {
-  if (!state.projectId || !state.codeMap.indexed || !state.codeMap.graph) return;
+  if (!state.projectId || !state.codeMap.indexed) return;
+  state.codeMapSearchAbort?.abort();
+  const cancellation = new AbortController();
+  state.codeMapSearchAbort = cancellation;
   const query = el["code-map-search"].value.trim();
   const kind = el["code-map-kind-filter"].value;
   const language = el["code-map-language-filter"].value;
   if (!query && !kind && !language) {
+    state.codeMapSearchAbort = null;
     state.codeMapSearchResults = null;
     state.codeMapSearchLoading = false;
     renderCodeMapBoard();
@@ -940,10 +1003,11 @@ async function runCodeMapSearch() {
   try {
     const responses = query
       ? await Promise.all([
-          codeMapQuery({ ...base, query }),
-          codeMapQuery({ ...base, path: query }),
+          codeMapQuery({ ...base, query }, cancellation.signal),
+          codeMapQuery({ ...base, path: query }, cancellation.signal),
         ])
-      : [await codeMapQuery(base)];
+      : [await codeMapQuery(base, cancellation.signal)];
+    if (cancellation.signal.aborted) return;
     if (`${el["code-map-search"].value.trim()}\u0000${el["code-map-kind-filter"].value}\u0000${el["code-map-language-filter"].value}` !== signature) return;
     const merged = new Map();
     responses.flatMap((response) => response.nodes || []).forEach((item) => merged.set(item.id, item));
@@ -952,20 +1016,24 @@ async function runCodeMapSearch() {
       || (left.location?.startLine || 0) - (right.location?.startLine || 0)
       || left.name.localeCompare(right.name));
   } catch (error) {
-    fail(error);
+    if (error.name !== "AbortError") fail(error);
   } finally {
-    state.codeMapSearchLoading = false;
-    renderCodeMapBoard();
+    if (state.codeMapSearchAbort === cancellation) {
+      state.codeMapSearchAbort = null;
+      state.codeMapSearchLoading = false;
+      renderCodeMapBoard();
+    }
   }
 }
 
 function syncCodeMapSearchControls(map) {
   const graph = map.graph;
-  if (!graph) return;
   const currentKind = el["code-map-kind-filter"].value;
   const currentLanguage = el["code-map-language-filter"].value;
-  const kinds = [...new Set(graph.nodes.map((item) => item.kind))].sort();
-  const languages = [...new Set(graph.nodes.map((item) => item.language).filter(Boolean))].sort();
+  const kinds = [...new Set(graph ? graph.nodes.map((item) => item.kind) : (map.nodeKinds || []))].sort();
+  const languages = [...new Set(graph
+    ? graph.nodes.map((item) => item.language).filter(Boolean)
+    : (map.providerCapabilities?.languages || []).map((item) => item.language).filter(Boolean))].sort();
   el["code-map-kind-filter"].replaceChildren(option("", "All kinds"), ...kinds.map((item) => option(item, item)));
   el["code-map-language-filter"].replaceChildren(option("", "All languages"), ...languages.map((item) => option(item, item)));
   if (kinds.includes(currentKind)) el["code-map-kind-filter"].value = currentKind;
@@ -999,6 +1067,165 @@ function codeMapSearchPanel() {
   });
   panel.append(list);
   return panel;
+}
+
+// Server-side source pages keep all raw graph nodes/relations out of the
+// daemon and the browser. Folder expansion requests the next pinned page.
+async function loadCodeMapSourceTreePage(pathPrefix, offset = 0) {
+  if (!state.projectId || !state.codeMap.boundedSourceTree) return;
+  const projectId = state.projectId;
+  const pin = state.codeMap.snapshotId;
+  const key = `folder:${pathPrefix}`;
+  if (state.codeMapLazyTreeLoading.has(key)) return;
+  state.codeMapLazyTreeLoading.add(key);
+  state.codeMapLazyTreeError = null;
+  renderCodeMapBoard();
+  try {
+    const search = new URLSearchParams({ offset: String(offset), limit: "40" });
+    if (pathPrefix) search.set("pathPrefix", pathPrefix);
+    if (pin) search.set("expectedSnapshotId", pin);
+    const { page } = await api(`/projects/${encodeURIComponent(projectId)}/code-map/source-tree?${search}`);
+    if (state.projectId !== projectId || state.codeMap.snapshotId !== pin) return;
+    if (page?.pathPrefix !== pathPrefix || page?.offset !== offset || (pin && page.snapshotId !== pin)) {
+      throw new Error("Source tree page changed during navigation; refresh Code Map");
+    }
+    const previous = offset ? state.codeMapLazyTreePages.get(pathPrefix) : null;
+    if (offset && (!previous || previous.entries.length !== offset)) {
+      throw new Error("Source tree pagination changed; restart from the first page");
+    }
+    state.codeMapLazyTreePages.set(pathPrefix, {
+      ...page, entries: [...(previous?.entries || []), ...page.entries],
+    });
+  } catch (error) {
+    if (state.projectId === projectId) state.codeMapLazyTreeError = error.message || "Source tree unavailable";
+  } finally {
+    state.codeMapLazyTreeLoading.delete(key);
+    if (state.projectId === projectId) renderCodeMapBoard();
+  }
+}
+
+async function loadCodeMapLazySymbolChildren(nodeId) {
+  const key = `file:${nodeId}`;
+  if (state.codeMapLazyTreeLoading.has(key) || state.codeMapLazyTreeChildren.has(nodeId)) return;
+  const projectId = state.projectId;
+  state.codeMapLazyTreeLoading.add(key);
+  renderCodeMapBoard();
+  try {
+    const result = await codeMapQuery({
+      operation: "hierarchy", nodeId, direction: "children", depth: 1, limit: 80,
+      ...(state.codeMap.snapshotId ? { expectedSnapshotId: state.codeMap.snapshotId } : {}),
+    });
+    if (state.projectId === projectId) {
+      state.codeMapLazyTreeChildren.set(nodeId, {
+        entries: result.entries || [], truncated: result.truncated,
+      });
+    }
+  } catch (error) {
+    if (state.projectId === projectId) state.codeMapLazyTreeError = error.message || "Symbol lookup unavailable";
+  } finally {
+    state.codeMapLazyTreeLoading.delete(key);
+    if (state.projectId === projectId) renderCodeMapBoard();
+  }
+}
+
+function renderCodeMapLazySourceTree(map) {
+  const panel = node("section", "code-map-source-panel");
+  const heading = node("div", "code-map-source-heading");
+  heading.append(
+    node("strong", "code-map-source-title", "Repository source · loaded on demand"),
+    node("span", "code-map-source-count", `${(map.nodeCount ?? 0).toLocaleString()} nodes · ${(map.relationCount ?? 0).toLocaleString()} relations`),
+  );
+  panel.append(heading);
+  if (state.codeMapLazyTreeError) panel.append(node("span", "code-map-tree-empty", state.codeMapLazyTreeError));
+  const tree = node("div", "code-map-tree");
+  appendLazyCodeMapFolder(tree, "", 0);
+  panel.append(tree);
+  return panel;
+}
+
+function appendLazyCodeMapFolder(shell, pathPrefix, depth) {
+  const page = state.codeMapLazyTreePages.get(pathPrefix);
+  if (!page) {
+    shell.append(node("span", "code-map-tree-empty",
+      state.codeMapLazyTreeLoading.has(`folder:${pathPrefix}`) ? "Reading source directory…" : "Source directory not loaded"));
+    return;
+  }
+  for (const entry of page.entries) {
+    if (entry.type === "directory") {
+      const expandedKey = `dir:${entry.path}`;
+      const expanded = state.codeMapExpandedTreeKeys.has(expandedKey);
+      const branch = node("div", "code-map-tree-branch");
+      const row = node("div", "code-map-tree-row code-map-tree-directory");
+      row.style.setProperty("--code-tree-depth", String(depth));
+      const toggle = node("button", "code-map-tree-toggle", expanded ? "▾" : "▸");
+      toggle.type = "button";
+      const label = node("button", "code-map-tree-label");
+      label.type = "button";
+      label.append(node("span", "code-map-tree-icon", "▸"), node("strong", "code-map-tree-name", entry.name));
+      const expand = () => {
+        toggleCodeMapTreeKey(expandedKey);
+        if (state.codeMapExpandedTreeKeys.has(expandedKey)
+          && !state.codeMapLazyTreePages.has(entry.path)) void loadCodeMapSourceTreePage(entry.path);
+        renderCodeMapBoard();
+      };
+      toggle.addEventListener("click", expand);
+      label.addEventListener("click", expand);
+      row.append(toggle, label);
+      branch.append(row);
+      if (expanded) appendLazyCodeMapFolder(branch, entry.path, depth + 1);
+      shell.append(branch);
+    } else if (entry.node) {
+      const item = entry.node;
+      const key = `node:${item.id}`;
+      const expanded = state.codeMapExpandedTreeKeys.has(key);
+      const row = node("div", "code-map-tree-row code-map-node code-map-node-file");
+      row.style.setProperty("--code-tree-depth", String(depth));
+      row.dataset.codeMapNodeId = item.id;
+      const toggle = node("button", "code-map-tree-toggle", expanded ? "▾" : "▸");
+      toggle.type = "button";
+      toggle.addEventListener("click", () => {
+        toggleCodeMapTreeKey(key);
+        if (state.codeMapExpandedTreeKeys.has(key)) void loadCodeMapLazySymbolChildren(item.id);
+        renderCodeMapBoard();
+      });
+      const label = node("button", "code-map-tree-label");
+      label.type = "button";
+      label.append(node("span", "code-map-tree-icon", "▤"), node("strong", "code-map-tree-name", item.name),
+        node("span", "code-map-tree-meta", item.language || "file"));
+      label.addEventListener("click", () => selectCodeMapDetail("node", item.id));
+      row.append(toggle, label);
+      shell.append(row);
+      if (expanded) {
+        const children = state.codeMapLazyTreeChildren.get(item.id);
+        if (!children) {
+          shell.append(node("span", "code-map-tree-empty", "Reading file symbols…"));
+        } else {
+          for (const child of children.entries) {
+            const sub = child.node;
+            const button = node("button", "code-map-tree-row code-map-tree-label");
+            button.type = "button";
+            button.style.setProperty("--code-tree-depth", String(depth + 1));
+            button.dataset.codeMapNodeId = sub.id;
+            button.append(node("span", "code-map-tree-icon", "•"),
+              node("strong", "code-map-tree-name", sub.name),
+              node("span", "code-map-tree-meta", sub.kind));
+            button.addEventListener("click", () => selectCodeMapDetail("node", sub.id));
+            shell.append(button);
+          }
+          if (children.truncated) shell.append(node("span", "code-map-tree-empty",
+            "More symbols exist. Use bounded search or the selected node inspector."));
+        }
+      }
+    }
+  }
+  if (page.hasMore) {
+    const more = node("button", "code-map-tree-load-more-button",
+      `Load 40 more · ${page.candidateCount - page.entries.length} remaining`);
+    more.type = "button";
+    more.disabled = state.codeMapLazyTreeLoading.has(`folder:${pathPrefix}`);
+    more.addEventListener("click", () => void loadCodeMapSourceTreePage(pathPrefix, page.entries.length));
+    shell.append(more);
+  }
 }
 
 function renderCodeMapSourceTree(map) {
@@ -1430,7 +1657,7 @@ function codeMapArchitectureLens(map) {
     card.append(
       node("span", "code-map-node-kind", item.kind.replaceAll("_", " ")),
       node("strong", "code-map-node-title", item.title),
-      node("span", "code-map-node-count", `${item.memberNodeIds.length} symbols`),
+      node("span", "code-map-node-count", `${item.memberCount ?? item.memberNodeIds?.length ?? 0} symbols`),
     );
     stage.append(card);
   });
@@ -1632,7 +1859,8 @@ function renderCodeMapInspector() {
   }
   const fallback = state.codeMap.graph?.nodes?.find((candidate) => candidate.id === selection.id);
   const data = state.codeMapInspectorData;
-  const selectedNode = data?.node || fallback;
+  const selectedNode = data?.node || fallback || (state.codeMapInspectorLoading || data?.error
+    ? { id: selection.id, kind: "unknown", name: "Source node" } : null);
   if (!selectedNode) return clearCodeMapSelection();
   el["code-map-inspector-kicker"].textContent = `${selectedNode.kind}${selectedNode.language ? ` · ${selectedNode.language}` : ""}`;
   el["code-map-inspector-title"].textContent = selectedNode.name;
@@ -1834,12 +2062,13 @@ function codeMapRelatedTasksSection(nodeId) {
       groupBindings
         .sort((left, right) => left.task.title.localeCompare(right.task.title))
         .forEach((binding) => {
-          const row = node("button", `code-scope-task-row ${binding.state}`);
+          const stateLabel = binding.state || "unverified";
+          const row = node("button", `code-scope-task-row ${stateLabel}`);
           row.type = "button";
           row.append(
             node("strong", "code-scope-task-title", binding.task.title),
             node("span", "code-scope-task-meta", `${binding.kind.replaceAll("_", " ")} · ${binding.task.status}`),
-            node("span", `code-scope-state ${binding.state}`, binding.state),
+            node("span", `code-scope-state ${stateLabel}`, stateLabel),
           );
           row.addEventListener("click", () => void openTask(binding.taskId));
           shell.append(row);
@@ -1972,6 +2201,200 @@ function codeMapLocationRow(location, label = "") {
   row.append(node("code", "code-map-location-path", `${location.path}${line}`));
   if (label) row.append(node("span", "code-map-location-label", label));
   return row;
+}
+
+function resetSourceStructure() {
+  const current = state.sourceStructure;
+  current.readAbort?.abort();
+  current.readAbort = null;
+  current.requestVersion += 1;
+  current.projectId = null;
+  current.page = null;
+  current.offset = 0;
+  current.pathPrefix = "";
+  current.selected = new Set();
+  current.preview = null;
+  current.loading = false;
+  current.error = null;
+  if (el["source-structure-dialog"]?.open) el["source-structure-dialog"].close();
+}
+
+async function openSourceStructure() {
+  if (!state.projectId || !state.codeMap.indexed || state.codeMapLoading) return;
+  resetSourceStructure();
+  state.sourceStructure.projectId = state.projectId;
+  el["source-structure-path"].value = "";
+  el["source-structure-dialog"].showModal();
+  await loadSourceStructurePage(0, "");
+}
+
+function sourceStructureEndpoint(action) {
+  return `/projects/${encodeURIComponent(state.projectId)}/source-structure/flow-sync/${action}`;
+}
+
+async function loadSourceStructurePage(offset, pathPrefix) {
+  const current = state.sourceStructure;
+  if (!state.projectId || current.projectId !== state.projectId) return;
+  current.readAbort?.abort();
+  const cancellation = new AbortController();
+  current.readAbort = cancellation;
+  const sequence = ++current.requestVersion;
+  const priorPage = current.page;
+  const sameFilter = current.pathPrefix === pathPrefix;
+  current.preview = null;
+  current.selected = new Set();
+  current.page = null;
+  current.error = null;
+  current.loading = true;
+  renderSourceStructure();
+  try {
+    if (pathPrefix.startsWith("/") || pathPrefix.includes("\\") || pathPrefix.split("/").includes("..")) {
+      throw new Error("Choose a project-relative path without parent directory traversal.");
+    }
+    const search = new URLSearchParams({ offset: String(offset), limit: "12" });
+    if (pathPrefix) search.set("pathPrefix", pathPrefix);
+    if (offset > 0 && sameFilter && priorPage?.snapshotId && priorPage.sourceIndexedAt) {
+      search.set("expectedSnapshotId", priorPage.snapshotId);
+      search.set("expectedSourceIndexedAt", priorPage.sourceIndexedAt);
+    }
+    const { candidates } = await api(`${sourceStructureEndpoint("candidates")}?${search}`, { signal: cancellation.signal });
+    if (sequence !== current.requestVersion || current.projectId !== state.projectId) return;
+    if (!candidates?.snapshotId) throw new Error("A pinned Code Map snapshot is required.");
+    current.page = candidates;
+    current.offset = offset;
+    current.pathPrefix = pathPrefix;
+  } catch (error) {
+    if (sequence !== current.requestVersion) return;
+    if (error.name !== "AbortError") current.error = error.message || "Source Structure candidates unavailable";
+  } finally {
+    if (current.readAbort === cancellation) current.readAbort = null;
+    if (sequence === current.requestVersion) {
+      current.loading = false;
+      renderSourceStructure();
+    }
+  }
+}
+
+async function previewSourceStructure() {
+  const current = state.sourceStructure;
+  const page = current.page;
+  if (!page || current.loading || !state.projectId || current.projectId !== state.projectId) return;
+  const selectedSubsystemIds = [...current.selected];
+  if (!selectedSubsystemIds.length || selectedSubsystemIds.length > 12) return;
+  current.readAbort?.abort();
+  const cancellation = new AbortController();
+  current.readAbort = cancellation;
+  current.preview = null;
+  current.error = null;
+  current.loading = true;
+  const sequence = ++current.requestVersion;
+  renderSourceStructure();
+  try {
+    const { preview } = await api(sourceStructureEndpoint("preview"), {
+      method: "POST",
+      signal: cancellation.signal,
+      body: {
+        selectionKey: "web-source-structure",
+        selectedSubsystemIds,
+        offset: page.offset, limit: page.limit,
+        ...(current.pathPrefix ? { pathPrefix: current.pathPrefix } : {}),
+        expectedSnapshotId: page.snapshotId,
+        expectedSourceIndexedAt: page.sourceIndexedAt,
+      },
+    });
+    if (sequence !== current.requestVersion || current.projectId !== state.projectId) return;
+    current.preview = preview;
+  } catch (error) {
+    if (sequence !== current.requestVersion) return;
+    if (error.name !== "AbortError") current.error = error.message || "Source Structure preview unavailable";
+  } finally {
+    if (current.readAbort === cancellation) current.readAbort = null;
+    if (sequence === current.requestVersion) {
+      current.loading = false;
+      renderSourceStructure();
+    }
+  }
+}
+
+function renderSourceStructure() {
+  const current = state.sourceStructure;
+  const page = current.page;
+  const candidates = el["source-structure-candidates"];
+  if (!candidates) return;
+  const lockedApply = el["source-structure-apply"];
+  lockedApply.disabled = true;
+  lockedApply.setAttribute("aria-disabled", "true");
+  el["source-structure-prev"].disabled = current.loading || !page || current.offset === 0;
+  el["source-structure-next"].disabled = current.loading || !page?.hasMore;
+  el["source-structure-preview"].disabled = current.loading || current.selected.size === 0 || !page;
+  el["source-structure-search"].disabled = current.loading;
+  el["source-structure-page"].textContent = page
+    ? `${page.offset + 1}–${page.offset + page.returnedCount} / ${page.candidateCount} · 12 per page`
+    : "";
+  el["source-structure-status"].textContent = current.loading
+    ? "Reading a pinned source page…"
+    : current.error || (page ? `${current.selected.size} selected · up to 12 nodes / 24 relations / 16 evidence samples. Only this page is eligible.` : "");
+  candidates.replaceChildren();
+  if (page) {
+    for (const item of page.nodes) {
+      const label = node("label", "source-structure-choice");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = current.selected.has(item.id);
+      checkbox.disabled = current.loading;
+      checkbox.addEventListener("change", () => {
+        current.preview = null;
+        if (checkbox.checked) {
+          if (current.selected.size >= 12) { checkbox.checked = false; return; }
+          current.selected.add(item.id);
+        } else current.selected.delete(item.id);
+        renderSourceStructure();
+      });
+      const details = node("span", "source-structure-choice-text");
+      details.append(node("strong", "", item.pathPrefix),
+        node("small", "", `${item.fileCount ?? 0} files · ${item.symbolCount ?? 0} symbols`));
+      label.append(checkbox, details);
+      candidates.append(label);
+    }
+    if (!page.nodes.length) candidates.append(node("p", "source-structure-status", "No source directories in this page."));
+  }
+  const result = el["source-structure-result"];
+  result.replaceChildren();
+  const preview = current.preview;
+  if (!preview) {
+    result.append(node("p", "source-structure-status", "Select source directories and choose Preview selected. No Flow changes will be made."));
+    return;
+  }
+  const heading = node("h3", "", "Flow change preview");
+  const counts = codeMapSyncSummary([
+    ["Create", preview.counts.create], ["Unchanged", preview.counts.unchanged],
+    ["Evidence changed", preview.counts.evidence_changed], ["Stale", preview.counts.stale],
+    ["Detached", preview.counts.detached], ["Blocked", preview.counts.blocked],
+  ]);
+  result.append(heading, counts);
+  const diagnostics = preview.diagnostics || {};
+  const selection = preview.selection || {};
+  const notices = node("div", "source-structure-warnings");
+  const warnings = [...(preview.warnings || [])];
+  if (diagnostics.noSelectedRelationsReason) warnings.unshift(`No relations: ${diagnostics.noSelectedRelationsReason}`);
+  if (selection.omittedEligibleRelationCount) warnings.push(`${selection.omittedEligibleRelationCount} eligible relations omitted by selection`);
+  if (selection.subsystemPage?.truncated) warnings.push("Additional source directories are outside this pinned page.");
+  for (const warning of new Set(warnings)) notices.append(node("p", "source-structure-warning", warning));
+  result.append(notices);
+  const rows = node("div", "code-map-sync-list");
+  for (const item of preview.nodes || []) rows.append(codeMapSyncRow("Node", item.sourceId, item.state, item.reason || ""));
+  for (const item of preview.relations || []) {
+    const summary = `${item.fromBindingId} → ${item.toBindingId}`;
+    const row = codeMapSyncRow("Relation", summary, item.state,
+      `${item.relationKind || "relation"} · ${item.evidenceCount ?? 0} raw facts${item.evidenceTruncated ? " (samples truncated)" : ""}${item.reason ? " · " + item.reason : ""}`);
+    rows.append(row);
+    if (item.rawRelationIds?.length) {
+      const facts = node("small", "source-structure-evidence", `Evidence IDs: ${item.rawRelationIds.join(", ")}`);
+      rows.append(facts);
+    }
+  }
+  if (!preview.relations?.length) rows.append(node("p", "source-structure-status", "No evidence-backed relations within the selection. None will be invented."));
+  result.append(rows);
 }
 
 async function openCodeMapSyncPreview() {
@@ -4804,6 +5227,7 @@ async function api(path, options = {}) {
     method,
     headers,
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {

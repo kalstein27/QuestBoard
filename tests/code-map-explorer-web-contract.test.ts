@@ -44,8 +44,9 @@ test("Code Map tree expansion is page-bounded even with thousands of direct chil
 test("Code Map search uses the same bounded raw query surface for symbol, path, kind, and language", () => {
   assert.match(app, /code-map\/query/);
   assert.match(app, /operation: "find_nodes"/);
-  assert.match(app, /codeMapQuery\(\{ \.\.\.base, query \}\)/);
-  assert.match(app, /codeMapQuery\(\{ \.\.\.base, path: query \}\)/);
+  assert.match(app, /codeMapQuery\(\{ \.\.\.base, query \}, cancellation\.signal\)/);
+  assert.match(app, /codeMapQuery\(\{ \.\.\.base, path: query \}, cancellation\.signal\)/);
+  assert.match(app, /state\.codeMapSearchAbort\?\.abort\(\)/);
   assert.match(app, /kind \? \{ kinds: \[kind\] \}/);
   assert.match(app, /language \? \{ language \}/);
   assert.match(app, /limit: 50/);

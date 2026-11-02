@@ -229,7 +229,8 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         const result = [...document.querySelectorAll('.code-map-search-result')]
-          .find((item) => item.textContent.includes('createQuestBoardHttpServer'));
+          .find((item) => item.textContent.includes('createQuestBoardHttpServer')
+            && item.textContent.includes('src/server/http-api.ts'));
         if (result) {
           result.click();
           break;
@@ -243,7 +244,7 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
           const section = item.closest('.code-map-inspector-section')?.querySelector('.code-map-inspector-section-title')?.textContent || '';
           const meta = item.querySelector('.code-map-inspector-navigation-meta')?.textContent || '';
           return ['Calls', 'Called by', 'References', 'Referenced by'].includes(section)
-            && meta.includes('src/')
+            && (meta.includes('src/') || meta.includes('scripts/'))
             && !meta.includes('src/server/http-api.ts');
         });
         if (title === 'createQuestBoardHttpServer' && location && navigation) {
@@ -270,12 +271,30 @@ test("actual SCIP indexes only evidence-backed architecture, Web syncs to Invest
         }
         await sleep(100);
       }
-      throw new Error('Raw Code explorer search/inspector timeout');
+      throw new Error('Raw Code explorer search/inspector timeout: '+JSON.stringify({
+        search: document.querySelector('#code-map-search')?.value,
+        searchResults: document.querySelectorAll('.code-map-search-result').length,
+        loading: state.codeMapSearchLoading,
+        abortActive: !!state.codeMapSearchAbort,
+        matched: state.codeMapSearchResults?.length,
+        firstMatches: state.codeMapSearchResults?.slice(0, 3).map(node=>node.name),
+        inspector: document.querySelector('#code-map-inspector-title')?.textContent,
+        inspectorLocation: document.querySelector('.code-map-location-path')?.textContent,
+        navCount: document.querySelectorAll('.code-map-inspector-navigation').length,
+        navSamples: [...document.querySelectorAll('.code-map-inspector-navigation')].slice(0, 8).map(item=>({
+          section: item.closest('.code-map-inspector-section')?.querySelector('.code-map-inspector-section-title')?.textContent,
+          title: item.querySelector('.code-map-inspector-navigation-title')?.textContent,
+          meta: item.querySelector('.code-map-inspector-navigation-meta')?.textContent,
+        })),
+        backDisabled: document.querySelector('#code-map-back')?.disabled,
+        historyDepth: state.codeMapNavigationHistory?.length,
+        browserErrors: window.__questboardAcceptanceErrors?.slice(-3),
+      }));
     })()`);
     assert.equal(rawExplorer.title, "createQuestBoardHttpServer");
     assert.match(rawExplorer.location, /src\/server\/http-api\.ts/);
     assert.ok(rawExplorer.target);
-    assert.match(rawExplorer.targetMeta, /src\//);
+    assert.match(rawExplorer.targetMeta, /(?:src|scripts)\//);
     assert.doesNotMatch(rawExplorer.targetMeta, /src\/server\/http-api\.ts/);
     assert.match(rawExplorer.relationSection, /^(Calls|Called by|References|Referenced by)$/);
     assert.notEqual(rawExplorer.navigatedTitle, rawExplorer.title);

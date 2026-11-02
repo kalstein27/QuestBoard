@@ -26,6 +26,42 @@ button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 .hidden { display: none !important; }
 
+/* S6 Source Structure stays independent of the legacy six-role Code sync dialog. */
+.source-structure-filter { display: grid; gap: 6px; padding: 8px 0; }
+.source-structure-filter label { color: var(--muted); font-size: 12px; }
+.source-structure-filter-actions { display: flex; gap: 8px; }
+.source-structure-filter-actions input {
+  min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid var(--line-strong);
+  border-radius: 7px; background: var(--surface-2); color: var(--text);
+}
+.source-structure-status { margin: 6px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.source-structure-candidates { display: grid; gap: 5px; max-height: 220px; overflow-y: auto; }
+.source-structure-choice {
+  display: flex; align-items: center; gap: 10px; min-width: 0; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+  background: var(--surface-2);
+}
+.source-structure-choice:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.source-structure-choice input { flex-shrink: 0; accent-color: var(--accent); }
+.source-structure-choice-text { display: grid; min-width: 0; gap: 3px; overflow-wrap: anywhere; }
+.source-structure-choice-text strong { font-size: 12px; }
+.source-structure-choice-text small { font-size: 11px; color: var(--muted); }
+.source-structure-pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.source-structure-result { display: grid; gap: 8px; max-height: 36dvh; overflow-y: auto; }
+.source-structure-result h3 { margin: 8px 0 0; font-size: 13px; }
+.source-structure-warning {
+  margin: 4px 0; padding: 8px 10px; color: var(--muted);
+  border-left: 2px solid var(--line-strong); background: var(--surface-2);
+  font-size: 12px; overflow-wrap: anywhere;
+}
+.source-structure-evidence { padding: 4px 10px 9px; color: var(--subtle); overflow-wrap: anywhere; }
+.source-structure-lock {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface-2); font-size: 12px;
+}
+.source-structure-lock span { color: var(--muted); line-height: 1.5; }
+
 .app-shell { min-height: 100dvh; display: grid; grid-template-columns: 204px minmax(0, 1fr); }
 .sidebar {
   position: sticky; top: 0; height: 100dvh; z-index: 25;

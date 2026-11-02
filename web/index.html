@@ -86,6 +86,7 @@
             <button id="investigation-add-node" class="button primary hidden" type="button" title="Create a standalone Flow node">+ Node</button>
             <button id="investigation-add-group" class="button secondary hidden" type="button" title="Create a visual Flow work group">+ Group</button>
             <button id="code-map-sync" class="button secondary compact hidden" type="button">Sync to Flow</button>
+            <button id="source-structure-open" class="button secondary compact hidden" type="button">Source → Flow</button>
             <button id="code-map-refresh" class="button primary compact hidden" type="button">Index code</button>
             <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
           </div>
@@ -237,6 +238,43 @@
         <div class="dialog-actions code-map-sync-actions">
           <button id="code-map-sync-open-investigation" class="button secondary hidden" type="button">Open Flow</button>
           <button id="code-map-sync-apply" class="button primary" type="button">Apply sync</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="source-structure-dialog" class="quest-dialog code-map-sync-dialog">
+      <div class="code-map-sync-shell">
+        <div class="dialog-header code-map-sync-header">
+          <div>
+            <div class="dialog-label">Source Structure</div>
+            <h2>Select source for Flow</h2>
+          </div>
+          <button id="source-structure-close" class="icon-button" type="button" aria-label="Close Source Structure preview">×</button>
+        </div>
+        <div class="source-structure-filter">
+          <label for="source-structure-path">Project-relative directory filter</label>
+          <div class="source-structure-filter-actions">
+            <input id="source-structure-path" type="text" maxlength="256" placeholder="src/ (optional)" autocomplete="off" />
+            <button id="source-structure-search" class="button secondary compact" type="button">Find</button>
+          </div>
+        </div>
+        <p id="source-structure-status" class="source-structure-status" role="status" aria-live="polite"></p>
+        <div id="source-structure-candidates" class="source-structure-candidates"></div>
+        <div class="source-structure-pager">
+          <button id="source-structure-prev" class="button ghost compact" type="button">Previous</button>
+          <span id="source-structure-page" class="source-structure-status"></span>
+          <button id="source-structure-next" class="button ghost compact" type="button">Next</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="source-structure-preview" class="button secondary" type="button" disabled>Preview selected</button>
+        </div>
+        <div id="source-structure-result" class="source-structure-result" aria-live="polite"></div>
+        <div class="source-structure-lock" role="status">
+          <strong>Read-only preview</strong>
+          <span>Applying changes requires server-verified project permission. This runtime has no authorized Apply session. Existing Flow content is untouched.</span>
+        </div>
+        <div class="dialog-actions">
+          <button id="source-structure-apply" class="button primary" type="button" disabled aria-disabled="true" title="Server authorization is not configured">Apply locked</button>
         </div>
       </div>
     </dialog>
