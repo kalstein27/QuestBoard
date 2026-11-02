@@ -7,7 +7,9 @@ import {
 } from "../server/daemon-identity.js";
 import { QuestBoardRemoteToolError } from "./agent-tools.js";
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const configuredTimeoutMs = Number(process.env.QUESTBOARD_DAEMON_REQUEST_TIMEOUT_MS ?? "5000");
+const DEFAULT_REQUEST_TIMEOUT_MS = Number.isSafeInteger(configuredTimeoutMs)
+  && configuredTimeoutMs >= 1000 && configuredTimeoutMs <= 120000 ? configuredTimeoutMs : 5_000;
 const LONG_RUNNING_REQUEST_TIMEOUT_MS = 120_000;
 const DAEMON_CLIENT_HEADER = "x-questboard-daemon-client";
 const LONG_RUNNING_AGENT_TOOLS = new Set([

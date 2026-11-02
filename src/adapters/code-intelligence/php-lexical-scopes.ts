@@ -52,12 +52,62 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
         throw new Error("Invalid PHP lexical owner");
       }
       const scope = item as Record<string, unknown>;
-      if (!isRange(scope.range) || !["method", "function", "anonymous"].includes(String(scope.type))) {
+      if (!isRange(scope.range) || !["method", "function", "anonymous", "class", "file"].includes(String(scope.type))) {
         throw new Error("Invalid PHP lexical scope range or type");
       }
       if (scope.type === "anonymous") {
-        if (scope.calls !== undefined || scope.unresolvedCalls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope has unsupported data");
-        items.push({ type: "anonymous", range: scope.range });
+        if (scope.calls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope cannot claim typed calls");
+        const unresolved = scope.unresolvedCalls ?? [];
+        if (!Array.isArray(unresolved)) throw new Error("Invalid anonymous unresolved calls");
+        const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
+        for (const raw of unresolved) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid anonymous call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid anonymous call site");
+          unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
+          if (++totalCalls > 100000) throw new Error("PHP call sites exceed cap");
+        }
+        items.push({ type: "anonymous", range: scope.range, ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
+      } else if (scope.type === "file") {
+        const calls: ScipPhpTypedMethodCall[] = [];
+        const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
+        for (const raw of (scope.calls ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file call");
+          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange });
+          if (++totalCalls > 100000) throw new Error("PHP call cap exceeded");
+        }
+        for (const raw of (scope.unresolvedCalls ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file unresolved call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file unresolved call");
+          unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
+          if (++totalCalls > 100000) throw new Error("PHP call cap exceeded");
+        }
+        items.push({ type: "file", range: scope.range,
+          ...(calls.length ? { calls } : {}), ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
+      } else if (scope.type === "class" && validName(scope.className, 1024) && isRange(scope.nameRange)) {
+        if (!Array.isArray(scope.ancestors) || scope.ancestors.length > 128) throw new Error("Invalid PHP ancestors");
+        const ancestors: Array<{ className: string; relation: "extends" | "implements" | "trait" }> = [];
+        for (const raw of scope.ancestors) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHP ancestor");
+          const ancestor = raw as Record<string, unknown>;
+          if (!validName(ancestor.className, 1024)
+            || !["extends", "implements", "trait"].includes(String(ancestor.relation))) throw new Error("Invalid PHP ancestor");
+          ancestors.push({ className: ancestor.className, relation: ancestor.relation as "extends" | "implements" | "trait" });
+        }
+        const definitions: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
+        if (scope.propertyDefinitions !== undefined && !Array.isArray(scope.propertyDefinitions)) throw new Error("Invalid property definitions");
+        for (const raw of (scope.propertyDefinitions ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHP property definition");
+          const definition = raw as Record<string, unknown>;
+          if (!validName(definition.name, 255) || !isRange(definition.nameRange)) throw new Error("Invalid PHP property definition range");
+          definitions.push({ name: definition.name, nameRange: definition.nameRange });
+          if (definitions.length > 15000) throw new Error("Too many PHP property declarations");
+        }
+        items.push({ type: "class", className: scope.className, range: scope.range,
+          nameRange: scope.nameRange, ancestors, propertyDefinitions: definitions });
       } else if (validName(scope.name, 255) && isRange(scope.nameRange)) {
         if (scope.className !== undefined && (scope.type !== "method" || !validName(scope.className, 1024))) {
           throw new Error("Invalid PHP lexical class identity");
@@ -88,6 +138,22 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
           if (++totalCalls > 100000) throw new Error("PHP call site count exceeds cap");
         }
+        const propertyAccesses: Array<{ className: string; name: string;
+          nameRange: [number, number, number, number]; kind: "reads" | "writes";
+          evidenceSource?: "native" | "docblock" }> = [];
+        if (scope.propertyAccesses !== undefined && !Array.isArray(scope.propertyAccesses)) throw new Error("Invalid property references");
+        for (const raw of (scope.propertyAccesses ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid property access");
+          const access = raw as Record<string, unknown>;
+          if (!validName(access.className, 1024) || !validName(access.name, 255) || !isRange(access.nameRange)
+            || !["reads", "writes"].includes(String(access.kind))
+            || (access.evidenceSource !== undefined && !["native", "docblock"].includes(String(access.evidenceSource))))
+            throw new Error("Invalid typed property access");
+          propertyAccesses.push({ className: access.className, name: access.name,
+            nameRange: access.nameRange, kind: access.kind as "reads" | "writes",
+            ...(access.evidenceSource ? { evidenceSource: access.evidenceSource as "native" | "docblock" } : {}) });
+          if (++totalCalls > 100000) throw new Error("PHP reference site cap exceeded");
+        }
         items.push({
           type: scope.type as "method" | "function",
           name: scope.name,
@@ -96,6 +162,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           ...(scope.className ? { className: scope.className as string } : {}),
           ...(calls.length ? { calls } : {}),
           ...(unresolvedCalls.length ? { unresolvedCalls } : {}),
+          ...(propertyAccesses.length ? { propertyAccesses } : {}),
         });
       } else throw new Error("Invalid PHP lexical named scope");
       total++;

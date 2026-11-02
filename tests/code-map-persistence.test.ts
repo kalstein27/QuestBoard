@@ -425,3 +425,32 @@ test("configured runtime hydrates persisted final graph across service recreatio
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("failed snapshot write rejects refresh, preserves previous cache, and exposes stale-disk warning", async () => {
+  class Flaky extends MemoryStore {
+    fail = false;
+    override save(projectId: string, snapshot: Parameters<MemoryStore["save"]>[1]) {
+      if (this.fail) throw new Error("snapshot exceeds the write limit");
+      super.save(projectId, snapshot);
+    }
+  }
+  const store = new Flaky();
+  const source = new MutableSourceState();
+  const first = graph("2026-11-03T00:00:00.000Z", "old(): void");
+  const second = graph("2026-11-03T01:00:00.000Z", "new(): void");
+  const service = new CodeMapService(new CountingProvider([first, second]), undefined, undefined,
+    undefined, persistence(store, source));
+  await service.refresh({ projectId: "project-1", rootPath: "/workspace/project-1" });
+  const oldSnapshot = service.getCached("project-1")?.graph;
+  store.fail = true;
+  await assert.rejects(() => service.refresh({ projectId: "project-1", rootPath: "/workspace/project-1" }),
+    /snapshot not saved; refresh not committed/);
+  assert.equal(service.getCached("project-1")?.graph, oldSnapshot);
+  const lifecycle = service.snapshotLifecycleState("project-1");
+  assert.equal(lifecycle?.freshness, "stale");
+  assert.equal(lifecycle?.staleReason, "snapshot_save_failed");
+  assert.match(lifecycle?.persistenceWarning ?? "", /previous disk snapshot remains/);
+  const restarted = new CodeMapService(new CountingProvider(), undefined, undefined, undefined,
+    persistence(store, source));
+  assert.equal(restarted.getCached("project-1")?.graph.indexedAt, first.indexedAt);
+});

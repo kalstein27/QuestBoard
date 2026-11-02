@@ -22,7 +22,16 @@ import type {
 } from "../../application/code-map-persistence.js";
 import { DEFAULT_CODE_MAP_IGNORED_DIRECTORIES } from "./file-inventory.js";
 
-const MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
+// Bounded configurable limit for large code snapshots.
+function maxSnapshotBytes(): number {
+  const raw = process.env.QUESTBOARD_CODE_MAP_MAX_SNAPSHOT_MIB?.trim();
+  if (!raw) return 128 * 1024 * 1024;
+  const mib = Number(raw);
+  if (!Number.isSafeInteger(mib) || mib < 16 || mib > 2048) {
+    throw new Error("QUESTBOARD_CODE_MAP_MAX_SNAPSHOT_MIB must be an integer from 16 to 2048");
+  }
+  return mib * 1024 * 1024;
+}
 const MAX_REFRESH_JOB_BYTES = 64 * 1024;
 const DEFAULT_MAX_FILES = 50_000;
 
@@ -87,7 +96,7 @@ export class FileSystemCodeMapPersistedSnapshotStore implements CodeMapPersisted
     if (!existsSync(path)) return undefined;
     const metadata = statSync(path);
     if (!metadata.isFile()) throw new Error("Persisted Code Map snapshot is not a regular file");
-    if (metadata.size > MAX_SNAPSHOT_BYTES) throw new Error("Persisted Code Map snapshot exceeds the read limit");
+    if (metadata.size > maxSnapshotBytes()) throw new Error("Persisted Code Map snapshot exceeds the read limit");
     return JSON.parse(readFileSync(path, "utf8"));
   }
 
@@ -128,7 +137,7 @@ export class FileSystemCodeMapPersistedSnapshotStore implements CodeMapPersisted
     mkdirSync(dirname(path), { recursive: true });
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     const serialized = `${JSON.stringify(snapshot)}\n`;
-    if (Buffer.byteLength(serialized) > MAX_SNAPSHOT_BYTES) {
+    if (Buffer.byteLength(serialized) > maxSnapshotBytes()) {
       throw new Error("Persisted Code Map snapshot exceeds the write limit");
     }
 

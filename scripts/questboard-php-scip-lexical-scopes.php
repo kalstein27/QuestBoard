@@ -196,17 +196,45 @@ foreach ($paths as $relative) {
             $class = $qualified instanceof PhpParser\Node\Name ? $qualified->toString() : null;
             if ($class === null && $node->name !== null) $class = $node->name->toString();
             $properties = [];
+            $propertyDefinitions = [];
             foreach ($node->stmts as $member) {
                 if (!$member instanceof PhpParser\Node\Stmt\Property) continue;
                 $type = $this->resolvedType($member->type);
-                if ($type === null) continue;
-                foreach ($member->props as $prop) $properties[$prop->name->toString()] = $type;
+                foreach ($member->props as $prop) {
+                    if (($range = $this->range($prop->name)) !== null) {
+                        $propertyDefinitions[] = ['name'=>$prop->name->toString(), 'nameRange'=>$range];
+                    }
+                    if ($type !== null) $properties[$prop->name->toString()] = $type;
+                }
             }
-            return ['class' => $class, 'properties' => $properties];
+            $ancestors = [];
+            if ($node instanceof PhpParser\Node\Stmt\Class_ && $node->extends instanceof PhpParser\Node\Name) {
+                $ancestors[] = ['relation'=>'extends','className'=>$node->extends->toString()];
+            }
+            if ($node instanceof PhpParser\Node\Stmt\Class_) {
+                foreach ($node->implements as $iface) $ancestors[] = ['relation'=>'implements','className'=>$iface->toString()];
+            }
+            if ($node instanceof PhpParser\Node\Stmt\Interface_) {
+                foreach ($node->extends as $iface) $ancestors[] = ['relation'=>'extends','className'=>$iface->toString()];
+            }
+            foreach ($node->stmts as $member) {
+                if ($member instanceof PhpParser\Node\Stmt\TraitUse) {
+                    foreach ($member->traits as $trait) $ancestors[] = ['relation'=>'trait','className'=>$trait->toString()];
+                }
+            }
+            return ['class'=>$class,'properties'=>$properties,'ancestors'=>$ancestors,'propertyDefinitions'=>$propertyDefinitions];
         }
 
         private function methodCalls(PhpParser\Node $function, array $properties): array {
-            $known = []; $arrayTypes = []; $calls = []; $unresolved = [];
+            $known = []; $arrayTypes = []; $calls = []; $unresolved = []; $propertyAccesses = [];
+            $doc = $function->getDocComment()?->getText();
+            if ($doc) {
+                preg_match_all('/@param\\s+((?:array|list)\\s*<\\s*\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*\\s*>|\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*\\s*\\[\\s*\\])\\s+\\$([A-Za-z_][A-Za-z0-9_]*)/i', $doc, $paramMatches, PREG_SET_ORDER);
+                foreach ($paramMatches as $match) {
+                    $type = qbPhpDocArray('/** @return ' . $match[1] . ' */', 'return', $this->namespace, $this->aliases);
+                    if ($type !== null) $arrayTypes[$match[2]] = $type;
+                }
+            }
             $currentClass = $this->classStack ? ($this->classStack[count($this->classStack)-1]['class'] ?? null) : null;
             foreach ($function->getParams() as $param) {
                 $name = $param->var instanceof PhpParser\Node\Expr\Variable ? $param->var->name : null;
@@ -268,7 +296,7 @@ foreach ($paths as $relative) {
                 }
                 foreach ($part->getSubNodeNames() as $field) $modified($part->$field,$names);
             };
-            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$modified,&$calls,&$unresolved,$currentClass): void {
+            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$modified,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry,$types,$arrays); return; }
                 if (!$part instanceof PhpParser\Node || $part instanceof PhpParser\Node\FunctionLike
                     || $part instanceof PhpParser\Node\Stmt\ClassLike) return;
@@ -280,6 +308,17 @@ foreach ($paths as $relative) {
                     return;
                 }
                 if ($part instanceof PhpParser\Node\Expr\Assign) {
+                    if ($part->var instanceof PhpParser\Node\Expr\PropertyFetch
+                        && $part->var->name instanceof PhpParser\Node\Identifier) {
+                        $receiver = $infer($part->var->var, $types);
+                        $range = $this->range($part->var->name);
+                        if ($receiver !== null && $range !== null) {
+                            $propertyAccesses[] = ['className'=>$receiver['className'],
+                                'name'=>$part->var->name->toString(),'nameRange'=>$range,'kind'=>'writes',
+                                'evidenceSource'=>$receiver['source']];
+                        }
+                        $walk($part->var->var, $types, $arrays);
+                    }
                     $walk($part->expr,$types,$arrays);
                     if ($part->var instanceof PhpParser\Node\Expr\Variable && is_string($part->var->name)) {
                         $name=$part->var->name; $type=$infer($part->expr,$types);
@@ -330,8 +369,35 @@ foreach ($paths as $relative) {
                     foreach ($changed as $name=>$_) unset($types[$name],$arrays[$name]);
                     return;
                 }
+                if ($part instanceof PhpParser\Node\Expr\PropertyFetch
+                    && $part->name instanceof PhpParser\Node\Identifier) {
+                    $receiver = $infer($part->var, $types);
+                    $range = $this->range($part->name);
+                    if ($receiver !== null && $range !== null) {
+                        $propertyAccesses[] = ['className'=>$receiver['className'],
+                            'name'=>$part->name->toString(),'nameRange'=>$range,'kind'=>'reads',
+                            'evidenceSource'=>$receiver['source']];
+                    }
+                }
                 if ($part instanceof PhpParser\Node\Expr\AssignOp && $part->var instanceof PhpParser\Node\Expr\Variable
                     && is_string($part->var->name)) unset($types[$part->var->name],$arrays[$part->var->name]);
+                if ($part instanceof PhpParser\Node\Expr\StaticCall
+                    && $part->name instanceof PhpParser\Node\Identifier
+                    && ($range = $this->range($part->name)) !== null
+                    && !($function instanceof PhpParser\Node\Expr\Closure)
+                    && !($function instanceof PhpParser\Node\Expr\ArrowFunction)) {
+                    $class = qbPhpName($part->class, $currentClass);
+                    if ($class !== null) $calls[] = ['className'=>$class,
+                        'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native'];
+                    else $unresolved[] = ['name'=>$part->name->toString(),'nameRange'=>$range];
+                }
+                if (($function instanceof PhpParser\Node\Expr\Closure
+                    || $function instanceof PhpParser\Node\Expr\ArrowFunction)
+                    && $part instanceof PhpParser\Node\Expr\StaticCall
+                    && $part->name instanceof PhpParser\Node\Identifier
+                    && ($range = $this->range($part->name)) !== null) {
+                    $unresolved[] = ['name'=>$part->name->toString(),'nameRange'=>$range];
+                }
                 if (($part instanceof PhpParser\Node\Expr\MethodCall || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
                     && $part->name instanceof PhpParser\Node\Identifier) {
                     $type=$infer($part->var,$types); $range=$this->range($part->name);
@@ -346,6 +412,37 @@ foreach ($paths as $relative) {
             $walk($function->getStmts() ?? [],$known,$arrayTypes);
             $this->callCount+=count($calls);
             $this->unresolvedCount+=count($unresolved);
+            return ['calls'=>$calls,'unresolvedCalls'=>$unresolved,'propertyAccesses'=>$propertyAccesses];
+        }
+
+        public function fileCallSites(array $statements): array {
+            $calls = []; $unresolved = [];
+            $walk = function($part) use (&$walk, &$calls, &$unresolved): void {
+                if (is_array($part)) { foreach ($part as $entry) $walk($entry); return; }
+                if (!$part instanceof PhpParser\Node) return;
+                if ($part instanceof PhpParser\Node\Stmt\ClassLike
+                    || $part instanceof PhpParser\Node\FunctionLike) return;
+                if ($part instanceof PhpParser\Node\Expr\StaticCall
+                    && $part->name instanceof PhpParser\Node\Identifier) {
+                    $range = $this->range($part->name);
+                    $class = qbPhpName($part->class);
+                    if ($range !== null) {
+                        if ($class !== null) $calls[] = ['className'=>$class,
+                            'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native'];
+                        else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
+                    }
+                } elseif (($part instanceof PhpParser\Node\Expr\MethodCall
+                    || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
+                    && $part->name instanceof PhpParser\Node\Identifier
+                    && ($range = $this->range($part->name)) !== null) {
+                    $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
+                }
+                foreach ($part->getSubNodeNames() as $field) $walk($part->$field);
+            };
+            foreach ($statements as $statement) {
+                if ($statement instanceof PhpParser\Node\Stmt\Namespace_) $walk($statement->stmts);
+                else $walk($statement);
+            }
             return ['calls'=>$calls,'unresolvedCalls'=>$unresolved];
         }
 
@@ -355,7 +452,14 @@ foreach ($paths as $relative) {
                 $this->aliases = qbPhpAliases($node->stmts);
             }
             if ($node instanceof PhpParser\Node\Stmt\ClassLike) {
-                $this->classStack[] = $this->classContext($node);
+                $context = $this->classContext($node);
+                $this->classStack[] = $context;
+                if ($context['class'] !== null && ($range = $this->range($node)) !== null) {
+                    $this->scopes[] = ['type'=>'class','className'=>$context['class'],
+                        'nameRange'=>$node->name ? $this->range($node->name) : null,
+                        'range'=>$range,'ancestors'=>$context['ancestors'],
+                        'propertyDefinitions'=>$context['propertyDefinitions']];
+                }
                 return null;
             }
             $name = null;
@@ -379,7 +483,13 @@ foreach ($paths as $relative) {
             $range = $this->range($node);
             if ($range === null || ($type !== 'anonymous' && $nameRange === null)) return null;
             $context = $this->classStack ? $this->classStack[count($this->classStack) - 1] : null;
-            $sites = $type === 'anonymous' ? ['calls'=>[],'unresolvedCalls'=>[]] : $this->methodCalls($node,$context['properties'] ?? []);
+            $sites = $this->methodCalls($node,$context['properties'] ?? []);
+            if ($type === 'anonymous') {
+                foreach ($sites['calls'] as $call) {
+                    $sites['unresolvedCalls'][] = ['name'=>$call['name'],'nameRange'=>$call['nameRange']];
+                }
+                $sites['calls'] = [];
+            }
             $this->scopes[] = [
                 'type' => $type,
                 'range' => $range,
@@ -388,6 +498,8 @@ foreach ($paths as $relative) {
                     ? ['className' => $context['class']] : []),
                 ...($sites['calls'] ? ['calls'=>$sites['calls']] : []),
                 ...($sites['unresolvedCalls'] ? ['unresolvedCalls'=>$sites['unresolvedCalls']] : []),
+                ...($type !== 'anonymous' && $sites['propertyAccesses']
+                    ? ['propertyAccesses'=>$sites['propertyAccesses']] : []),
             ];
             return null;
         }
@@ -405,6 +517,15 @@ foreach ($paths as $relative) {
     $traverser = new PhpParser\NodeTraverser();
     $traverser->addVisitor($visitor);
     $traverser->traverse($resolved);
+    $globalSites = $visitor->fileCallSites($resolved);
+    if ($globalSites['calls'] || $globalSites['unresolvedCalls']) {
+        $visitor->scopes[] = [
+            'type'=>'file',
+            'range'=>[0,0,count($lineStarts)-1,strlen($source) - $lineStarts[count($lineStarts)-1]],
+            ...($globalSites['calls'] ? ['calls'=>$globalSites['calls']] : []),
+            ...($globalSites['unresolvedCalls'] ? ['unresolvedCalls'=>$globalSites['unresolvedCalls']] : []),
+        ];
+    }
     $globalScopes += count($visitor->scopes);
     if ($globalScopes > 150000 || $visitor->callCount + $visitor->unresolvedCount > 100000) {
         fwrite(STDERR, "PHP scope count exceeds bounded contract\n");

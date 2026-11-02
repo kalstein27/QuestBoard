@@ -595,3 +595,44 @@ test("SCIP falls back to narrow enclosing definition ranges when explicit symbol
       && relation.to === byIdentity.get(`scip:${INNER}`)?.id,
   ));
 });
+
+
+test("PHP SCIP UTF8 byte positions convert to UTF16, while declared UTF16 stays unchanged", () => {
+  const source = '<?php $greeting = "한글"; class Order {}';
+  const nameOffset = source.indexOf("Order");
+  const byteOffset = Buffer.byteLength(source.slice(0, nameOffset), "utf8");
+  const makeIndex = (encoding: number, column: number) => parseScipJsonIndex({
+    position_encoding: encoding,
+    documents: [{
+      relativePath: "src/Order.php", language: "php",
+      symbols: [{ symbol: "scip-php composer example/app 1.0.0 Order#", kind: "Class", displayName: "Order" }],
+      occurrences: [{ symbol: "scip-php composer example/app 1.0.0 Order#",
+        symbolRoles: 1, range: [0, column, column + Buffer.byteLength("Order", "utf8")] }],
+    }],
+  });
+  const normalize = (index: ReturnType<typeof makeIndex>) => normalizeScipGraph({
+    projectId: "utf-test", rootPath: "/temp/utf-test", indexedAt: "2026-11-03T00:00:00Z",
+    providerId: "scip-php", index, sourceTextByPath: new Map([["src/Order.php", source]]),
+  }).nodes[0];
+  const byteNode = normalize(makeIndex(1, byteOffset));
+  const utf16Node = normalize(makeIndex(2, nameOffset));
+  assert.equal(byteNode?.location?.startColumn, nameOffset + 1);
+  assert.equal(byteNode?.location?.startColumn, utf16Node?.location?.startColumn);
+});
+
+test("Composer PHP root version changes do not change stable project-local symbol IDs", () => {
+  const makeGraph = (version: string) => normalizeScipGraph({
+    projectId: "composer-stability", rootPath: "/temp/composer",
+    indexedAt: "2026-11-03T00:00:00Z", providerId: "scip-php",
+    index: parseScipJsonIndex({ documents: [{
+      relativePath: "src/Order.php", language: "php",
+      symbols: [{ symbol: "scip-php composer example/app " + version + " src/Order.php/Order#", kind: "Class", displayName: "Order" }],
+      occurrences: [{ symbol: "scip-php composer example/app " + version + " src/Order.php/Order#",
+        symbolRoles: 1, range: [0, 6, 11] }],
+    }] }),
+  });
+  const before = makeGraph("6a21f3");
+  const after = makeGraph("7bb100");
+  assert.equal(before.nodes[0]?.id, after.nodes[0]?.id);
+  assert.equal(before.nodes[0]?.canonicalIdentity, after.nodes[0]?.canonicalIdentity);
+});

@@ -156,7 +156,7 @@ test("SCIP provider advertises full-index semantics instead of claiming incremen
   assert.deepEqual(provider.capabilities, {
     incrementalIndexing: false,
     impactAnalysis: false,
-    callTrace: false,
+    callTrace: true,
   });
 });
 

@@ -402,6 +402,7 @@ export function queryCodeGraph(
   switch (input.operation) {
     case "find_nodes": {
       const query = normalizeText(input.query)?.toLocaleLowerCase();
+      const phpQuery = query?.replaceAll("->", "#").replaceAll("::", "#");
       const path = normalizeText(input.path)?.toLocaleLowerCase();
       const language = normalizeText(input.language)?.toLocaleLowerCase();
       const kinds = input.kinds?.map((kind) => {
@@ -412,7 +413,9 @@ export function queryCodeGraph(
       const matches = graph.nodes
         .filter((node) => !query
           || node.name.toLocaleLowerCase().includes(query)
-          || node.canonicalIdentity.toLocaleLowerCase().includes(query))
+          || node.canonicalIdentity.toLocaleLowerCase().includes(query)
+          || (phpQuery !== query && Boolean(phpQuery)
+            && node.canonicalIdentity.toLocaleLowerCase().includes(phpQuery!)))
         .filter((node) => !path || node.location?.path.toLocaleLowerCase().includes(path))
         .filter((node) => !language || normalizedNodeLanguage(node) === language)
         .filter((node) => !kindSet || kindSet.has(node.kind))

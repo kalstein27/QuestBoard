@@ -307,7 +307,7 @@ export class ScipTypeScriptCodeIntelligenceProvider implements CodeIntelligenceP
   readonly capabilities: CodeIntelligenceCapabilities = {
     incrementalIndexing: false,
     impactAnalysis: false,
-    callTrace: false,
+    callTrace: true,
   };
 
   readonly #runner: ScipProcessRunner;

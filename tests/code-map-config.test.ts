@@ -213,7 +213,7 @@ test("Code Map config supports an explicit SCIP TypeScript indexer override", ()
   assert.deepEqual(service?.capabilities, {
     incrementalIndexing: false,
     impactAnalysis: false,
-    callTrace: false,
+    callTrace: true,
   });
 });
 

@@ -45,8 +45,16 @@ export interface ScipPhpUnresolvedMethodCall {
   nameRange: readonly [number, number, number, number];
 }
 
+export interface ScipPhpTypedPropertyAccess {
+  className: string;
+  name: string;
+  nameRange: readonly [number, number, number, number];
+  kind: "reads" | "writes";
+  evidenceSource?: "native" | "docblock";
+}
+
 export interface ScipPhpLexicalScope {
-  type: "function" | "method" | "anonymous";
+  type: "function" | "method" | "anonymous" | "class" | "file";
   range: readonly [number, number, number, number];
   name?: string;
   nameRange?: readonly [number, number, number, number];
@@ -55,6 +63,9 @@ export interface ScipPhpLexicalScope {
   /** Directly owned AST method calls with a statically proved receiver type. */
   calls?: readonly ScipPhpTypedMethodCall[];
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
+  ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
+  propertyDefinitions?: readonly { name: string; nameRange: readonly [number, number, number, number] }[];
+  propertyAccesses?: readonly ScipPhpTypedPropertyAccess[];
 }
 
 interface ScipOccurrence {
@@ -92,6 +103,8 @@ interface ScipDocument {
 export interface ScipJsonIndex {
   documents: ScipDocument[];
   externalSymbols: ScipSymbolInformation[];
+  /** SCIP enum: 1 = UTF8 byte offsets, 2 = UTF16 code units. */
+  positionEncoding?: number | string;
 }
 
 export interface NormalizeScipGraphInput {
@@ -274,7 +287,10 @@ export function parseScipJsonIndex(value: unknown): ScipJsonIndex {
   const externalSymbols = array(field(object, "externalSymbols", "external_symbols"))
     .map(parseSymbolInformation)
     .filter((item): item is ScipSymbolInformation => Boolean(item));
-  return { documents, externalSymbols };
+  const positionEncoding = field(object, "positionEncoding", "position_encoding");
+  return { documents, externalSymbols,
+    ...((typeof positionEncoding === "number" || typeof positionEncoding === "string") ? { positionEncoding } : {}),
+  };
 }
 
 function stableId(namespace: "node" | "relation", value: string): string {
@@ -349,6 +365,8 @@ function normalizeKind(info: ScipSymbolInformation | undefined, symbol: string):
   }
   const fromDocumentation = documentedKind(documentationSignatureLine(info), symbol);
   if (fromDocumentation) return fromDocumentation;
+  if (/\(\)\.\(\$[A-Za-z_][A-Za-z0-9_]*\)\.?$/.test(symbol)) return "variable";
+  if (/#(?:\$[A-Za-z_][A-Za-z0-9_]*)\.?$/.test(symbol)) return "property";
   if (/\(\)\.?$/.test(symbol)) return "method";
   if (/#(?:[^/#.]+)#$/.test(symbol)) return "type";
   return "unknown";
@@ -372,6 +390,8 @@ function documentedDisplayName(line: string | undefined, symbol: string): string
 
 function fallbackDisplayName(symbol: string): string {
   if (symbol.startsWith("local ")) return symbol;
+  const phpParameter = symbol.match(/\(\)\.\((\$[A-Za-z_][A-Za-z0-9_]*)\)\.?$/);
+  if (phpParameter) return phpParameter[1]!;
   const withoutMethodSuffix = symbol.replace(/\(.*\)\.?$/, "").replace(/[.#/]$/, "");
   const match = withoutMethodSuffix.match(/(?:^|[\s/#.])(`[^`]+`|[^\s/#.]+)$/);
   return match?.[1]?.replace(/^`|`$/g, "") ?? symbol;
@@ -596,9 +616,9 @@ function isInstantiationOccurrence(source: string, lineStarts: readonly number[]
   if (source.slice(Math.max(0, before - 3), before) !== "new") return false;
   const keywordStart = before - 3;
   if (keywordStart > 0 && /[A-Za-z0-9_$]/.test(source[keywordStart - 1]!)) return false;
-  let after = endOffset;
-  while (after < source.length && /\s/.test(source[after]!)) after += 1;
-  return source[after] === "(";
+  // PHP permits both new Order() and new Order; the lexical new keyword
+  // and a resolved SCIP class symbol already prove instantiation.
+  return true;
 }
 
 interface DefinitionRecord {
@@ -613,7 +633,14 @@ function scopedSymbolKey(document: ScipDocument, symbol: string): string {
 }
 
 function canonicalScipIdentity(document: ScipDocument, symbol: string): string {
-  return symbol.startsWith("local ") ? `scip:${document.relativePath}:${symbol}` : `scip:${symbol}`;
+  if (symbol.startsWith("local ")) return `scip:${document.relativePath}:${symbol}`;
+  // Composer root reference changes after install; omit it for project-local
+  // PHP definition identities while preserving exact SCIP symbols for lookup.
+  if (normalizeCodeLanguage(document.language) === "php") {
+    const match = symbol.match(/^(scip-php\s+composer\s+\S+)\s+\S+\s+(.+)$/);
+    if (match) return `scip:php-project:${document.relativePath}:${match[1]} ${match[2]}`;
+  }
+  return `scip:${symbol}`;
 }
 
 function relationKindForRoles(roles: number): CodeRelationKind {
@@ -638,8 +665,13 @@ function addRelation(
   if (existing) {
     const byEvidence = new Map<string, NonNullable<CodeRelation["evidence"]>[number]>();
     for (const item of [...(existing.evidence ?? []), ...(evidence ?? [])]) {
-      byEvidence.set(JSON.stringify([item.location.path, item.location.startLine, item.location.startColumn,
-        item.location.endLine, item.location.endColumn, item.label ?? ""]), item);
+      const key = JSON.stringify([item.location.path, item.location.startLine, item.location.startColumn,
+        item.location.endLine, item.location.endColumn]);
+      const previous = byEvidence.get(key);
+      const labels = [previous?.label, item.label].filter((label): label is string => Boolean(label));
+      byEvidence.set(key, { ...item,
+        ...(labels.length ? { label: [...new Set(labels.flatMap((label) => label.split(" | ")))].sort().join(" | ") } : {}),
+      });
     }
     const mergedEvidence = [...byEvidence.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, item]) => item);
     const byProvider = new Map((existing.provenance ?? []).map((item) => [item.providerId, item]));
@@ -659,7 +691,46 @@ function addRelation(
   });
 }
 
+/** Decode SCIP UTF8-byte columns once into JS/AST UTF16 code units. */
+function normalizeScipEncoding(index: ScipJsonIndex, sources: ReadonlyMap<string, string> | undefined): ScipJsonIndex {
+  const encoding = index.positionEncoding;
+  if (String(encoding ?? "") !== "1" && !String(encoding ?? "").toLowerCase().includes("utf8")) return index;
+  return {
+    ...index,
+    positionEncoding: 2,
+    documents: index.documents.map((document) => {
+      const source = sources?.get(document.relativePath);
+      if (!source) return document;
+      const lines = source.split("\n");
+      const cached = new Map<string, number>();
+      const column = (line: number, byte: number): number => {
+        const key = line + ":" + byte;
+        const previous = cached.get(key);
+        if (previous !== undefined) return previous;
+        const text = lines[line];
+        if (text === undefined) return byte;
+        const raw = Buffer.from(text, "utf8");
+        if (byte > raw.length) return byte;
+        const decoded = raw.subarray(0, byte).toString("utf8");
+        if (Buffer.byteLength(decoded, "utf8") !== byte) return byte;
+        cached.set(key, decoded.length);
+        return decoded.length;
+      };
+      const transform = (range: ScipRange | undefined): ScipRange | undefined => range ? {
+        startLine: range.startLine, startCharacter: column(range.startLine, range.startCharacter),
+        endLine: range.endLine, endCharacter: column(range.endLine, range.endCharacter),
+      } : undefined;
+      return { ...document, occurrences: document.occurrences.map((occurrence) => ({
+        ...occurrence,
+        ...(occurrence.range ? { range: transform(occurrence.range)! } : {}),
+        ...(occurrence.enclosingRange ? { enclosingRange: transform(occurrence.enclosingRange)! } : {}),
+      })) };
+    }),
+  };
+}
+
 export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSnapshot {
+  input = { ...input, index: normalizeScipEncoding(input.index, input.sourceTextByPath) };
   const providerId = input.providerId?.trim() || "scip-typescript";
   const fidelity = input.fidelity ?? "semantic-call";
   const infoBySymbol = new Map<string, ScipSymbolInformation>();
@@ -772,8 +843,19 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     range: ScipRange; ownerId: string | undefined;
   }>>();
   const phpMethodsByQualifiedName = new Map<string, string | null>();
+  const phpClassNodes = new Map<string, string | null>();
+  const phpClassAncestors = new Map<string, readonly { className: string; relation: "extends" | "implements" | "trait" }[]>();
+  const phpUnresolvedSites = new Map<string, { name: string; document: ScipDocument; range: ScipRange }>();
+  const siteKey = (document: ScipDocument, range: ScipRange, name: string): string =>
+    [document.relativePath, range.startLine, range.startCharacter, name.toLowerCase()].join(":");
   const phpTypedCalls: Array<{ document: ScipDocument; ownerId: string; call: ScipPhpTypedMethodCall }> = [];
-  const unresolvedPhpNames = new Map<string, number>();
+  const phpFileCalls: Array<{ document: ScipDocument; call: ScipPhpTypedMethodCall }> = [];
+  const phpPropertiesByQualifiedName = new Map<string, string | null>();
+  const phpTypedPropertyAccesses: Array<{
+    document: ScipDocument; ownerId: string; access: ScipPhpTypedPropertyAccess;
+  }> = [];
+  const phpSyntheticFileNodes = new Map<string, CodeNode>();
+  const resolvedPhpSites = new Set<string>();
   const qualifiedMethodKey = (className: string, methodName: string): string =>
     className.replace(/^\\+/, "").toLowerCase() + "::" + methodName.toLowerCase();
   if (input.phpLexicalScopes) {
@@ -783,7 +865,48 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       const documentDefinitions = definitionsByDocument.get(document) ?? [];
       const owners = scopes.map((scope) => {
         const extent = tupleRange(scope.range);
+        if (scope.type === "file") {
+          for (const call of scope.calls ?? []) phpFileCalls.push({ document, call });
+          for (const call of scope.unresolvedCalls ?? []) {
+            const range = tupleRange(call.nameRange);
+            phpUnresolvedSites.set(siteKey(document, range, call.name), { name: call.name, document, range });
+          }
+          return null;
+        }
+        if (scope.type === "class" && scope.className && scope.nameRange) {
+          const classKey = scope.className.toLowerCase();
+          const token = tupleRange(scope.nameRange);
+          const matches = documentDefinitions.filter((definition) => {
+            const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+            const position = definition.occurrence.range;
+            return node && position && ["class", "interface", "type", "enum"].includes(node.kind)
+              && position.startLine === token.startLine && position.startCharacter === token.startCharacter;
+          });
+          phpClassNodes.set(classKey, matches.length === 1 ? matches[0]!.nodeId : null);
+          phpClassAncestors.set(classKey, scope.ancestors ?? []);
+          for (const property of scope.propertyDefinitions ?? []) {
+            const token = tupleRange(property.nameRange);
+            const matches = documentDefinitions.filter((definition) => {
+              const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+              const position = definition.occurrence.range;
+              return node && position && ["property", "variable", "unknown"].includes(node.kind)
+                && node.name.replace(/^\$/, "").toLowerCase() === property.name.toLowerCase()
+                && position.startLine === token.startLine && position.startCharacter === token.startCharacter;
+            });
+            const qualified = qualifiedMethodKey(scope.className, property.name);
+            const previous = phpPropertiesByQualifiedName.get(qualified);
+            const current = matches.length === 1 ? matches[0]!.nodeId : null;
+            phpPropertiesByQualifiedName.set(qualified,
+              previous === undefined ? current : previous === current ? current : null);
+          }
+          return null;
+        }
         if (scope.type === "anonymous" || !scope.nameRange || !scope.name) {
+          for (const call of scope.unresolvedCalls ?? []) {
+            const range = tupleRange(call.nameRange);
+            if (rangeContains(extent, range)) phpUnresolvedSites.set(siteKey(document, range, call.name),
+              { name: call.name, document, range });
+          }
           return { range: extent, ownerId: undefined };
         }
         const nameRange = tupleRange(scope.nameRange);
@@ -803,6 +926,13 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           const previous = phpMethodsByQualifiedName.get(key);
           phpMethodsByQualifiedName.set(key, previous === undefined ? ownerId : previous === ownerId ? ownerId : null);
         }
+        if (ownerId && scope.propertyAccesses) {
+          for (const access of scope.propertyAccesses) {
+            if (rangeContains(extent, tupleRange(access.nameRange))) {
+              phpTypedPropertyAccesses.push({ document, ownerId, access });
+            }
+          }
+        }
         if (ownerId && scope.calls) {
           for (const call of scope.calls) {
             if (rangeContains(extent, tupleRange(call.nameRange))) {
@@ -810,21 +940,38 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
             }
           }
         }
-        if (ownerId && scope.unresolvedCalls) {
-          for (const call of scope.unresolvedCalls) {
-            if (rangeContains(extent, tupleRange(call.nameRange))) {
-              const key = call.name.toLowerCase();
-              unresolvedPhpNames.set(key, (unresolvedPhpNames.get(key) ?? 0) + 1);
-            }
-          }
+        for (const call of scope.unresolvedCalls ?? []) {
+          const range = tupleRange(call.nameRange);
+          if (rangeContains(extent, range)) phpUnresolvedSites.set(siteKey(document, range, call.name),
+            { name: call.name, document, range });
         }
         return { range: extent, ownerId };
-      }).sort((left, right) => rangeSpan(left.range) - rangeSpan(right.range));
+      }).filter((scope): scope is { range: ScipRange; ownerId: string | undefined } => Boolean(scope))
+        .sort((left, right) => rangeSpan(left.range) - rangeSpan(right.range));
       phpOwnersByDocument.set(document, owners);
     }
   }
 
   const relations = new Map<string, CodeRelation>();
+  for (const [className, ancestors] of phpClassAncestors) {
+    const child = phpClassNodes.get(className);
+    if (!child) continue;
+    for (const ancestor of ancestors) {
+      const parent = phpClassNodes.get(ancestor.className.toLowerCase());
+      if (!parent || parent === child) continue;
+      addRelation(relations, child, parent,
+        ancestor.relation === "implements" ? "implements" : ancestor.relation === "extends" ? "extends" : "depends_on",
+        1, undefined, [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+      // A method explicitly declared on the child overrides an inherited method.
+      for (const [qualified, methodId] of phpMethodsByQualifiedName) {
+        if (!methodId || !qualified.startsWith(className + "::")) continue;
+        const methodName = qualified.slice(className.length + 2);
+        const ancestorMethod = phpMethodsByQualifiedName.get(ancestor.className.toLowerCase() + "::" + methodName);
+        if (ancestorMethod && ancestorMethod !== methodId) addRelation(relations, methodId, ancestorMethod,
+          "overrides", 1, undefined, [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+      }
+    }
+  }
   for (const containment of registrationContainments) {
     addRelation(relations, containment.from, containment.to, "contains", 1,
       [{ location: containment.location, label: "AST verified inline callback lexical scope" }],
@@ -931,19 +1078,48 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         : source && lineStarts && isCallOccurrence(source, lineStarts, occurrence.range)
           ? "calls"
           : relationKindForRoles(occurrence.symbolRoles);
+      if (relationKind === "calls") {
+        resolvedPhpSites.add(siteKey(document, occurrence.range, targetNode?.name ?? ""));
+      }
       addRelation(relations, owner, target, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9,
         [{ location: nativeLocation(document.relativePath, occurrence.range), label: "SCIP native reference occurrence" }],
         [{ providerId, fidelity, freshness: "fresh" }]);
     }
   }
 
+  const verifiedPhpMethodTarget = (className: string, methodName: string): string | undefined => {
+    let frontier = [className.toLowerCase()];
+    const visited = new Set<string>();
+    for (let depth = 0; depth < 24 && frontier.length; depth += 1) {
+      const next: string[] = [];
+      const candidates = new Set<string>();
+      for (const current of frontier) {
+        if (visited.has(current)) continue;
+        visited.add(current);
+        const direct = phpMethodsByQualifiedName.get(qualifiedMethodKey(current, methodName));
+        if (direct) candidates.add(direct);
+        // Ambiguous SCIP definitions cannot be recovered through their parents.
+        else if (direct === null && phpMethodsByQualifiedName.has(qualifiedMethodKey(current, methodName))) return undefined;
+        else next.push(...(phpClassAncestors.get(current) ?? []).map((entry) => entry.className.toLowerCase()));
+      }
+      if (candidates.size > 1) return undefined;
+      if (candidates.size === 1) return [...candidates][0];
+      frontier = next;
+    }
+    return undefined;
+  };
+
   // Recover only AST-proven receiver calls whose exact target is a single
   // native SCIP method definition. Do not manufacture target nodes or treat
   // an unresolved/dynamic receiver as a semantic call.
   for (const { document, ownerId, call } of phpTypedCalls) {
-    const target = phpMethodsByQualifiedName.get(qualifiedMethodKey(call.className, call.name));
-    if (!target || target === ownerId) continue;
+    const target = verifiedPhpMethodTarget(call.className, call.name);
     const location = tupleRange(call.nameRange);
+    if (!target) {
+      phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
+      continue;
+    }
+    if (target === ownerId) continue;
     const innermost = phpOwnersByDocument.get(document)?.find((entry) => rangeContains(entry.range, location));
     if (!innermost || innermost.ownerId !== ownerId) continue;
     const competingNative = document.occurrences.some((occurrence) =>
@@ -953,6 +1129,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       && (nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
         ?? externalNodeBySymbol.get(occurrence.symbol)?.id) !== target);
     if (competingNative) continue;
+    resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, ownerId, target, "calls", 1, [{
       location: nativeLocation(document.relativePath, location),
       label: call.evidenceSource === "docblock"
@@ -961,15 +1138,58 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     }], [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
 
+  // B2. Recover only type-proven property references whose exact target
+  // matches one unambiguous SCIP property definition.
+  for (const { document, ownerId, access } of phpTypedPropertyAccesses) {
+    const target = phpPropertiesByQualifiedName.get(qualifiedMethodKey(access.className, access.name));
+    if (!target || target === ownerId) continue;
+    const location = tupleRange(access.nameRange);
+    const owner = phpOwnersByDocument.get(document)?.find((scope) => rangeContains(scope.range, location));
+    if (!owner || owner.ownerId !== ownerId) continue;
+    addRelation(relations, ownerId, target, access.kind, 1,
+      [{ location: nativeLocation(document.relativePath, location),
+        label: access.evidenceSource === "docblock" ? "PHP AST docblock-derived property access"
+          : "PHP AST type-proven property access" }],
+      [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+  }
+
+  // A2. The file itself is the owner for executable PHP top-level statements.
+  // Only exact SCIP-verified method targets become call relations.
+  for (const { document, call } of phpFileCalls) {
+    const location = tupleRange(call.nameRange);
+    const target = verifiedPhpMethodTarget(call.className, call.name);
+    if (!target) {
+      phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
+      continue;
+    }
+    let fileNode = phpSyntheticFileNodes.get(document.relativePath);
+    if (!fileNode) {
+      const canonicalIdentity = "file:" + document.relativePath;
+      fileNode = { id: stableId("node", canonicalIdentity), kind: "file", name: document.relativePath.split("/").at(-1)!,
+        canonicalIdentity, language: "php", location: { path: document.relativePath },
+        provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }] };
+      phpSyntheticFileNodes.set(document.relativePath, fileNode);
+    }
+    resolvedPhpSites.add(siteKey(document, location, call.name));
+    addRelation(relations, fileNode.id, target, "calls", 1,
+      [{ location: nativeLocation(document.relativePath, location), label: "PHP AST file-level static call" }],
+      [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+  }
+  const unresolvedCounts = new Map<string, number>();
+  for (const [key, site] of phpUnresolvedSites) {
+    if (resolvedPhpSites.has(key)) continue;
+    const name = site.name.toLowerCase();
+    unresolvedCounts.set(name, (unresolvedCounts.get(name) ?? 0) + 1);
+  }
   const snapshot: CodeGraphSnapshot = {
     schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
     projectId: input.projectId,
     rootPath: input.rootPath,
     indexedAt: input.indexedAt,
-    nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values()],
+    nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values(), ...phpSyntheticFileNodes.values()],
     relations: [...relations.values()],
     ...(providerId === "scip-php" ? {
-      unresolvedPhpMethodCalls: [...unresolvedPhpNames.entries()].sort(([a], [b]) => a.localeCompare(b))
+      unresolvedPhpMethodCalls: [...unresolvedCounts].sort(([a], [b]) => a.localeCompare(b))
         .map(([name, count]) => ({ name, count })),
     } : {}),
     ...(input.indexArtifactSha256 ? {

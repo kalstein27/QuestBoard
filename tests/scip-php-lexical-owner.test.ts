@@ -50,21 +50,25 @@ function phpIndex() {
   });
 }
 
-function normalize(phpScopes?: ScipPhpLexicalScope[]) {
+function normalize(phpScopes?: ScipPhpLexicalScope[], sourceOverride = source) {
   return normalizeScipGraph({
     projectId: "php-lexical-verified",
     rootPath: "/isolated/php-fixture",
     indexedAt: "2026-10-30T00:00:00.000Z",
     providerId: "scip-php",
     index: phpIndex(),
-    sourceTextByPath: new Map([["src/Main.php", source]]),
+    sourceTextByPath: new Map([["src/Main.php", sourceOverride]]),
     ...(phpScopes ? { phpLexicalScopes: new Map([["src/Main.php", phpScopes]]) } : {}),
   });
 }
 
 test("PHP AST native-name-aligned owner restores one direct call and one instantiation", () => {
   const graph = normalize(scopes);
-  const node = (sym: string) => graph.nodes.find(n => n.canonicalIdentity === `scip:${sym}`)?.id;
+  const node = (sym: string) => {
+    const stable = sym.replace(/^(scip-php\s+composer\s+\S+)\s+\S+\s+/, "$1 ");
+    return graph.nodes.find(n => n.canonicalIdentity === "scip:" + sym
+      || n.canonicalIdentity.endsWith(":" + stable))?.id;
+  };
   assert.ok(node(caller) && node(callee) && node(widget));
   const calls = graph.relations.filter(r => r.kind === "calls");
   const constructions = graph.relations.filter(r => r.kind === "instantiates");
@@ -97,4 +101,12 @@ test("PHP scopes with unknown named ownership block outer lexical attribution", 
   const graph = normalize(nestedUnknown);
   assert.equal(graph.relations.filter(r => r.kind === "calls").length, 0);
   assert.equal(graph.relations.filter(r => r.kind === "instantiates").length, 1);
+});
+
+
+test("new without constructor parentheses still yields instantiates only for verified new keyword", () => {
+  const graph = normalize(scopes, source.replace("new Widget();", "new Widget;"));
+  assert.equal(graph.relations.filter((edge) => edge.kind === "instantiates").length, 1);
+  const negative = normalize(scopes, source.replace("new Widget();", "use Widget();"));
+  assert.equal(negative.relations.filter((edge) => edge.kind === "instantiates").length, 0);
 });

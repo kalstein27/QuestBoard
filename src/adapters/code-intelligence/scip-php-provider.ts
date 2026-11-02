@@ -56,7 +56,7 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
   readonly capabilities: CodeIntelligenceCapabilities = {
     incrementalIndexing: false,
     impactAnalysis: false,
-    callTrace: false,
+    callTrace: true,
   };
 
   readonly #runner: ScipProcessRunner;

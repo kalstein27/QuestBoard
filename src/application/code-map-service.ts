@@ -840,10 +840,12 @@ export class CodeMapService {
     const changedRawNodeIds = changedCodeNodeIds(cached?.graph, graph);
     const changedMacroNodeIds = changedArchitectureNodeIds(cached?.projection, projection);
     const snapshot: CodeMapSnapshot = { graph, projection };
+    // Publish only after a durable write succeeds. Otherwise a restart
+    // exposes the previous snapshot while the daemon claims "current".
+    this.#recordFreshIndex(request.projectId, request.rootPath, graph);
     this.#cache.set(request.projectId, snapshot);
     this.#hydrationAttempted.add(request.projectId);
     this.#hydrationDiagnostics.delete(request.projectId);
-    this.#recordFreshIndex(request.projectId, request.rootPath, graph);
 
     return {
       ...snapshot,
@@ -1004,9 +1006,6 @@ export class CodeMapService {
         staleReason: "source_check_failed",
       };
     }
-    this.#sourceManifestFingerprints.set(projectId, sourceManifestFingerprint);
-    this.#snapshotStates.set(projectId, state);
-
     try {
       const envelope: PersistedCodeMapSnapshotEnvelope = {
         formatVersion: CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION,
@@ -1026,19 +1025,31 @@ export class CodeMapService {
         graph,
       };
       persistence.store.save(projectId, envelope);
+      this.#sourceManifestFingerprints.set(projectId, sourceManifestFingerprint);
+      this.#snapshotStates.set(projectId, state);
       this.#snapshotIdentities.set(projectId, {
         graphDigest: envelope.graphDigest!,
         snapshotId: envelope.snapshotId!,
         ...(envelope.providerRunFingerprint ? { providerRunFingerprint: envelope.providerRunFingerprint } : {}),
       });
-    } catch {
-      // Persistence is a restart optimization. A successful fresh index remains usable in memory.
+    } catch (error) {
+      // Durable-write failure cannot be reported as a successful refresh.
+      const reason = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+      const prior = this.#snapshotStates.get(projectId);
+      this.#snapshotStates.set(projectId, {
+        snapshotSource: prior?.snapshotSource ?? "persisted",
+        freshness: "stale",
+        staleReason: "snapshot_save_failed",
+        persistenceWarning: "Newest index was NOT saved; previous disk snapshot remains: " + reason,
+      });
+      throw new Error("Code Map snapshot not saved; refresh not committed: " + reason, { cause: error });
     }
   }
 
   #refreshFreshness(projectId: string, rootPath: string): CodeMapSnapshotLifecycleState {
     const currentState = this.#snapshotStates.get(projectId)
       ?? { snapshotSource: "fresh-index" as const, freshness: "unknown" as const };
+    if (currentState.staleReason === "snapshot_save_failed") return currentState;
     const persistence = this.#persistence;
     if (!persistence) return currentState;
 

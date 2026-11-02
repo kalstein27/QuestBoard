@@ -61,8 +61,11 @@ const build = (calls: ScipPhpLexicalScope["calls"], ownerName = "afterWorks",
       ] : [])]]]),
   });
 };
-const scipId = (graph: ReturnType<typeof build>, sym: string) =>
-  graph.nodes.find(node => node.canonicalIdentity === "scip:" + sym)?.id;
+const scipId = (graph: ReturnType<typeof build>, sym: string) => {
+  const stableDescriptor = sym.replace(/^(scip-php\s+composer\s+\S+)\s+\S+\s+/, "$1 ");
+  return graph.nodes.find(node => node.canonicalIdentity === "scip:" + sym
+    || node.canonicalIdentity.endsWith(":" + stableDescriptor))?.id;
+};
 const sample = (className: string, name: string, line: number) =>
   ({ className, name, nameRange: [line, 7, line, 7 + name.length] as const });
 
@@ -109,9 +112,14 @@ test("MCP callers query distinguishes zero verified calls from same-name unresol
 });
 
 const orderSources: Record<string, string> = {
+  "src/Entity.php": [
+    "<?php", "namespace Domain;",
+    "abstract class Entity { public function setCreatedAt(int $t): static { return $this; } }",
+  ].join("\n"),
   "src/Order.php": [
     "<?php", "namespace Domain;",
-    "final class Order {",
+    "final class Order extends Entity {",
+    "public int $version = 0;",
     "public function setVersion(int $v): Order { return $this; }",
     "public function setStatus(int $s): static { return $this; }", "}",
   ].join("\n"),
@@ -159,6 +167,19 @@ const orderSources: Record<string, string> = {
     "$orders = getOrdersFromUnknownSource();",
     "foreach ($orders as $order) { $order->setVersion(5); }",
     "}",
+    "public static function inherit(Order $order): void { $order->setCreatedAt(1); }",
+    "public static function propRead(Order $order): int { return $order->version + 1; }",
+    "public static function propWrite(Order $order): void { $order->version = 3; }",
+    "public static function propUnknown(object $value): void { $value->version = 3; }",
+    "/** @param Order[] $orders */",
+    "public static function touchAll(array $orders): void {",
+    "foreach ($orders as $order) { $order->setVersion(6); }",
+    "}",
+    "public static function closureCall(): void {",
+    "$ids = [1];",
+    "array_walk($ids, function (int $id) { OrderRepository::findById($id); });",
+    "$f = fn(Order $o) => $o->setStatus(0);",
+    "}",
     "public static function skipUnknown(object $unknown): void {",
     "$unknown->setVersion(1);",
     "}",
@@ -175,6 +196,7 @@ const orderSources: Record<string, string> = {
     "$order->setVersion(2);",
     "}",
     "}",
+    "OrderService::reset(new Order());",
   ].join("\n"),
 };
 
@@ -190,17 +212,29 @@ test("real PHP AST: cross-file nullable native returns, docblock foreach and sel
     const documents = [...phpScopes].map(([relativePath, scopes]) => ({
       relativePath,
       language: "php",
-      symbols: scopes.filter((scope) => scope.type === "method" && scope.nameRange)
+      symbols: scopes.filter((scope) => (scope.type === "method" || scope.type === "class") && scope.nameRange)
         .map((scope) => ({
-          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#" + scope.name + "().",
-          kind: "Method", displayName: scope.name,
-        })),
-      occurrences: scopes.filter((scope) => scope.type === "method" && scope.nameRange)
+          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#"
+            + (scope.type === "method" ? scope.name + "()." : ""),
+          kind: scope.type === "class" ? "Class" : "Method",
+          displayName: scope.type === "class" ? scope.className!.split("\\").at(-1) : scope.name,
+        })).concat(scopes.filter((scope) => scope.type === "class")
+          .flatMap((scope) => (scope.propertyDefinitions ?? []).map((property) => ({
+            symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#$" + property.name + ".",
+            kind: "Property", displayName: "$" + property.name,
+          })))),
+      occurrences: scopes.filter((scope) => (scope.type === "method" || scope.type === "class") && scope.nameRange)
         .map((scope) => ({
-          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#" + scope.name + "().",
+          symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#"
+            + (scope.type === "method" ? scope.name + "()." : ""),
           symbolRoles: 1,
           range: [scope.nameRange![0], scope.nameRange![1], scope.nameRange![3]],
-        })),
+        })).concat(scopes.filter((scope) => scope.type === "class")
+          .flatMap((scope) => (scope.propertyDefinitions ?? []).map((property) => ({
+            symbol: "scip-php composer example/app 1.0.0 " + relativePath + "/" + scope.className + "#$" + property.name + ".",
+            symbolRoles: 1,
+            range: [property.nameRange[0], property.nameRange[1], property.nameRange[3]],
+          })))),
     }));
     const graph = normalizeScipGraph({
       projectId: "order-patterns",
@@ -215,7 +249,16 @@ test("real PHP AST: cross-file nullable native returns, docblock foreach and sel
       && node.canonicalIdentity.includes(className + "#" + methodName));
     const target = get("Domain\\Order", "setVersion");
     const status = get("Domain\\Order", "setStatus");
-    assert.ok(target && status);
+    const createdAt = get("Domain\\Entity", "setCreatedAt");
+    assert.ok(target && status && createdAt);
+    const version = graph.nodes.find((node) => node.kind === "property" && node.name === "$version");
+    assert.ok(version);
+    for (const [kind, owner] of [["reads", "propRead"], ["writes", "propWrite"]] as const) {
+      assert.ok(graph.relations.some((edge) => edge.kind === kind && edge.to === version.id
+        && graph.nodes.find((node) => node.id === edge.from)?.name === owner), "B2 " + kind);
+    }
+    assert.ok(!graph.relations.some((edge) => edge.kind === "writes" && edge.to === version.id
+      && graph.nodes.find((node) => node.id === edge.from)?.name === "propUnknown"), "B2 untyped exclusion");
     const callOwners = (id: string) => graph.relations.filter((edge) =>
       edge.kind === "calls" && edge.to === id).map((edge) => ({
         name: graph.nodes.find((node) => node.id === edge.from)?.name,
@@ -226,6 +269,16 @@ test("real PHP AST: cross-file nullable native returns, docblock foreach and sel
       assert.ok(owners.some((entry) => entry.name === expected), "missing " + expected);
     }
     assert.ok(callOwners(status.id).some((entry) => entry.name === "reset"), "native static fluent return");
+    assert.ok(callOwners(createdAt.id).some((entry) => entry.name === "inherit"), "A3 inherited method call");
+    assert.ok(owners.some((entry) => entry.name === "touchAll" && entry.label?.includes("docblock")), "B3 @param array");
+    assert.ok(graph.relations.some((edge) => edge.kind === "extends"
+      && graph.nodes.find((node) => node.id === edge.from)?.name === "Order"
+      && graph.nodes.find((node) => node.id === edge.to)?.name === "Entity"), "B1 extends");
+    assert.ok(graph.relations.some((edge) => edge.kind === "calls"
+      && graph.nodes.find((node) => node.id === edge.from)?.kind === "file"
+      && graph.nodes.find((node) => node.id === edge.to)?.name === "reset"), "A2 file top-level call");
+    assert.ok(graph.unresolvedPhpMethodCalls?.some((entry) => entry.name === "setstatus" && entry.count > 0),
+      "A1 closure arrow call must be flagged");
     for (const excluded of ["skipUnknown", "skipUnion", "skipAfterBranch", "skipAfterLoop"]) {
       assert.ok(!owners.some((entry) => entry.name === excluded), "incorrect inferred call from " + excluded);
     }

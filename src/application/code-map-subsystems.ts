@@ -217,6 +217,9 @@ function normalizeSourcePath(path: string): string | undefined {
 }
 
 function sourceSubsystemDescriptor(path: string): SubsystemDescriptor | undefined {
+  const configuredDepth = Number(process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH ?? "1");
+  const depth = Number.isInteger(configuredDepth) && configuredDepth >= 1 && configuredDepth <= 4
+    ? configuredDepth : 1;
   const normalized = normalizeSourcePath(path);
   if (!normalized) return undefined;
   const parts = normalized.split("/");
@@ -228,12 +231,12 @@ function sourceSubsystemDescriptor(path: string): SubsystemDescriptor | undefine
       };
     }
     return {
-      pathPrefix: `src/${parts[1]}`,
+      pathPrefix: parts.slice(0, Math.min(parts.length - 1, depth + 1)).join("/"),
       classification: "source_directory",
     };
   }
   return {
-    pathPrefix: parts[0]!,
+    pathPrefix: parts.slice(0, Math.min(parts.length - 1, depth)).join("/"),
     classification: "top_level_directory",
   };
 }

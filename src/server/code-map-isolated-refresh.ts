@@ -19,7 +19,9 @@ export interface IsolatedCodeMapRefreshOptions {
 
 const MAX_IPC_BYTES = 4096;
 const DEFAULT_TIMEOUT_MS = 240_000;
-const DEFAULT_HEAP_MIB = 512;
+const configuredHeapMiB = Number(process.env.QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB ?? "512");
+const DEFAULT_HEAP_MIB = Number.isSafeInteger(configuredHeapMiB)
+  && configuredHeapMiB >= 64 && configuredHeapMiB <= 4096 ? configuredHeapMiB : 512;
 const activeChildren = new Set<ChildProcess>();
 let exitHandlerInstalled = false;
 const CODE_MAP_ENV_KEYS = [
@@ -27,6 +29,7 @@ const CODE_MAP_ENV_KEYS = [
   "QUESTBOARD_CODE_MAP", "QUESTBOARD_CODE_MAP_PROVIDER",
   "QUESTBOARD_CODE_MAP_PROVIDERS", "QUESTBOARD_CODE_MAP_STORAGE_ROOT",
   "QUESTBOARD_SCIP_PHP_EXECUTABLE", "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
+  "QUESTBOARD_CODE_MAP_MAX_SNAPSHOT_MIB", "QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB",
 ] as const;
 
 function isReceipt(value: unknown, request: CodeIndexRequest): value is CodeMapIsolatedRefreshReceipt {

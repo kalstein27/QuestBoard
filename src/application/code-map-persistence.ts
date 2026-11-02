@@ -4,7 +4,7 @@ export const CODE_MAP_PERSISTED_SNAPSHOT_FORMAT_VERSION = 1 as const;
 
 export type CodeMapSnapshotSource = "fresh-index" | "persisted";
 export type CodeMapSnapshotFreshness = "current" | "stale" | "unknown";
-export type CodeMapSnapshotStaleReason = "source_changed" | "source_check_failed";
+export type CodeMapSnapshotStaleReason = "source_changed" | "source_check_failed" | "snapshot_save_failed";
 export type CodeMapHydrationRejectReason =
   | "corrupt"
   | "format_changed"
@@ -56,6 +56,8 @@ export interface CodeMapSnapshotLifecycleState {
   snapshotSource: CodeMapSnapshotSource;
   freshness: CodeMapSnapshotFreshness;
   staleReason?: CodeMapSnapshotStaleReason;
+  /** A previous disk snapshot remains, and the newest refresh was rejected. */
+  persistenceWarning?: string;
 }
 
 export interface CodeMapHydrationDiagnostic {
