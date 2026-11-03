@@ -38,6 +38,14 @@ export interface ScipPhpTypedMethodCall {
   name: string;
   nameRange: readonly [number, number, number, number];
   evidenceSource?: "native" | "docblock";
+  /** File-scope instance calls are distinct from legacy static calls. */
+  callStyle?: "object";
+}
+
+/** PHP Parser-proven new ClassName in executable file-level code. */
+export interface ScipPhpFileInstantiation {
+  className: string;
+  nameRange: readonly [number, number, number, number];
 }
 
 export interface ScipPhpUnresolvedMethodCall {
@@ -65,6 +73,7 @@ export interface ScipPhpLexicalScope {
   isConcretePublic?: boolean;
   /** Directly owned AST method calls with a statically proved receiver type. */
   calls?: readonly ScipPhpTypedMethodCall[];
+  instantiations?: readonly ScipPhpFileInstantiation[];
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
   ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
   propertyDefinitions?: readonly { name: string; nameRange: readonly [number, number, number, number] }[];
@@ -871,11 +880,16 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     [document.relativePath, range.startLine, range.startCharacter, name.toLowerCase()].join(":");
   const phpTypedCalls: Array<{ document: ScipDocument; ownerId: string; call: ScipPhpTypedMethodCall }> = [];
   const phpFileCalls: Array<{ document: ScipDocument; call: ScipPhpTypedMethodCall }> = [];
+  const phpFileInstantiations: Array<{
+    document: ScipDocument; className: string; nameRange: readonly [number, number, number, number];
+  }> = [];
   const phpPropertiesByQualifiedName = new Map<string, string | null>();
   const phpTypedPropertyAccesses: Array<{
     document: ScipDocument; ownerId: string; access: ScipPhpTypedPropertyAccess;
   }> = [];
   const phpSyntheticFileNodes = new Map<string, CodeNode>();
+  const phpAnonymousNodes = new Map<string, CodeNode>();
+  const phpAnonymousScopes: Array<{ document: ScipDocument; ownerId: string; range: ScipRange }> = [];
   const resolvedPhpSites = new Set<string>();
   const qualifiedMethodKey = (className: string, methodName: string): string =>
     className.replace(/^\\+/, "").toLowerCase() + "::" + methodName.toLowerCase();
@@ -888,6 +902,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         const extent = tupleRange(scope.range);
         if (scope.type === "file") {
           for (const call of scope.calls ?? []) phpFileCalls.push({ document, call });
+          for (const instantiation of scope.instantiations ?? []) {
+            phpFileInstantiations.push({ document, ...instantiation });
+          }
           for (const call of scope.unresolvedCalls ?? []) {
             const range = tupleRange(call.nameRange);
             phpUnresolvedSites.set(siteKey(document, range, call.name), { name: call.name, document, range });
@@ -966,12 +983,35 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           return null;
         }
         if (scope.type === "anonymous" || !scope.nameRange || !scope.name) {
+          let ownerId: string | undefined;
+          if (scope.type === "anonymous") {
+            const canonicalIdentity = "php-anonymous:" + [
+              document.relativePath, extent.startLine, extent.startCharacter,
+              extent.endLine, extent.endCharacter,
+            ].join(":");
+            ownerId = stableId("node", canonicalIdentity);
+            phpAnonymousNodes.set(ownerId, {
+              id: ownerId, kind: "function",
+              name: "closure@" + (extent.startLine + 1) + ":" + (extent.startCharacter + 1),
+              canonicalIdentity, language: "php",
+              location: nativeLocation(document.relativePath, extent),
+              lexicalExtent: nativeLocation(document.relativePath, extent),
+              signature: "PHP AST anonymous lexical function",
+              provenance: [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }],
+            });
+            phpAnonymousScopes.push({ document, ownerId, range: extent });
+            for (const call of scope.calls ?? []) {
+              if (rangeContains(extent, tupleRange(call.nameRange))) {
+                phpTypedCalls.push({ document, ownerId, call });
+              }
+            }
+          }
           for (const call of scope.unresolvedCalls ?? []) {
             const range = tupleRange(call.nameRange);
             if (rangeContains(extent, range)) phpUnresolvedSites.set(siteKey(document, range, call.name),
               { name: call.name, document, range });
           }
-          return { range: extent, ownerId: undefined };
+          return { range: extent, ownerId };
         }
         const nameRange = tupleRange(scope.nameRange);
         const candidates = documentDefinitions.filter((definition) => {
@@ -1023,6 +1063,14 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   const relations = new Map<string, CodeRelation>();
+  for (const anonymous of phpAnonymousScopes) {
+    const parent = (phpOwnersByDocument.get(anonymous.document) ?? [])
+      .filter((scope) => scope.ownerId && scope.ownerId !== anonymous.ownerId
+        && rangeSpan(scope.range) > rangeSpan(anonymous.range)
+        && rangeContains(scope.range, anonymous.range))
+      .sort((a, b) => rangeSpan(a.range) - rangeSpan(b.range))[0];
+    if (parent?.ownerId) addRelation(relations, parent.ownerId, anonymous.ownerId, "contains");
+  }
   for (const [id, classId] of phpConstantOwners) {
     addRelation(relations, classId, id, "contains");
   }
@@ -1282,6 +1330,19 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
 
   // A2. The file itself is the owner for executable PHP top-level statements.
   // Only exact SCIP-verified method targets become call relations.
+  const phpFileNode = (document: ScipDocument): CodeNode => {
+    const existing = phpSyntheticFileNodes.get(document.relativePath);
+    if (existing) return existing;
+    const canonicalIdentity = "file:" + document.relativePath;
+    const node: CodeNode = {
+      id: stableId("node", canonicalIdentity), kind: "file",
+      name: document.relativePath.split("/").at(-1)!,
+      canonicalIdentity, language: "php", location: { path: document.relativePath },
+      provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }],
+    };
+    phpSyntheticFileNodes.set(document.relativePath, node);
+    return node;
+  };
   for (const { document, call } of phpFileCalls) {
     const location = tupleRange(call.nameRange);
     const target = verifiedPhpMethodTarget(call.className, call.name);
@@ -1289,18 +1350,25 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
       continue;
     }
-    let fileNode = phpSyntheticFileNodes.get(document.relativePath);
-    if (!fileNode) {
-      const canonicalIdentity = "file:" + document.relativePath;
-      fileNode = { id: stableId("node", canonicalIdentity), kind: "file", name: document.relativePath.split("/").at(-1)!,
-        canonicalIdentity, language: "php", location: { path: document.relativePath },
-        provenance: [{ providerId, fidelity: "syntax", freshness: "fresh" }] };
-      phpSyntheticFileNodes.set(document.relativePath, fileNode);
-    }
+    const fileNode = phpFileNode(document);
     resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, fileNode.id, target, "calls", 1,
       [{ location: nativeLocation(document.relativePath, location),
-        receiverClass: call.className, label: "PHP AST file-level static call; receiverClass: " + call.className }],
+        receiverClass: call.className,
+        label: (call.callStyle === "object" ? "PHP AST file-level typed object call"
+          : "PHP AST file-level static call") + "; receiverClass: " + call.className }],
+      [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+  }
+  for (const { document, className, nameRange } of phpFileInstantiations) {
+    // The class must have one AST/SCIP-matched first-party definition.
+    // Dynamic class names and unindexed external classes are never invented.
+    const target = phpClassNodes.get(className.replace(/^\\+/, "").toLowerCase());
+    if (!target) continue;
+    const fileNode = phpFileNode(document);
+    const location = tupleRange(nameRange);
+    addRelation(relations, fileNode.id, target, "instantiates", 1,
+      [{ location: nativeLocation(document.relativePath, location),
+        label: "PHP AST file-level new with verified class declaration" }],
       [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
   const unresolvedCounts = new Map<string, number>();
@@ -1314,7 +1382,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     projectId: input.projectId,
     rootPath: input.rootPath,
     indexedAt: input.indexedAt,
-    nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values(), ...phpSyntheticFileNodes.values()],
+    nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values(),
+      ...phpSyntheticFileNodes.values(), ...phpAnonymousNodes.values()],
     relations: [...relations.values()],
     ...(providerId === "scip-php" ? {
       unresolvedPhpMethodCalls: [...unresolvedCounts].sort(([a], [b]) => a.localeCompare(b))
@@ -1337,7 +1406,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         status: "fresh",
         fidelity,
         languages: [...semanticFileCountByLanguage.keys()].sort(),
-        nodeCount: nodeBySymbol.size + registrationNodes.length + externalNodeBySymbol.size,
+        nodeCount: nodeBySymbol.size + registrationNodes.length + externalNodeBySymbol.size + phpAnonymousNodes.size,
         relationCount: relations.size,
       }],
       languages: [...semanticFileCountByLanguage.entries()]

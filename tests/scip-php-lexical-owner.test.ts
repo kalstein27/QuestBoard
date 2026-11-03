@@ -72,14 +72,21 @@ test("PHP AST native-name-aligned owner restores one direct call and one instant
   assert.ok(node(caller) && node(callee) && node(widget));
   const calls = graph.relations.filter(r => r.kind === "calls");
   const constructions = graph.relations.filter(r => r.kind === "instantiates");
-  assert.equal(calls.length, 1, "anonymous callback must not be attributed to outer caller");
+  assert.equal(calls.length, 2, "anonymous callback has its own verified lexical owner");
   assert.equal(constructions.length, 1);
-  assert.equal(calls[0]?.from, node(caller));
-  assert.equal(calls[0]?.to, node(callee));
+  const direct = calls.find(r => r.from === node(caller));
+  const anonymous = graph.nodes.find(n => n.canonicalIdentity.startsWith("php-anonymous:"));
+  assert.ok(anonymous, "PHP AST anonymous owner must be preserved");
+  const inside = calls.find(r => r.from === anonymous.id);
+  assert.ok(direct && inside);
+  assert.equal(direct.to, node(callee));
+  assert.equal(inside.to, node(callee));
+  assert.equal(calls.filter(r => r.from === node(caller)).length, 1,
+    "anonymous callback must not be attributed to outer caller");
   assert.equal(constructions[0]?.from, node(caller));
   assert.equal(constructions[0]?.to, node(widget));
-  assert.equal(calls[0]?.evidence?.[0]?.location.path, "src/Main.php");
-  assert.equal(calls[0]?.provenance?.[0]?.providerId, "scip-php");
+  assert.equal(direct.evidence?.[0]?.location.path, "src/Main.php");
+  assert.equal(direct.provenance?.[0]?.providerId, "scip-php");
 });
 
 test("PHP graph never guesses calls without an AST owner", () => {
@@ -87,7 +94,11 @@ test("PHP graph never guesses calls without an AST owner", () => {
   assert.equal(noScope.relations.filter(r => r.kind === "calls").length, 0);
   const wrongName = normalize(scopes.map(scope => scope.name === "caller"
     ? { ...scope, name: "differentFunction" } : scope));
-  assert.equal(wrongName.relations.filter(r => r.kind === "calls").length, 0);
+  const anonymous = wrongName.nodes.find(n => n.canonicalIdentity.startsWith("php-anonymous:"));
+  assert.ok(anonymous);
+  assert.equal(wrongName.relations.filter(r => r.kind === "calls").length, 1);
+  assert.ok(wrongName.relations.some(r => r.kind === "calls" && r.from === anonymous.id),
+    "verified anonymous owner survives a missing outer named owner");
   assert.equal(wrongName.relations.filter(r => r.kind === "instantiates").length, 0);
 });
 
@@ -99,7 +110,11 @@ test("PHP scopes with unknown named ownership block outer lexical attribution", 
     scopes[2]!,
   ];
   const graph = normalize(nestedUnknown);
-  assert.equal(graph.relations.filter(r => r.kind === "calls").length, 0);
+  const anonymous = graph.nodes.find(n => n.canonicalIdentity.startsWith("php-anonymous:"));
+  assert.ok(anonymous);
+  assert.equal(graph.relations.filter(r => r.kind === "calls").length, 1);
+  assert.ok(graph.relations.some(r => r.kind === "calls" && r.from === anonymous.id),
+    "unknown nested named owner must still block its own call without suppressing the verified closure");
   assert.equal(graph.relations.filter(r => r.kind === "instantiates").length, 1);
 });
 

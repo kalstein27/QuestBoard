@@ -61,7 +61,20 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
         throw new Error("Invalid PHP lexical scope range or type");
       }
       if (scope.type === "anonymous") {
-        if (scope.calls !== undefined || scope.className !== undefined) throw new Error("Anonymous scope cannot claim typed calls");
+        if (scope.className !== undefined) throw new Error("Anonymous scope cannot claim a named class");
+        const calls: ScipPhpTypedMethodCall[] = [];
+        if (scope.calls !== undefined && !Array.isArray(scope.calls)) throw new Error("Invalid anonymous typed calls");
+        for (const raw of (scope.calls ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid anonymous typed call");
+          const call = raw as Record<string, unknown>;
+          if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)
+            || (call.evidenceSource !== undefined && !["native", "docblock"].includes(String(call.evidenceSource)))) {
+            throw new Error("Invalid anonymous call identity or range");
+          }
+          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
+            ...(call.evidenceSource ? { evidenceSource: call.evidenceSource as "native" | "docblock" } : {}) });
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP anonymous call sites exceed cap");
+        }
         const unresolved = scope.unresolvedCalls ?? [];
         if (!Array.isArray(unresolved)) throw new Error("Invalid anonymous unresolved calls");
         const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
@@ -72,16 +85,32 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call sites exceed cap");
         }
-        items.push({ type: "anonymous", range: scope.range, ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
+        items.push({ type: "anonymous", range: scope.range,
+          ...(calls.length ? { calls } : {}), ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
       } else if (scope.type === "file") {
         const calls: ScipPhpTypedMethodCall[] = [];
+        const instantiations: Array<{ className: string; nameRange: [number, number, number, number] }> = [];
         const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
         for (const raw of (scope.calls ?? []) as unknown[]) {
           if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file call");
           const call = raw as Record<string, unknown>;
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file call");
-          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange });
+          if (call.callStyle !== undefined && call.callStyle !== "object") throw new Error("Invalid file call style");
+          calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
+            ...(call.callStyle === "object" ? { callStyle: "object" as const } : {}) });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
+        }
+        if (scope.instantiations !== undefined && !Array.isArray(scope.instantiations)) {
+          throw new Error("Invalid PHP file instantiations");
+        }
+        for (const raw of (scope.instantiations ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid file instantiation");
+          const instantiation = raw as Record<string, unknown>;
+          if (!validName(instantiation.className, 1024) || !isRange(instantiation.nameRange)) {
+            throw new Error("Invalid file instantiation target or range");
+          }
+          instantiations.push({ className: instantiation.className, nameRange: instantiation.nameRange });
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP instantiation sites exceed cap");
         }
         for (const raw of (scope.unresolvedCalls ?? []) as unknown[]) {
           if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file unresolved call");
@@ -91,7 +120,9 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
         }
         items.push({ type: "file", range: scope.range,
-          ...(calls.length ? { calls } : {}), ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
+          ...(calls.length ? { calls } : {}),
+          ...(instantiations.length ? { instantiations } : {}),
+          ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
       } else if (scope.type === "class" && validName(scope.className, 1024) && isRange(scope.nameRange)) {
         if (!Array.isArray(scope.ancestors) || scope.ancestors.length > 128) throw new Error("Invalid PHP ancestors");
         const ancestors: Array<{ className: string; relation: "extends" | "implements" | "trait" }> = [];

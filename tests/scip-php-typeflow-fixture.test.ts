@@ -19,11 +19,11 @@ test("A2: PHP AST branch joins, arrays, clone and object properties preserve onl
     const scopes=await extractPhpLexicalScopes(root,["src/Demo.php"]);
     const all=scopes.get("src/Demo.php") ?? [];
     const find=(name:string)=> {
-      const scope=all.find(s=>s.type==="method" && s.name===name && s.className==="Domain\Service");
+      const scope=all.find(s=>s.type==="method" && s.name===name && s.className==="Domain\\Service");
       assert.ok(scope,"missing method "+name); return scope;
     };
     const count=(name:string)=> (find(name).calls ?? [])
-      .filter(c=>c.name==="touch" && c.className==="Domain\Order").length;
+      .filter(c=>c.name==="touch" && c.className==="Domain\\Order").length;
     const unresolved=(name:string)=> (find(name).unresolvedCalls ?? [])
       .filter(c=>c.name==="touch").length;
     assert.equal(count("sameBranches"),1);
