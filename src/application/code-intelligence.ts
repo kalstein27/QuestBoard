@@ -117,6 +117,8 @@ export interface CodeSourceLocation {
 export interface CodeEvidence {
   location: CodeSourceLocation;
   label?: string;
+  /** AST-proven invocation receiver, distinct from the inherited declaring class. */
+  receiverClass?: string;
 }
 
 export interface CodeNode {

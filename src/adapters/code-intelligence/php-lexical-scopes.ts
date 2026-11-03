@@ -111,6 +111,23 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           definitions.push({ name: definition.name, nameRange: definition.nameRange });
           if (definitions.length > 15000) throw new Error("Too many PHP property declarations");
         }
+        const constantDefinitions: Array<{
+          name: string; nameRange: [number, number, number, number]; kind: "constant" | "enum_case";
+        }> = [];
+        if (scope.constantDefinitions !== undefined && !Array.isArray(scope.constantDefinitions)) {
+          throw new Error("Invalid PHP constant definitions");
+        }
+        for (const raw of (scope.constantDefinitions ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHP constant definition");
+          const entry = raw as Record<string, unknown>;
+          if (!validName(entry.name, 255) || !isRange(entry.nameRange)
+            || !["constant", "enum_case"].includes(String(entry.kind))) {
+            throw new Error("Invalid PHP constant definition token");
+          }
+          constantDefinitions.push({ name: entry.name, nameRange: entry.nameRange,
+            kind: entry.kind as "constant" | "enum_case" });
+          if (constantDefinitions.length > 15000) throw new Error("Too many PHP constant definitions");
+        }
         const docMethods: Array<{ name: string; nameRange: [number, number, number, number]; isStatic: boolean }> = [];
         if (scope.docMethods !== undefined && !Array.isArray(scope.docMethods)) throw new Error("Invalid PHPDoc methods");
         for (const raw of (scope.docMethods ?? []) as unknown[]) {
@@ -122,7 +139,8 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (docMethods.length > 1024) throw new Error("Too many PHPDoc methods");
         }
         items.push({ type: "class", className: scope.className, range: scope.range,
-          nameRange: scope.nameRange, ancestors, propertyDefinitions: definitions, docMethods });
+          nameRange: scope.nameRange, ancestors, propertyDefinitions: definitions,
+          constantDefinitions, docMethods });
       } else if (validName(scope.name, 255) && isRange(scope.nameRange)) {
         if (scope.className !== undefined && (scope.type !== "method" || !validName(scope.className, 1024))) {
           throw new Error("Invalid PHP lexical class identity");

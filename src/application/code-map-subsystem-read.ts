@@ -31,6 +31,8 @@ export type CodeSourceSubsystemQueryOperation =
   (typeof CODE_SOURCE_SUBSYSTEM_QUERY_OPERATIONS)[number];
 
 export interface CodeSourceSubsystemQueryInput {
+  /** Omit verbose raw anchors when paging large subsystem lists. */
+  includeNotableNodes?: boolean;
   operation: CodeSourceSubsystemQueryOperation;
   pathPrefix?: string;
   fromPathPrefix?: string;
@@ -129,6 +131,8 @@ export interface CodeSourceSubsystemReadNode {
   notableNodeCount: number;
   notableNodes: readonly CodeSourceSubsystemReadNotableNode[];
   notableNodesTruncated: boolean;
+  /** True when a compact paged result omitted otherwise available raw anchors. */
+  notableNodesOmitted?: boolean;
 }
 
 export interface CodeSourceSubsystemReadRelation {
@@ -462,9 +466,10 @@ function subsystemQueryOffset(value: number | undefined): number {
 function subsystemQueryLimit(
   operation: CodeSourceSubsystemQueryOperation,
   value: number | undefined,
+  includeNotableNodes?: boolean,
 ): number {
   const maximum = operation === "list_subsystems"
-    ? CODE_SOURCE_SUBSYSTEM_READ_CAPS.subsystems
+    ? (includeNotableNodes === false ? 24 : CODE_SOURCE_SUBSYSTEM_READ_CAPS.subsystems)
     : CODE_SOURCE_SUBSYSTEM_READ_CAPS.relations;
   if (value === undefined) return maximum;
   if (!Number.isInteger(value) || value < 1) {
@@ -512,7 +517,7 @@ export function queryCodeSourceSubsystems(
   currentSnapshotId?: string,
 ): CodeSourceSubsystemQueryResult {
   const offset = subsystemQueryOffset(input.offset);
-  const limit = subsystemQueryLimit(input.operation, input.limit);
+  const limit = subsystemQueryLimit(input.operation, input.limit, input.includeNotableNodes);
   assertCodeMapExactPageSnapshot(
     { offset, expectedSourceIndexedAt: input.expectedSourceIndexedAt, expectedSnapshotId: input.expectedSnapshotId },
     { indexedAt: graph.indexedAt, snapshotId: currentSnapshotId },
@@ -540,7 +545,13 @@ export function queryCodeSourceSubsystems(
     const pathPrefix = subsystemQueryText(input.pathPrefix);
     const candidates = full.nodes.filter((node) =>
       !pathPrefix || node.pathPrefix.startsWith(pathPrefix));
-    const nodes = candidates.slice(offset, offset + limit);
+    const includeNotableNodes = input.includeNotableNodes !== false;
+    const nodes = candidates.slice(offset, offset + limit).map((node) =>
+      includeNotableNodes ? node : {
+        ...node, notableNodes: [],
+        notableNodesTruncated: node.notableNodeCount > 0 || node.notableNodesTruncated,
+        ...(node.notableNodeCount > 0 ? { notableNodesOmitted: true } : {}),
+      });
     return {
       ...subsystemPageEnvelope(graph, input.operation, candidates.length, offset, limit, nodes.length, currentSnapshotId),
       operation: "list_subsystems",

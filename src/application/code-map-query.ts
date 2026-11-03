@@ -69,6 +69,11 @@ export class CodeMapQueryError extends Error {
 }
 
 export interface CodeMapQueryInput {
+  /** Snapshot-pinned, deterministic page into a bounded call_trace walk. */
+  offset?: number;
+  /** Return short call_trace nodes/relations instead of full raw facts. */
+  compact?: boolean;
+  expectedSourceIndexedAt?: string;
   operation: CodeMapQueryOperation;
   /** Optional exact snapshot pin. Service rejects stale/missing identity before querying. */
   expectedSnapshotId?: string;
@@ -83,6 +88,8 @@ export interface CodeMapQueryInput {
   /** Neighborhoods hide broad external SCIP depends_on edges unless explicitly requested. */
   includeExternalDependencies?: boolean;
   semantic?: CodeMapRelationSemantic;
+  /** Filter confirmed caller sites by AST-proven receiving class, not declaring class. */
+  receiverClass?: string;
   nodeIds?: readonly string[];
   depth?: number;
   limit?: number;
@@ -157,6 +164,18 @@ export type CodeMapQueryResult =
       externalFilteredNodeCount: number;
       externalFilteredRelationCount: number;
       reasons: readonly ("node_cap" | "relation_cap")[];
+      offset?: number;
+      returnedCount?: number;
+      hasMore?: boolean;
+      nextOffset?: number;
+      compact?: true;
+      compactNodes?: readonly { id: string; name: string; path: string; line?: number }[];
+      compactRelations?: readonly {
+        from: string; to: string;
+        evidenceCount: number;
+        evidenceTruncated: boolean;
+        evidence: readonly { path: string; line?: number; receiverClass?: string }[];
+      }[];
     });
 
 function normalizeLimit(value: number | undefined): number {
@@ -493,6 +512,11 @@ export function queryCodeGraph(
         throw new CodeMapQueryError("code_map_query_invalid", `Invalid relation semantic: ${input.semantic}`);
       }
       const semantic = input.semantic;
+      if (input.receiverClass !== undefined && (semantic !== "callers" || !input.receiverClass.trim())) {
+        throw new CodeMapQueryError("code_map_query_invalid",
+          "receiverClass is supported only for semantic callers and must be non-empty");
+      }
+      const receiverClass = input.receiverClass?.trim().replace(/^\\+/, "").toLowerCase();
       const semanticFilter = semanticRelationFilter(semantic);
       const requestedDirection = input.direction === undefined ? "both" : input.direction;
       if (!(CODE_MAP_QUERY_DIRECTIONS as readonly string[]).includes(requestedDirection)) {
@@ -517,12 +541,25 @@ export function queryCodeGraph(
         .filter((relation) => relation.from === node.id || relation.to === node.id)
         .filter((relation) => directionAllows(relation, node.id, direction))
         .filter((relation) => !kindSet || kindSet.has(relation.kind))
+        .filter((relation) => !receiverClass || relation.evidence?.some((entry) => {
+          const candidate = entry.receiverClass?.replace(/^\\+/, "").toLowerCase();
+          return candidate === receiverClass || candidate?.endsWith("\\" + receiverClass);
+        }))
         .sort((left, right) => sourceOrderedDependencies
           ? adjacentNodeSort(node.id, nodeById, left, right)
           : relationSort(left, right));
       const entries = matching
         .slice(0, limit)
-        .map((relation) => ({ relation, node: nodeById.get(otherNodeId(relation, node.id))! }));
+        .map((relation) => ({
+          relation: receiverClass ? {
+            ...relation,
+            ...(relation.evidence ? { evidence: relation.evidence.filter((entry) => {
+              const candidate = entry.receiverClass?.replace(/^\\+/, "").toLowerCase();
+              return candidate === receiverClass || candidate?.endsWith("\\" + receiverClass);
+            }) } : {}),
+          } : relation,
+          node: nodeById.get(otherNodeId(relation, node.id))!,
+        }));
       return {
         ...envelope,
         operation: "relations",
@@ -629,10 +666,11 @@ export function queryCodeGraph(
         || input.relationKinds !== undefined
         || input.nodeIds !== undefined
         || input.includeExternalDependencies !== undefined
+        || input.receiverClass !== undefined
       ) {
         throw new CodeMapQueryError(
           "code_map_query_invalid",
-          "call_trace accepts only nodeId, direction, depth, and limit traversal controls",
+          "call_trace accepts nodeId/direction/depth/limit and compact/snapshot-pinned offset controls",
         );
       }
       const requestedDirection = input.direction === undefined ? "both" : input.direction;
@@ -641,6 +679,96 @@ export function queryCodeGraph(
       }
       const direction = requestedDirection as CodeMapQueryDirection;
       const depth = normalizeDepth(input.depth);
+      if (input.offset !== undefined || input.compact === true) {
+        const offset = input.offset ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > 20_000) {
+          throw new CodeMapQueryError("code_map_query_invalid", "call_trace offset must be 0..20000");
+        }
+        if (offset > 0 && (!input.expectedSnapshotId || !input.expectedSourceIndexedAt)) {
+          throw new CodeMapQueryError("code_map_query_invalid",
+            "call_trace continuation requires expectedSnapshotId and expectedSourceIndexedAt");
+        }
+        if (input.expectedSourceIndexedAt && input.expectedSourceIndexedAt !== graph.indexedAt) {
+          throw new CodeMapQueryError("code_map_snapshot_changed", "call_trace source indexedAt changed");
+        }
+        const adjacency = new Map<string, CodeRelation[]>();
+        for (const relation of graph.relations) {
+          if (relation.kind !== "calls") continue;
+          for (const id of [relation.from, relation.to]) {
+            const list = adjacency.get(id) ?? [];
+            list.push(relation);
+            adjacency.set(id, list);
+          }
+        }
+        const visited = new Set([seed.id]);
+        const scanned = new Set<string>();
+        const filteredNodeIds = new Set<string>();
+        const filteredRelationIds = new Set<string>();
+        const selected: CodeRelation[] = [];
+        const queue: Array<{ id: string; depth: number }> = [{ id: seed.id, depth: 0 }];
+        const scanCap = offset + limit + 1;
+        walk: while (queue.length) {
+          const current = queue.shift()!;
+          if (current.depth >= depth) continue;
+          for (const relation of [...(adjacency.get(current.id) ?? [])]
+            .filter((item) => directionAllows(item, current.id, direction))
+            .sort((a, b) => adjacentNodeSort(current.id, nodeById, a, b))) {
+            if (scanned.has(relation.id)) continue;
+            scanned.add(relation.id);
+            const nextId = otherNodeId(relation, current.id);
+            const next = nodeById.get(nextId);
+            if (!next || !isProjectLocalTraceNode(next)) {
+              filteredRelationIds.add(relation.id);
+              if (next) filteredNodeIds.add(next.id);
+              continue;
+            }
+            selected.push(relation);
+            if (!visited.has(nextId)) {
+              visited.add(nextId);
+              if (current.depth + 1 < depth) queue.push({ id: nextId, depth: current.depth + 1 });
+            }
+            if (selected.length >= scanCap) break walk;
+          }
+        }
+        const page = selected.slice(offset, offset + limit);
+        const hasMore = selected.length > offset + page.length;
+        const pageNodeIds = new Set<string>(offset === 0 ? [seed.id] : []);
+        for (const relation of page) {
+          pageNodeIds.add(relation.from);
+          pageNodeIds.add(relation.to);
+        }
+        const pageNodes = [...pageNodeIds].map((id) => nodeById.get(id)!).filter(Boolean);
+        return {
+          ...envelope,
+          operation: "call_trace", seedNodeId: seed.id, direction, depth,
+          projectLocalOnly: true,
+          nodes: input.compact === true ? [] : pageNodes,
+          relations: input.compact === true ? [] : page,
+          ...(input.compact === true ? {
+            compact: true as const,
+            compactNodes: pageNodes.map((node) => ({
+              id: node.id, name: node.name, path: node.location!.path,
+              ...(node.location!.startLine === undefined ? {} : { line: node.location!.startLine }),
+            })),
+            compactRelations: page.map((relation) => ({
+              from: relation.from, to: relation.to,
+              evidenceCount: relation.evidence?.length ?? 0,
+              evidenceTruncated: (relation.evidence?.length ?? 0) > 8,
+              evidence: (relation.evidence ?? []).slice(0, 8).map((item) => ({
+                path: item.location.path,
+                ...(item.location.startLine === undefined ? {} : { line: item.location.startLine }),
+                ...(item.receiverClass ? { receiverClass: item.receiverClass } : {}),
+              })),
+            })),
+          } : {}),
+          offset, returnedCount: page.length, hasMore,
+          ...(hasMore ? { nextOffset: offset + page.length } : {}),
+          externalFilteredNodeCount: filteredNodeIds.size,
+          externalFilteredRelationCount: filteredRelationIds.size,
+          reasons: hasMore ? ["relation_cap"] : [],
+          truncated: hasMore,
+        };
+      }
       const visited = new Set([seed.id]);
       const orderedNodeIds = [seed.id];
       const selectedRelations = new Map<string, CodeRelation>();

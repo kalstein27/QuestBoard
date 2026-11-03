@@ -157,7 +157,7 @@ function codeRelationFingerprint(relation: CodeGraphSnapshot["relations"][number
     kind: relation.kind,
     confidence: relation.confidence,
     evidence: [...(relation.evidence ?? [])]
-      .map((entry) => ({ location: entry.location, label: entry.label }))
+      .map((entry) => ({ location: entry.location, label: entry.label, receiverClass: entry.receiverClass }))
       .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
     provenance: [...(relation.provenance ?? [])]
       .map((entry) => ({

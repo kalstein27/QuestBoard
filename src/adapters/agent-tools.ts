@@ -820,7 +820,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map",
-    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references (PHP callers include unresolvedSameNameCallSiteCount and callersMayBeIncomplete), bounded neighborhoods, and project-local raw-calls-only call_trace traversal without returning the full project graph. Default neighborhood navigation hides broad depends_on edges to SCIP external symbols; includeExternalDependencies=true or explicit relationKinds including depends_on restores those raw edges. call_trace accepts only nodeId/direction/depth/limit traversal controls and excludes external or missing-location nodes without treating that scope filter as truncation. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
+    description: "Query an already indexed raw Code Map through a bounded read surface. Prefer questboard_get_code_map_status as the first lifecycle read and use this tool when status recommends query. Supports node search/exact lookup, containment hierarchy, callers/callees/references (PHP callers include unresolvedSameNameCallSiteCount, callersMayBeIncomplete and optional receiverClass filter based on exact AST call-site evidence), bounded neighborhoods, and project-local raw-calls-only call_trace traversal without returning the full project graph. Default neighborhood navigation hides broad depends_on edges to SCIP external symbols; includeExternalDependencies=true or explicit relationKinds including depends_on restores those raw edges. call_trace supports nodeId/direction/depth/limit and compact=true short facts with offset pagination (nonzero offsets require expectedSnapshotId plus expectedSourceIndexedAt) and excludes external or missing-location nodes without treating that scope filter as truncation. Returned node IDs are raw CodeGraphSnapshot IDs (`code:node:*`) and are distinct from architecture projection IDs used by Investigation sync.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -838,6 +838,10 @@ export const QUESTBOARD_AGENT_TOOLS = [
         relationKinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_RELATION_KINDS] } },
         includeExternalDependencies: { type: "boolean", description: "Neighborhood only: include broad depends_on edges to external SCIP symbols. Default false; explicit relationKinds including depends_on also includes them." },
         semantic: { type: "string", enum: [...CODE_MAP_RELATION_SEMANTICS] },
+        receiverClass: { type: "string", minLength: 1, description: "A1: semantic callers only. Filter evidence by the AST-proven invocation receiver, including inherited static calls. Full PHP class name preferred." },
+        compact: { type: "boolean", description: "B1: call_trace only. Return compactNodes/compactRelations in place of verbose raw graph entries; relation evidence is sampled with evidenceCount." },
+        offset: { type: "integer", minimum: 0, maximum: 20000, description: "B1: call_trace continuation offset. Nonzero offsets require both exact snapshot pins." },
+        expectedSourceIndexedAt: { type: "string", minLength: 1, description: "B1: call_trace source indexedAt returned by the first page." },
         nodeIds: { type: "array", minItems: 1, maxItems: CODE_MAP_QUERY_MAX_SEEDS, uniqueItems: true, items: { type: "string", minLength: 1 } },
         depth: { type: "integer", minimum: 1, maximum: CODE_MAP_QUERY_MAX_DEPTH },
         limit: { type: "integer", minimum: 1, maximum: CODE_MAP_QUERY_MAX_LIMIT },
@@ -876,7 +880,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_query_code_map_subsystems",
-    description: "Page and filter the full evidence-backed source-subsystem candidate universe without changing the bounded Phase 7 GET surface. list_subsystems filters by case-sensitive pathPrefix; list_relations filters by case-sensitive fromPathPrefix/toPathPrefix and raw structural relationKinds. Offset pages require both expectedSourceIndexedAt and expectedSnapshotId from the first page; unknown or changed exact identity fails closed.",
+    description: "Page and filter the full evidence-backed source-subsystem candidate universe without changing the bounded Phase 7 GET surface. list_subsystems filters by case-sensitive pathPrefix; includeNotableNodes=false allows compact pages up to 24, while full-detail pages retain their 12-group limit; list_relations filters by case-sensitive fromPathPrefix/toPathPrefix and raw structural relationKinds. Offset pages require both expectedSourceIndexedAt and expectedSnapshotId from the first page; unknown or changed exact identity fails closed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -887,6 +891,7 @@ export const QUESTBOARD_AGENT_TOOLS = [
         fromPathPrefix: { type: "string" },
         toPathPrefix: { type: "string" },
         relationKinds: { type: "array", uniqueItems: true, items: { type: "string", enum: [...CODE_SOURCE_SUBSYSTEM_RELATION_KINDS] } },
+        includeNotableNodes: { type: "boolean", description: "B2: list_subsystems only. Set false to omit verbose notableNodes and request up to 24 compact groups; full-detail pages preserve the prior 12-group limit." },
         offset: { type: "integer", minimum: 0 },
         limit: { type: "integer", minimum: 1, maximum: 24 },
         expectedSourceIndexedAt: { type: "string", minLength: 1 },
@@ -2170,6 +2175,10 @@ function codeMapQueryInput(args: Record<string, unknown>): CodeMapQueryInput {
     ...(relationKinds ? { relationKinds } : {}),
     ...optionalBooleanProperty(args, "includeExternalDependencies"),
     ...optionalEnumProperty(args, "semantic", CODE_MAP_RELATION_SEMANTICS),
+    ...optionalStringProperty(args, "receiverClass"),
+    ...optionalBooleanProperty(args, "compact"),
+    ...optionalFiniteNumberProperty(args, "offset"),
+    ...optionalStringProperty(args, "expectedSourceIndexedAt"),
     ...(nodeIds ? { nodeIds } : {}),
     ...optionalPositiveIntegerProperty(args, "depth"),
     ...optionalPositiveIntegerProperty(args, "limit"),
@@ -2193,6 +2202,7 @@ function codeMapSubsystemQueryInput(args: Record<string, unknown>): CodeSourceSu
     CODE_SOURCE_SUBSYSTEM_RELATION_KINDS,
   );
   return {
+    ...optionalBooleanProperty(args, "includeNotableNodes"),
     operation: requireEnum(args, "operation", CODE_SOURCE_SUBSYSTEM_QUERY_OPERATIONS),
     ...optionalStringProperty(args, "pathPrefix"),
     ...optionalStringProperty(args, "fromPathPrefix"),

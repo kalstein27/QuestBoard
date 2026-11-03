@@ -68,6 +68,11 @@ export interface ScipPhpLexicalScope {
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
   ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
   propertyDefinitions?: readonly { name: string; nameRange: readonly [number, number, number, number] }[];
+  constantDefinitions?: readonly {
+    name: string;
+    nameRange: readonly [number, number, number, number];
+    kind: "constant" | "enum_case";
+  }[];
   /** Explicit @method tokens belonging to this class's PHPDoc, never inferred from names. */
   docMethods?: readonly { name: string; nameRange: readonly [number, number, number, number]; isStatic: boolean }[];
   propertyAccesses?: readonly ScipPhpTypedPropertyAccess[];
@@ -665,7 +670,9 @@ function addRelation(
   evidence?: CodeRelation["evidence"],
   provenance?: CodeRelation["provenance"],
 ): void {
-  if (from === to) return;
+  // A verified self-call is recursion, not a malformed dependency. Preserve it
+  // without allowing self-containment or self-structural relations.
+  if (from === to && kind !== "calls") return;
   const identity = `${from}->${kind}->${to}`;
   const existing = output.get(identity);
   if (existing) {
@@ -676,6 +683,8 @@ function addRelation(
       const previous = byEvidence.get(key);
       const labels = [previous?.label, item.label].filter((label): label is string => Boolean(label));
       byEvidence.set(key, { ...item,
+        ...((item.receiverClass ?? previous?.receiverClass)
+          ? { receiverClass: (item.receiverClass ?? previous?.receiverClass)! } : {}),
         ...(labels.length ? { label: [...new Set(labels.flatMap((label) => label.split(" | ")))].sort().join(" | ") } : {}),
       });
     }
@@ -854,6 +863,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpDocVirtualMethods = new Map<string, {
     className: string; methodName: string; classId: string; isStatic: boolean;
   }>();
+  const phpConstantNodeIds = new Set<string>();
+  const phpConstantOwners = new Map<string, string>();
   const phpConcreteMethodFlags = new Map<string, { isStatic: boolean; isConcretePublic: boolean }>();
   const phpUnresolvedSites = new Map<string, { name: string; document: ScipDocument; range: ScipRange }>();
   const siteKey = (document: ScipDocument, range: ScipRange, name: string): string =>
@@ -895,6 +906,25 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           phpClassNodes.set(classKey, matches.length === 1 ? matches[0]!.nodeId : null);
           phpClassAncestors.set(classKey, scope.ancestors ?? []);
           const classId = matches.length === 1 ? matches[0]!.nodeId : undefined;
+          if (classId) for (const constant of scope.constantDefinitions ?? []) {
+            const location = tupleRange(constant.nameRange);
+            const definitions = documentDefinitions.filter((definition) => {
+              const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+              const position = definition.occurrence.range;
+              return node && position && node.name.toLowerCase() === constant.name.toLowerCase()
+                && position.startLine === location.startLine
+                && position.startCharacter === location.startCharacter;
+            });
+            if (definitions.length !== 1) continue;
+            const id = definitions[0]!.nodeId;
+            const node = nodeBySymbol.get(scopedSymbolKey(document, definitions[0]!.symbol));
+            if (!node) continue;
+            if (node.kind === "unknown") {
+              node.kind = constant.kind === "constant" ? "variable" : "property";
+            }
+            phpConstantNodeIds.add(id);
+            phpConstantOwners.set(id, classId);
+          }
           if (classId) for (const declaration of scope.docMethods ?? []) {
             // Require one PHPDoc declaration and one SCIP definition at the
             // exact name token. A same-named method elsewhere is not evidence.
@@ -993,6 +1023,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   const relations = new Map<string, CodeRelation>();
+  for (const [id, classId] of phpConstantOwners) {
+    addRelation(relations, classId, id, "contains");
+  }
   // PHPDoc methods are documentation members of the class, not file functions.
   for (const [nodeId, declaration] of phpDocVirtualMethods) {
     addRelation(relations, declaration.classId, nodeId, "contains", 1,
@@ -1054,7 +1087,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   // as real code containment before adding usage relationships. When an
   // indexer omits enclosingSymbol, use the narrowest enclosing definition
   // range in the same document as conservative structural evidence.
-  const directlyContained = new Set<string>(phpDocVirtualMethods.keys());
+  const directlyContained = new Set<string>([...phpDocVirtualMethods.keys(), ...phpConstantNodeIds]);
   for (const document of input.index.documents) {
     for (const info of document.symbols) {
       if (!info.enclosingSymbol) continue;
@@ -1081,6 +1114,24 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const parent = candidates[0];
     if (parent) addRelation(relations, parent.nodeId, definition.nodeId, "contains");
   }
+
+  // SCIP resolves an inherited static call to the *declaring* method.
+  // Preserve the exact AST-verified receiver separately per call-site evidence;
+  // never manufacture child method symbols or collapse receivers into a label.
+  const phpReceiverBySite = new Map<string, { className: string; target: string }>();
+  const ambiguousPhpReceiverSites = new Set<string>();
+  for (const { document, call } of phpTypedCalls) {
+    const target = verifiedPhpMethodTarget(call.className, call.name);
+    if (!target) continue;
+    const key = siteKey(document, tupleRange(call.nameRange), call.name);
+    const existing = phpReceiverBySite.get(key);
+    if (existing && (existing.target !== target || existing.className !== call.className)) {
+      ambiguousPhpReceiverSites.add(key);
+    } else if (!existing) {
+      phpReceiverBySite.set(key, { className: call.className, target });
+    }
+  }
+  for (const key of ambiguousPhpReceiverSites) phpReceiverBySite.delete(key);
 
   for (const document of input.index.documents) {
     for (const info of document.symbols) {
@@ -1132,20 +1183,28 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
               && rangeContains(definition.occurrence.enclosingRange, occurrence.range!))
             .sort((left, right) => rangeSpan(left.occurrence.enclosingRange!) - rangeSpan(right.occurrence.enclosingRange!))[0]?.nodeId;
       if (!owner) continue;
-      const relationKind = source && lineStarts && isInstantiationOccurrence(source, lineStarts, occurrence.range)
+      const baseRelationKind = source && lineStarts && isInstantiationOccurrence(source, lineStarts, occurrence.range)
         ? "instantiates"
         : source && lineStarts && isCallOccurrence(source, lineStarts, occurrence.range)
           ? "calls"
           : relationKindForRoles(occurrence.symbolRoles);
+      const relationKind = phpConstantNodeIds.has(target) && baseRelationKind === "depends_on"
+        ? "reads" : baseRelationKind;
       if (relationKind === "calls") {
         resolvedPhpSites.add(siteKey(document, occurrence.range, targetNode?.name ?? ""));
       }
       const resolvedTarget = relationKind === "calls"
         ? (phpDocImplementationById.get(target) ?? target) : target;
+      const receiver = relationKind === "calls"
+        ? phpReceiverBySite.get(siteKey(document, occurrence.range, targetNode?.name ?? ""))
+        : undefined;
+      const receiverClass = receiver?.target === resolvedTarget ? receiver.className : undefined;
       addRelation(relations, owner, resolvedTarget, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9,
         [{ location: nativeLocation(document.relativePath, occurrence.range),
-          label: resolvedTarget === target ? "SCIP native reference occurrence"
-            : "SCIP native call; PHPDoc facade resolved to verified executable method" }],
+          ...(receiverClass ? { receiverClass } : {}),
+          label: (resolvedTarget === target ? "SCIP native reference occurrence"
+            : "SCIP native call; PHPDoc facade resolved to verified executable method")
+            + (receiverClass ? "; receiverClass: " + receiverClass : "") }],
         [{ providerId, fidelity, freshness: "fresh" }]);
     }
   }
@@ -1182,7 +1241,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
       continue;
     }
-    if (target === ownerId) continue;
+    // Self calls are valid recursion evidence; the normalizer deduplicates
+    // the SCIP and AST observations by exact source position.
     const innermost = phpOwnersByDocument.get(document)?.find((entry) => rangeContains(entry.range, location));
     if (!innermost || innermost.ownerId !== ownerId) continue;
     const competingNative = document.occurrences.some((occurrence) =>
@@ -1198,9 +1258,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, ownerId, target, "calls", 1, [{
       location: nativeLocation(document.relativePath, location),
+      receiverClass: call.className,
       label: call.evidenceSource === "docblock"
-        ? "PHP AST docblock-derived array element; SCIP-verified method definition"
-        : "PHP AST statically typed receiver; SCIP-verified method definition",
+        ? "PHP AST docblock-derived array element; SCIP-verified method definition; receiverClass: " + call.className
+        : "PHP AST statically typed receiver; SCIP-verified method definition; receiverClass: " + call.className,
     }], [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
 
@@ -1238,7 +1299,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     }
     resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, fileNode.id, target, "calls", 1,
-      [{ location: nativeLocation(document.relativePath, location), label: "PHP AST file-level static call" }],
+      [{ location: nativeLocation(document.relativePath, location),
+        receiverClass: call.className, label: "PHP AST file-level static call; receiverClass: " + call.className }],
       [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
   const unresolvedCounts = new Map<string, number>();
