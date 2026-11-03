@@ -6,6 +6,7 @@ import type { ScipPhpLexicalScope, ScipPhpTypedMethodCall } from "./scip-normali
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
+const MAX_CALL_REFERENCE_SITES = 250_000;
 const DEFAULT_TIMEOUT_MS = 90_000;
 
 function lexicalParserPath(): string {
@@ -37,6 +38,10 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
     || typeof object.documents !== "object" || !object.documents || Array.isArray(object.documents)) {
     throw new Error("Invalid PHP AST lexical diagnostics");
   }
+  if (object.errors !== 0 || object.parsed !== paths.size) {
+    throw new Error("PHP AST lexical extraction incomplete: parsed "
+      + object.parsed + "/" + paths.size + ", errors " + object.errors);
+  }
   const documents = object.documents as Record<string, unknown>;
   const scopes = new Map<string, readonly ScipPhpLexicalScope[]>();
   let total = 0;
@@ -65,7 +70,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           const call = raw as Record<string, unknown>;
           if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid anonymous call site");
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
-          if (++totalCalls > 100000) throw new Error("PHP call sites exceed cap");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call sites exceed cap");
         }
         items.push({ type: "anonymous", range: scope.range, ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
       } else if (scope.type === "file") {
@@ -76,14 +81,14 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           const call = raw as Record<string, unknown>;
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file call");
           calls.push({ className: call.className, name: call.name, nameRange: call.nameRange });
-          if (++totalCalls > 100000) throw new Error("PHP call cap exceeded");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
         }
         for (const raw of (scope.unresolvedCalls ?? []) as unknown[]) {
           if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file unresolved call");
           const call = raw as Record<string, unknown>;
           if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file unresolved call");
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
-          if (++totalCalls > 100000) throw new Error("PHP call cap exceeded");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
         }
         items.push({ type: "file", range: scope.range,
           ...(calls.length ? { calls } : {}), ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
@@ -125,7 +130,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           }
           calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
             ...(call.evidenceSource ? { evidenceSource: call.evidenceSource as "native" | "docblock" } : {}) });
-          if (++totalCalls > 100000) throw new Error("PHP typed call count exceeds cap");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP typed call count exceeds cap");
         }
         const unresolvedCalls: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
         if (scope.unresolvedCalls !== undefined && !Array.isArray(scope.unresolvedCalls)) {
@@ -136,7 +141,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           const call = raw as Record<string, unknown>;
           if (!validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid PHP unresolved call range");
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
-          if (++totalCalls > 100000) throw new Error("PHP call site count exceeds cap");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call site count exceeds cap");
         }
         const propertyAccesses: Array<{ className: string; name: string;
           nameRange: [number, number, number, number]; kind: "reads" | "writes";
@@ -152,7 +157,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           propertyAccesses.push({ className: access.className, name: access.name,
             nameRange: access.nameRange, kind: access.kind as "reads" | "writes",
             ...(access.evidenceSource ? { evidenceSource: access.evidenceSource as "native" | "docblock" } : {}) });
-          if (++totalCalls > 100000) throw new Error("PHP reference site cap exceeded");
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP reference site cap exceeded");
         }
         items.push({
           type: scope.type as "method" | "function",

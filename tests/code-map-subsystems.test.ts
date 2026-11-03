@@ -404,3 +404,33 @@ test("fails soft for a boundaryless mixed-language file-only project without inv
     relations: { candidateCount: 0, returnedCount: 0, truncated: false },
   });
 });
+
+test("PHP Core hierarchy splits into second-level subsystem groups by default", () => {
+  const old = process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH;
+  const php = (id: string, path: string): CodeNode => ({
+    ...sourceNode(id, id, path, 3),
+    language: "php",
+  });
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION,
+    projectId: "php-core-layout", rootPath: "/tmp/php-core-layout",
+    indexedAt: "2026-11-03T00:00:00Z",
+    nodes: [
+      php("dao", "Core/DAO/OrderDAO.php"),
+      php("handler", "Core/Handler/OrderHandler.php"),
+      php("service", "Core/Service/OrderService.php"),
+    ],
+    relations: [],
+  };
+  try {
+    delete process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH;
+    assert.deepEqual(deriveCodeSourceSubsystems(graph).nodes.map((node) => node.pathPrefix).sort(),
+      ["Core/DAO", "Core/Handler", "Core/Service"]);
+    process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH = "1";
+    assert.deepEqual(deriveCodeSourceSubsystems(graph).nodes.map((node) => node.pathPrefix),
+      ["Core"]);
+  } finally {
+    if (old === undefined) delete process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH;
+    else process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH = old;
+  }
+});

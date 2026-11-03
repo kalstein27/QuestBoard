@@ -298,7 +298,8 @@ function stableId(namespace: "node" | "relation", value: string): string {
 }
 
 const NUMERIC_KINDS = new Map<number, CodeNodeKind>([
-  [7, "class"], [9, "constructor"], [11, "enum"], [15, "property"], [16, "file"],
+  [7, "class"], [8, "variable"], [9, "constructor"], [11, "enum"],
+  [12, "property"], [15, "property"], [16, "file"],
   [17, "function"], [21, "interface"], [26, "method"], [29, "module"], [30, "namespace"],
   [35, "package"], [41, "property"], [49, "type"], [54, "type"], [55, "type"], [61, "variable"],
   [66, "method"], [67, "method"], [68, "method"], [69, "method"], [70, "method"], [71, "method"],
@@ -353,7 +354,7 @@ function normalizeKind(info: ScipSymbolInformation | undefined, symbol: string):
       case "function": return "function";
       case "method": case "staticmethod": case "abstractmethod": case "methodspecification": return "method";
       case "constructor": return "constructor";
-      case "property": case "field": case "staticproperty": return "property";
+      case "property": case "field": case "staticproperty": case "enummember": case "enumcase": return "property";
       case "variable": case "staticvariable": case "constant": return "variable";
       case "type": case "typealias": case "struct": case "trait": case "protocol": return "type";
       case "enum": return "enum";

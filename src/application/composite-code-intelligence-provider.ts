@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   CODE_FIDELITY_LEVELS,
+  CodeMapSemanticIndexFailureError,
   assertValidCodeGraphSnapshot,
   type CodeFactProvenance,
   type CodeFidelityLevel,
@@ -377,7 +378,11 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
           nodeCount: graph.nodes.length,
           relationCount: graph.relations.length,
         });
-      } catch {
+      } catch (error) {
+        // A failed PHP semantic pass must never turn into a successfully
+        // persisted file-only graph. The last durable snapshot remains intact.
+        // Other language providers retain their existing degraded fallback.
+        if (error instanceof CodeMapSemanticIndexFailureError) throw error;
         const stale = this.#lastGood.get(providerId)?.get(request.projectId);
         if (stale) {
           contributions.push({ provider, providerId, status: "stale", graph: stale });

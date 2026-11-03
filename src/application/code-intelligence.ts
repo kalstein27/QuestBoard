@@ -1,5 +1,16 @@
 export const CODE_GRAPH_SCHEMA_VERSION = 1 as const;
 
+/** A semantic provider began indexing but failed. Never commit a file-only replacement. */
+export class CodeMapSemanticIndexFailureError extends Error {
+  readonly code = "code_map_semantic_index_failed" as const;
+
+  constructor(providerId: string, cause: unknown) {
+    super(providerId + " semantic indexing failed after execution started; "
+      + "refusing file-only snapshot replacement", { cause });
+    this.name = "CodeMapSemanticIndexFailureError";
+  }
+}
+
 export const CODE_NODE_KINDS = [
   "file",
   "module",

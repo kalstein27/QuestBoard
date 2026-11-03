@@ -216,10 +216,13 @@ function normalizeSourcePath(path: string): string | undefined {
   return parts.join("/");
 }
 
-function sourceSubsystemDescriptor(path: string): SubsystemDescriptor | undefined {
-  const configuredDepth = Number(process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH ?? "1");
+function sourceSubsystemDescriptor(path: string, language?: string): SubsystemDescriptor | undefined {
+  // PHP's common Core/DAO/Handler hierarchies need one extra level by default.
+  // Retain the previous depth for other languages unless explicitly configured.
+  const defaultDepth = language?.toLowerCase() === "php" ? 2 : 1;
+  const configuredDepth = Number(process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH ?? defaultDepth);
   const depth = Number.isInteger(configuredDepth) && configuredDepth >= 1 && configuredDepth <= 4
-    ? configuredDepth : 1;
+    ? configuredDepth : defaultDepth;
   const normalized = normalizeSourcePath(path);
   if (!normalized) return undefined;
   const parts = normalized.split("/");
@@ -502,7 +505,7 @@ export function deriveCodeSourceSubsystems(
 
   for (const node of graph.nodes) {
     if (!isProjectArchitectureCandidate(node)) continue;
-    const descriptor = sourceSubsystemDescriptor(node.location!.path);
+    const descriptor = sourceSubsystemDescriptor(node.location!.path, node.language);
     if (!descriptor) continue;
     const existing = subsystems.get(descriptor.pathPrefix) ?? {
       descriptor,

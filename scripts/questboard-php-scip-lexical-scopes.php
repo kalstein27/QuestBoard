@@ -30,6 +30,8 @@ $result = [];
 $errors = 0;
 $parsed = 0;
 $globalScopes = 0;
+$globalCallReferenceSites = 0;
+$maxCallReferenceSites = 250000;
 
 // Read declarations first. Return types can live in any other indexed file.
 function qbPhpParsedFile(string $root, mixed $relative, PhpParser\Parser $parser): ?array {
@@ -527,8 +529,13 @@ foreach ($paths as $relative) {
         ];
     }
     $globalScopes += count($visitor->scopes);
-    if ($globalScopes > 150000 || $visitor->callCount + $visitor->unresolvedCount > 100000) {
-        fwrite(STDERR, "PHP scope count exceeds bounded contract\n");
+    foreach ($visitor->scopes as $scope) {
+        $globalCallReferenceSites += count($scope['calls'] ?? [])
+            + count($scope['unresolvedCalls'] ?? [])
+            + count($scope['propertyAccesses'] ?? []);
+    }
+    if ($globalScopes > 150000 || $globalCallReferenceSites > $maxCallReferenceSites) {
+        fwrite(STDERR, "PHP scope or call/reference site count exceeds bounded contract\n");
         exit(3);
     }
     $result[$relative] = $visitor->scopes;

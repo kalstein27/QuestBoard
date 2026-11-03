@@ -636,3 +636,28 @@ test("Composer PHP root version changes do not change stable project-local symbo
   assert.equal(before.nodes[0]?.id, after.nodes[0]?.id);
   assert.equal(before.nodes[0]?.canonicalIdentity, after.nodes[0]?.canonicalIdentity);
 });
+
+test("SCIP numeric and string kinds retain PHP class constants and enum cases instead of unknown", () => {
+  const symbols = [
+    { symbol: "scip-php composer app 1.0 Order#STATUS.", kind: 8, displayName: "STATUS", expected: "variable" },
+    { symbol: "scip-php composer app 1.0 Status#Closed.", kind: 12, displayName: "Closed", expected: "property" },
+    { symbol: "scip-php composer app 1.0 Status#Open.", kind: "EnumMember", displayName: "Open", expected: "property" },
+  ] as const;
+  const graph = normalizeScipGraph({
+    projectId: "php-kinds", rootPath: "/tmp/php-kinds",
+    indexedAt: "2026-11-03T00:00:00Z", providerId: "scip-php",
+    index: parseScipJsonIndex({
+      documents: [{
+        relativePath: "src/Status.php", language: "php",
+        symbols: symbols.map(({ symbol, kind, displayName }) => ({ symbol, kind, displayName })),
+        occurrences: symbols.map(({ symbol }, index) => ({
+          symbol, symbolRoles: 1, range: [index, 2, 8],
+        })),
+      }],
+    }),
+  });
+  for (const expected of symbols) {
+    assert.equal(graph.nodes.find((node) => node.name === expected.displayName)?.kind, expected.expected);
+  }
+  assert.equal(graph.nodes.filter((node) => node.kind === "unknown").length, 0);
+});

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
+  CodeMapSemanticIndexFailureError,
+  CodeMapService,
   CompositeCodeIntelligenceProvider,
   type CodeFileInventory,
   type CodeGraphSnapshot,
@@ -32,7 +34,11 @@ class MutableProvider implements CodeIntelligenceProvider {
   ) {}
 
   async indexProject(_request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
-    if (this.fail) throw new Error(`${this.providerId} failed`);
+    if (this.fail) {
+      const cause = new Error(this.providerId + " failed");
+      if (this.providerId === "scip-php") throw new CodeMapSemanticIndexFailureError(this.providerId, cause);
+      throw cause;
+    }
     return structuredClone(this.snapshot);
   }
 }
@@ -230,4 +236,34 @@ test("first-run provider failure still yields a file-only indexed graph instead 
   assert.equal(degraded.coverage?.degraded, true);
   assert.equal(degraded.coverage?.providers[0]?.status, "failed");
   assert.equal(degraded.coverage?.languages.find((entry) => entry.language === "typescript")?.fidelity, "file-only");
+});
+
+test("PHP semantic provider failure never returns a successful file-only graph or stale fallback", async () => {
+  const phpGraph: CodeGraphSnapshot = {
+    ...tsGraph(),
+    nodes: tsGraph().nodes.map((node) => ({
+      ...node,
+      language: "php",
+      ...(node.location
+        ? { location: { ...node.location, path: node.location.path.replaceAll(".ts", ".php") } }
+        : {}),
+    })),
+    relations: [],
+  };
+  const php = new MutableProvider("scip-php", ["php"], "semantic-call", phpGraph);
+  const composed = new CompositeCodeIntelligenceProvider([php], new StaticInventory(["src/main.php"]));
+  php.fail = true;
+  await assert.rejects(composed.indexProject(request), /refusing file-only snapshot replacement/);
+  php.fail = false;
+  await composed.indexProject(request);
+  const service = new CodeMapService(composed);
+  await service.refresh(request);
+  const lastGood = service.getCached(request.projectId)?.graph;
+  assert.ok(lastGood);
+  php.fail = true;
+  await assert.rejects(composed.indexProject(request), /refusing file-only snapshot replacement/,
+    "existing in-memory last-good graph must not be published as a successful refresh");
+  await assert.rejects(service.refresh(request), /refusing file-only snapshot replacement/);
+  assert.equal(service.getCached(request.projectId)?.graph, lastGood,
+    "failed PHP refresh cannot replace the last successful Code Map cache");
 });

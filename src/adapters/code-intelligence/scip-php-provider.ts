@@ -7,6 +7,7 @@ import type {
   CodeIntelligenceCapabilities,
   CodeIntelligenceProvider,
 } from "../../application/code-intelligence.js";
+import { CodeMapSemanticIndexFailureError } from "../../application/code-intelligence.js";
 import { inferCodeLanguageFromPath } from "../../application/code-map-hierarchy.js";
 import { FileSystemCodeFileInventory } from "./file-inventory.js";
 import { normalizeScipGraph } from "./scip-normalizer.js";
@@ -114,6 +115,8 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
         throw new Error("SCIP PHP completed without producing index.scip");
       }
       copyFileSync(generatedIndexPath, indexPath);
+    } catch (error) {
+      throw new CodeMapSemanticIndexFailureError(this.providerId, error);
     } finally {
       // Upstream scip-php writes index.scip into the project root. QuestBoard
       // owns only files that did not exist before this run and removes that
@@ -121,24 +124,28 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
       rmSync(generatedIndexPath, { force: true });
     }
 
-    const indexedAt = this.#now();
-    const indexArtifactSha256 = scipArtifactSha256(indexPath);
-    const eligiblePhpPaths = phpFiles.map((entry) => entry.path);
-    if (this.#graphLoader) {
-      return await this.#graphLoader.load({
-        indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256, eligiblePhpPaths,
+    try {
+      const indexedAt = this.#now();
+      const indexArtifactSha256 = scipArtifactSha256(indexPath);
+      const eligiblePhpPaths = phpFiles.map((entry) => entry.path);
+      if (this.#graphLoader) {
+        return await this.#graphLoader.load({
+          indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256, eligiblePhpPaths,
+        });
+      }
+      const index = await this.#indexReader.read(indexPath);
+      return normalizeScipGraph({
+        projectId: request.projectId,
+        rootPath: request.rootPath,
+        indexedAt,
+        index,
+        sourceTextByPath: readIndexedSourceText(request.rootPath, index),
+        providerId: this.providerId,
+        indexArtifactSha256,
+        phpEligibleFilePaths: eligiblePhpPaths,
       });
+    } catch (error) {
+      throw new CodeMapSemanticIndexFailureError(this.providerId, error);
     }
-    const index = await this.#indexReader.read(indexPath);
-    return normalizeScipGraph({
-      projectId: request.projectId,
-      rootPath: request.rootPath,
-      indexedAt,
-      index,
-      sourceTextByPath: readIndexedSourceText(request.rootPath, index),
-      providerId: this.providerId,
-      indexArtifactSha256,
-      phpEligibleFilePaths: eligiblePhpPaths,
-    });
   }
 }
