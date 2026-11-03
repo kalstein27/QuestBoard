@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ScipPhpLexicalScope, ScipPhpTypedMethodCall } from "./scip-normalizer.js";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
-const MAX_RESULT_BYTES = 12 * 1024 * 1024;
+const MAX_RESULT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 90_000;
 
 function lexicalParserPath(): string {
@@ -235,7 +235,8 @@ export async function extractPhpLexicalScopes(
       if (finished) return;
       if (timedOut || signal || code !== 0 || outputBytes > MAX_RESULT_BYTES) {
         finish(new Error("SCIP PHP AST lexical extraction failed: "
-          + (timedOut ? "timeout" : signal ? "signal" : "exit " + code)
+          + (timedOut ? "timeout" : outputBytes > MAX_RESULT_BYTES
+            ? "output exceeded 32MiB cap" : signal ? "signal" : "exit " + code)
           + (stderr ? " (diagnostic: " + stderr.slice(-300) + ")" : "")));
         return;
       }
