@@ -60,11 +60,16 @@ export interface ScipPhpLexicalScope {
   nameRange?: readonly [number, number, number, number];
   /** Fully qualified class, resolved by PHP Parser NameResolver. */
   className?: string;
+  /** PHP Parser verified declaration flags, never inferred from a SCIP method name. */
+  isStatic?: boolean;
+  isConcretePublic?: boolean;
   /** Directly owned AST method calls with a statically proved receiver type. */
   calls?: readonly ScipPhpTypedMethodCall[];
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
   ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
   propertyDefinitions?: readonly { name: string; nameRange: readonly [number, number, number, number] }[];
+  /** Explicit @method tokens belonging to this class's PHPDoc, never inferred from names. */
+  docMethods?: readonly { name: string; nameRange: readonly [number, number, number, number]; isStatic: boolean }[];
   propertyAccesses?: readonly ScipPhpTypedPropertyAccess[];
 }
 
@@ -846,6 +851,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpMethodsByQualifiedName = new Map<string, string | null>();
   const phpClassNodes = new Map<string, string | null>();
   const phpClassAncestors = new Map<string, readonly { className: string; relation: "extends" | "implements" | "trait" }[]>();
+  const phpDocVirtualMethods = new Map<string, {
+    className: string; methodName: string; classId: string; isStatic: boolean;
+  }>();
+  const phpConcreteMethodFlags = new Map<string, { isStatic: boolean; isConcretePublic: boolean }>();
   const phpUnresolvedSites = new Map<string, { name: string; document: ScipDocument; range: ScipRange }>();
   const siteKey = (document: ScipDocument, range: ScipRange, name: string): string =>
     [document.relativePath, range.startLine, range.startCharacter, name.toLowerCase()].join(":");
@@ -885,6 +894,30 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           });
           phpClassNodes.set(classKey, matches.length === 1 ? matches[0]!.nodeId : null);
           phpClassAncestors.set(classKey, scope.ancestors ?? []);
+          const classId = matches.length === 1 ? matches[0]!.nodeId : undefined;
+          if (classId) for (const declaration of scope.docMethods ?? []) {
+            // Require one PHPDoc declaration and one SCIP definition at the
+            // exact name token. A same-named method elsewhere is not evidence.
+            if (scope.docMethods?.filter((entry) =>
+              entry.name.toLowerCase() === declaration.name.toLowerCase()).length !== 1) continue;
+            const position = tupleRange(declaration.nameRange);
+            const virtual = documentDefinitions.filter((definition) => {
+              const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+              const range = definition.occurrence.range;
+              return node?.kind === "method" && node.name.toLowerCase() === declaration.name.toLowerCase()
+                && range?.startLine === position.startLine
+                && range.startCharacter === position.startCharacter;
+            });
+            if (virtual.length !== 1) continue;
+            const nodeId = virtual[0]!.nodeId;
+            phpDocVirtualMethods.set(nodeId, {
+              className: scope.className, methodName: declaration.name, classId, isStatic: declaration.isStatic,
+            });
+            const node = nodeBySymbol.get(scopedSymbolKey(document, virtual[0]!.symbol));
+            if (node) node.signature = node.signature
+              ? node.signature + " [PHPDoc @method virtual declaration]"
+              : "PHPDoc @method virtual declaration (not an executable method)";
+          }
           for (const property of scope.propertyDefinitions ?? []) {
             const token = tupleRange(property.nameRange);
             const matches = documentDefinitions.filter((definition) => {
@@ -922,6 +955,12 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
             && node.name.toLowerCase() === scope.name!.toLowerCase();
         });
         const ownerId = candidates.length === 1 ? candidates[0]!.nodeId : undefined;
+        if (ownerId && scope.type === "method"
+          && scope.isStatic !== undefined && scope.isConcretePublic !== undefined) {
+          phpConcreteMethodFlags.set(ownerId, {
+            isStatic: scope.isStatic, isConcretePublic: scope.isConcretePublic,
+          });
+        }
         if (ownerId && scope.type === "method" && scope.className) {
           const key = qualifiedMethodKey(scope.className, scope.name);
           const previous = phpMethodsByQualifiedName.get(key);
@@ -954,6 +993,11 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   const relations = new Map<string, CodeRelation>();
+  // PHPDoc methods are documentation members of the class, not file functions.
+  for (const [nodeId, declaration] of phpDocVirtualMethods) {
+    addRelation(relations, declaration.classId, nodeId, "contains", 1,
+      undefined, [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+  }
   for (const [className, ancestors] of phpClassAncestors) {
     const child = phpClassNodes.get(className);
     if (!child) continue;
@@ -978,6 +1022,19 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       [{ location: containment.location, label: "AST verified inline callback lexical scope" }],
       [{ providerId, fidelity: "syntax", freshness: "fresh" }]);
   }
+  // A PHPDoc facade may name an inherited executable method. Redirect calls
+  // only when the AST hierarchy yields exactly one real SCIP method definition.
+  const phpDocImplementationById = new Map<string, string>();
+  for (const [virtualId, declaration] of phpDocVirtualMethods) {
+    const implementation = verifiedPhpMethodTarget(declaration.className, declaration.methodName);
+    const flags = implementation ? phpConcreteMethodFlags.get(implementation) : undefined;
+    if (implementation && implementation !== virtualId && flags?.isConcretePublic
+      && flags.isStatic === declaration.isStatic) {
+      phpDocImplementationById.set(virtualId, implementation);
+      addRelation(relations, virtualId, implementation, "depends_on", 1,
+        undefined, [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
+    }
+  }
   const nativeReferenceCounts = new Map<string, number>();
   for (const node of nodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
   for (const node of externalNodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
@@ -997,11 +1054,12 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   // as real code containment before adding usage relationships. When an
   // indexer omits enclosingSymbol, use the narrowest enclosing definition
   // range in the same document as conservative structural evidence.
-  const directlyContained = new Set<string>();
+  const directlyContained = new Set<string>(phpDocVirtualMethods.keys());
   for (const document of input.index.documents) {
     for (const info of document.symbols) {
       if (!info.enclosingSymbol) continue;
       const child = nodeBySymbol.get(scopedSymbolKey(document, info.symbol))?.id;
+      if (child && phpDocVirtualMethods.has(child)) continue;
       const parent = nodeBySymbol.get(scopedSymbolKey(document, info.enclosingSymbol))?.id;
       if (!child || !parent) continue;
       addRelation(relations, parent, child, "contains");
@@ -1082,13 +1140,17 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       if (relationKind === "calls") {
         resolvedPhpSites.add(siteKey(document, occurrence.range, targetNode?.name ?? ""));
       }
-      addRelation(relations, owner, target, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9,
-        [{ location: nativeLocation(document.relativePath, occurrence.range), label: "SCIP native reference occurrence" }],
+      const resolvedTarget = relationKind === "calls"
+        ? (phpDocImplementationById.get(target) ?? target) : target;
+      addRelation(relations, owner, resolvedTarget, relationKind, relationKind === "calls" || relationKind === "instantiates" ? 1 : 0.9,
+        [{ location: nativeLocation(document.relativePath, occurrence.range),
+          label: resolvedTarget === target ? "SCIP native reference occurrence"
+            : "SCIP native call; PHPDoc facade resolved to verified executable method" }],
         [{ providerId, fidelity, freshness: "fresh" }]);
     }
   }
 
-  const verifiedPhpMethodTarget = (className: string, methodName: string): string | undefined => {
+  function verifiedPhpMethodTarget(className: string, methodName: string): string | undefined {
     let frontier = [className.toLowerCase()];
     const visited = new Set<string>();
     for (let depth = 0; depth < 24 && frontier.length; depth += 1) {
@@ -1108,7 +1170,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       frontier = next;
     }
     return undefined;
-  };
+  }
 
   // Recover only AST-proven receiver calls whose exact target is a single
   // native SCIP method definition. Do not manufacture target nodes or treat
@@ -1127,8 +1189,11 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       (occurrence.symbolRoles & SCIP_ROLE_DEFINITION) === 0 && occurrence.range
       && occurrence.range.startLine === location.startLine
       && occurrence.range.startCharacter === location.startCharacter
-      && (nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
-        ?? externalNodeBySymbol.get(occurrence.symbol)?.id) !== target);
+      && (() => {
+        const native = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
+          ?? externalNodeBySymbol.get(occurrence.symbol)?.id;
+        return (native ? phpDocImplementationById.get(native) ?? native : undefined) !== target;
+      })());
     if (competingNative) continue;
     resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, ownerId, target, "calls", 1, [{

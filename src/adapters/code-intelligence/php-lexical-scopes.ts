@@ -111,11 +111,25 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           definitions.push({ name: definition.name, nameRange: definition.nameRange });
           if (definitions.length > 15000) throw new Error("Too many PHP property declarations");
         }
+        const docMethods: Array<{ name: string; nameRange: [number, number, number, number]; isStatic: boolean }> = [];
+        if (scope.docMethods !== undefined && !Array.isArray(scope.docMethods)) throw new Error("Invalid PHPDoc methods");
+        for (const raw of (scope.docMethods ?? []) as unknown[]) {
+          if (!raw || typeof raw !== "object") throw new Error("Invalid PHPDoc method");
+          const declaration = raw as Record<string, unknown>;
+          if (!validName(declaration.name, 255) || !isRange(declaration.nameRange) || typeof declaration.isStatic !== "boolean"
+            || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(declaration.name)) throw new Error("Invalid PHPDoc method token");
+          docMethods.push({ name: declaration.name, nameRange: declaration.nameRange, isStatic: declaration.isStatic });
+          if (docMethods.length > 1024) throw new Error("Too many PHPDoc methods");
+        }
         items.push({ type: "class", className: scope.className, range: scope.range,
-          nameRange: scope.nameRange, ancestors, propertyDefinitions: definitions });
+          nameRange: scope.nameRange, ancestors, propertyDefinitions: definitions, docMethods });
       } else if (validName(scope.name, 255) && isRange(scope.nameRange)) {
         if (scope.className !== undefined && (scope.type !== "method" || !validName(scope.className, 1024))) {
           throw new Error("Invalid PHP lexical class identity");
+        }
+        if (scope.isStatic !== undefined && typeof scope.isStatic !== "boolean"
+          || scope.isConcretePublic !== undefined && typeof scope.isConcretePublic !== "boolean") {
+          throw new Error("Invalid PHP method modifiers");
         }
         const calls: ScipPhpTypedMethodCall[] = [];
         if (scope.calls !== undefined && !Array.isArray(scope.calls)) throw new Error("Invalid PHP typed calls");
@@ -165,6 +179,8 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           nameRange: scope.nameRange,
           range: scope.range,
           ...(scope.className ? { className: scope.className as string } : {}),
+          ...(scope.isStatic !== undefined ? { isStatic: scope.isStatic as boolean } : {}),
+          ...(scope.isConcretePublic !== undefined ? { isConcretePublic: scope.isConcretePublic as boolean } : {}),
           ...(calls.length ? { calls } : {}),
           ...(unresolvedCalls.length ? { unresolvedCalls } : {}),
           ...(propertyAccesses.length ? { propertyAccesses } : {}),

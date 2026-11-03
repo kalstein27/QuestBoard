@@ -199,6 +199,33 @@ foreach ($paths as $relative) {
             if ($class === null && $node->name !== null) $class = $node->name->toString();
             $properties = [];
             $propertyDefinitions = [];
+            $docMethods = [];
+            $comment = $node->getDocComment();
+            if ($comment !== null) {
+                $text = $comment->getText();
+                // Only explicit class-level @method annotations qualify.
+                if (preg_match_all('/(?:^|\n)[ \t]*\*?[ \t]*(@method[^\r\n(]{0,256})\(/',
+                    $text, $annotations, PREG_OFFSET_CAPTURE)) {
+                    foreach ($annotations[1] as [$annotation, $offset]) {
+                        if (count($docMethods) >= 1024) break;
+                        $prefix = rtrim(substr($annotation, strlen('@method')));
+                        if (!preg_match('/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)$/', $prefix, $name)) continue;
+                        $namePosition = strrpos($annotation, $name[1]);
+                        if ($namePosition === false) continue;
+                        $absolute = $comment->getStartFilePos() + $offset + $namePosition;
+                        $before = substr($this->source, 0, $absolute);
+                        $line = substr_count($before, "\n") + 1;
+                        $start = $this->point($line, $absolute);
+                        $end = $this->point($line, $absolute + strlen($name[1]));
+                        if ($start === null || $end === null) continue;
+                        $docMethods[] = [
+                            'name'=>$name[1],
+                            'nameRange'=>[$start[0],$start[1],$end[0],$end[1]],
+                            'isStatic'=>preg_match('/^\s*static\b/i', $prefix) === 1,
+                        ];
+                    }
+                }
+            }
             foreach ($node->stmts as $member) {
                 if (!$member instanceof PhpParser\Node\Stmt\Property) continue;
                 $type = $this->resolvedType($member->type);
@@ -224,7 +251,8 @@ foreach ($paths as $relative) {
                     foreach ($member->traits as $trait) $ancestors[] = ['relation'=>'trait','className'=>$trait->toString()];
                 }
             }
-            return ['class'=>$class,'properties'=>$properties,'ancestors'=>$ancestors,'propertyDefinitions'=>$propertyDefinitions];
+            return ['class'=>$class,'properties'=>$properties,'ancestors'=>$ancestors,
+                'propertyDefinitions'=>$propertyDefinitions,'docMethods'=>$docMethods];
         }
 
         private function methodCalls(PhpParser\Node $function, array $properties): array {
@@ -460,7 +488,8 @@ foreach ($paths as $relative) {
                     $this->scopes[] = ['type'=>'class','className'=>$context['class'],
                         'nameRange'=>$node->name ? $this->range($node->name) : null,
                         'range'=>$range,'ancestors'=>$context['ancestors'],
-                        'propertyDefinitions'=>$context['propertyDefinitions']];
+                        'propertyDefinitions'=>$context['propertyDefinitions'],
+                        'docMethods'=>$context['docMethods']];
                 }
                 return null;
             }
@@ -497,7 +526,9 @@ foreach ($paths as $relative) {
                 'range' => $range,
                 ...($name === null ? [] : ['name' => $name, 'nameRange' => $nameRange]),
                 ...($type === 'method' && $context !== null && $context['class'] !== null
-                    ? ['className' => $context['class']] : []),
+                    ? ['className' => $context['class'],
+                        'isStatic'=>$node->isStatic(),
+                        'isConcretePublic'=>$node->isPublic() && !$node->isAbstract()] : []),
                 ...($sites['calls'] ? ['calls'=>$sites['calls']] : []),
                 ...($sites['unresolvedCalls'] ? ['unresolvedCalls'=>$sites['unresolvedCalls']] : []),
                 ...($type !== 'anonymous' && $sites['propertyAccesses']
