@@ -174,6 +174,8 @@ export interface CodeSourceSubsystemReadQuality {
   combinedCallEvidenceSampleCount: number;
   subsystemCallEvidenceRatio: number;
   compatibilityCallEvidenceRatio: number;
+  /** Reconciles every raw edge with supported source-subsystem projection and bounded omission causes. */
+  relationAccounting: ReturnType<typeof deriveCodeSourceSubsystems>["relationAccounting"];
   compressionBySubsystem: readonly {
     subsystemId: string;
     pathPrefix: string;
@@ -435,6 +437,7 @@ export function createCodeSourceSubsystemRead(
         rawCalls.length > 0 ? subsystemCallEvidenceCount / rawCalls.length : 0,
       compatibilityCallEvidenceRatio:
         rawCalls.length > 0 ? compatibilityCallEvidence.size / rawCalls.length : 0,
+      relationAccounting: derived.relationAccounting,
       compressionBySubsystem: nodes.map((node) => ({
         subsystemId: node.id,
         pathPrefix: node.pathPrefix,

@@ -44,6 +44,7 @@ export function inferCodeLanguageFromPath(path: string): string | undefined {
   if (lower.endsWith(".swift")) return "swift";
   if ([".sh", ".bash", ".zsh"].some((extension) => lower.endsWith(extension))) return "shellscript";
   if ([".ps1", ".psm1", ".psd1"].some((extension) => lower.endsWith(extension))) return "powershell";
+  if ([".cmd", ".bat"].some((extension) => lower.endsWith(extension))) return "windowsbatch";
   if (lower.endsWith(".py")) return "python";
   if (lower.endsWith(".go")) return "go";
   if (lower.endsWith(".rs")) return "rust";
@@ -57,6 +58,33 @@ export function inferCodeLanguageFromPath(path: string): string | undefined {
   if (lower.endsWith(".lua")) return "lua";
   if (lower.endsWith(".sql")) return "sql";
   return undefined;
+}
+
+/** A conservative file-role label; it never implies semantic language support. */
+export function classifyCodeFileType(path: string): { type: string; reason: string } {
+  const name = posix.basename(path.replaceAll("\\", "/")).toLowerCase();
+  if (inferCodeLanguageFromPath(path)) return { type: "source", reason: "recognized_source_extension" };
+  if (/^(?:readme|license|licence|copying|changelog|contributing|notice)(?:\.|$)/.test(name)
+      || /\.(?:md|mdx|rst|txt|adoc)$/.test(name)) {
+    return { type: "documentation", reason: "recognized_document_name_or_extension" };
+  }
+  if (/^(?:dockerfile|makefile|justfile|procfile|gemfile)(?:\.|$)/.test(name)) {
+    return { type: "build_or_runtime_configuration", reason: "recognized_tool_file_name" };
+  }
+  if (/(?:^|\.)(?:lock)$/.test(name) || name.endsWith(".lockb")) {
+    return { type: "lockfile", reason: "recognized_lockfile_extension" };
+  }
+  if (/\.(?:json|jsonc|ya?ml|toml|ini|cfg|conf|config|properties|xml|plist)$/.test(name)
+      || /^\.(?:gitignore|gitattributes|editorconfig|npmrc|prettierrc)/.test(name)) {
+    return { type: "configuration_or_data", reason: "recognized_data_or_configuration_extension" };
+  }
+  if (/\.(?:png|jpe?g|gif|svg|webp|ico|pdf|woff2?|ttf|otf|mp3|mp4|webm)$/.test(name)) {
+    return { type: "asset", reason: "recognized_asset_extension" };
+  }
+  if (name === ".chatgpt2codex-source-root") {
+    return { type: "source_marker", reason: "recognized_tool_marker" };
+  }
+  return { type: "unknown", reason: name.includes(".") ? "unrecognized_extension" : "extensionless_unclassified" };
 }
 
 function relationIdentity(from: string, to: string): string {

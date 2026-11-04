@@ -21,6 +21,7 @@ import {
   materializeCodeFileHierarchy,
   type CodeFileInventory,
 } from "./code-map-hierarchy.js";
+import { addConservativeSourceDeclarations } from "./code-map-lexical-declarations.js";
 
 export interface CompositeCodeIntelligenceProviderOptions {
   now?: () => string;
@@ -412,8 +413,9 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
       { ...merged, indexedAt: this.#now() },
       inventory,
     );
-    const coverage = makeCoverage(withFiles, providerCoverage, contributions);
-    const snapshot: CodeGraphSnapshot = { ...withFiles, coverage };
+    const withStructure = await addConservativeSourceDeclarations(withFiles, inventory, request.rootPath);
+    const coverage = makeCoverage(withStructure, providerCoverage, contributions);
+    const snapshot: CodeGraphSnapshot = { ...withStructure, coverage };
     assertValidCodeGraphSnapshot(snapshot);
     return snapshot;
   }

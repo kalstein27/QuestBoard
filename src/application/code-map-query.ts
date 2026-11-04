@@ -8,8 +8,10 @@ import {
   type CodeRelation,
   type CodeRelationKind,
 } from "./code-intelligence.js";
+import { classifyCodeFileType, inferCodeLanguageFromPath } from "./code-map-hierarchy.js";
 
 export const CODE_MAP_QUERY_OPERATIONS = [
+  "list_files",
   "find_nodes",
   "get_node",
   "hierarchy",
@@ -118,6 +120,23 @@ export interface CodeMapHierarchyEntry {
 }
 
 export type CodeMapQueryResult =
+  | (CodeMapQueryEnvelope & {
+      operation: "list_files";
+      files: readonly {
+        path: string;
+        language: string;
+        fileType: string;
+        classificationReason: string;
+        analysisLevel: "semantic" | "structural" | "file-only";
+        analysisState: "included" | "excluded" | "failed";
+        providerIds: readonly string[];
+        reason: string;
+      }[];
+      matchedCount: number;
+      offset: number;
+      nextOffset?: number;
+      counts: { semantic: number; structural: number; fileOnly: number; excluded: number; failed: number };
+    })
   | (CodeMapQueryEnvelope & {
       operation: "find_nodes";
       nodes: readonly CodeNode[];
@@ -419,6 +438,85 @@ export function queryCodeGraph(
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node] as const));
 
   switch (input.operation) {
+    case "list_files": {
+      const offset = input.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new CodeMapQueryError("code_map_query_invalid", "list_files offset must be a non-negative integer");
+      }
+      if (offset > 0 && (!input.expectedSnapshotId || input.expectedSourceIndexedAt !== graph.indexedAt)) {
+        throw new CodeMapQueryError("code_map_snapshot_changed", "list_files continuation requires the exact snapshot ID and indexedAt");
+      }
+      const symbolsByPath = new Map<string, CodeNode[]>();
+      for (const node of graph.nodes) {
+        if (!node.location?.path) continue;
+        const existing = symbolsByPath.get(node.location.path) ?? [];
+        existing.push(node);
+        symbolsByPath.set(node.location.path, existing);
+      }
+      const files = graph.nodes.filter((node) => node.kind === "file" && node.location?.path);
+      const byLanguage = new Map(graph.coverage?.languages.map((item) => [item.language, item] as const) ?? []);
+      const nativePaths = new Set(graph.nodes.filter((node) => node.location?.path
+        && node.provenance?.some((item) => item.providerId.startsWith("scip-") && item.freshness !== "stale"))
+        .map((node) => node.location!.path));
+      const nativeCountByLanguage = new Map<string, number>();
+      const discoveredCountByLanguage = new Map<string, number>();
+      for (const file of files) {
+        const path = file.location!.path;
+        const language = normalizedNodeLanguage(file) === "unknown"
+          ? inferCodeLanguageFromPath(path) ?? "unknown" : normalizedNodeLanguage(file);
+        discoveredCountByLanguage.set(language, (discoveredCountByLanguage.get(language) ?? 0) + 1);
+        if (nativePaths.has(path)) nativeCountByLanguage.set(language, (nativeCountByLanguage.get(language) ?? 0) + 1);
+      }
+      const fileInfo = files.map((file) => {
+        const path = file.location!.path;
+        const language = normalizedNodeLanguage(file) === "unknown"
+          ? inferCodeLanguageFromPath(path) ?? "unknown" : normalizedNodeLanguage(file);
+        const allFacts = symbolsByPath.get(path) ?? [file];
+        const provenance = allFacts.flatMap((node) => node.provenance ?? []);
+        const structural = allFacts.some((node) => node.kind !== "file"
+          && (node.provenance ?? []).some((item) => item.fidelity === "syntax"));
+        const analysisLevel = nativePaths.has(path) ? "semantic" as const
+          : structural ? "structural" as const : "file-only" as const;
+        const providerIds = [...new Set(provenance.map((item) => item.providerId))].sort();
+        const coverage = byLanguage.get(language);
+        const excludedByScope = analysisLevel !== "semantic"
+          && coverage?.semanticExclusionReason === "provider_project_scope"
+          && coverage.semanticEligibleFileCount === coverage.semanticIndexedFileCount
+          // The language aggregate cannot identify excluded paths unless all
+          // indexed paths have exact native SCIP evidence and counts reconcile.
+          && nativeCountByLanguage.get(language) === coverage.semanticIndexedFileCount
+          && discoveredCountByLanguage.get(language) === coverage.fileCount;
+        const providerFailed = analysisLevel !== "semantic" && graph.coverage?.providers.some((provider) =>
+          provider.status === "failed" && (provider.languages === undefined || provider.languages.includes(language)));
+        const analysisState = excludedByScope ? "excluded" as const
+          : providerFailed ? "failed" as const : "included" as const;
+        const fileType = classifyCodeFileType(path);
+        return { path, language, fileType: fileType.type, classificationReason: fileType.reason,
+          analysisLevel, analysisState, providerIds,
+          reason: excludedByScope ? "provider_project_scope"
+            : providerFailed ? "provider_failed_language_scope"
+              : analysisLevel === "semantic" ? "native_scip_evidence"
+                : analysisLevel === "structural" ? "ast_or_syntax_evidence"
+                  : language === "unknown" ? fileType.reason : "no_verified_structural_or_semantic_evidence",
+        };
+      });
+      const filterPath = normalizeText(input.path)?.toLowerCase();
+      const filterLanguage = normalizeText(input.language)?.toLowerCase();
+      const matched = fileInfo.filter((file) => !filterPath || file.path.toLowerCase().includes(filterPath))
+        .filter((file) => !filterLanguage || file.language === filterLanguage)
+        .sort((left, right) => left.path.localeCompare(right.path));
+      const page = matched.slice(offset, offset + limit);
+      return { ...envelope, operation: "list_files", files: page, matchedCount: matched.length,
+        offset, ...(offset + page.length < matched.length ? { nextOffset: offset + page.length } : {}),
+        counts: {
+          semantic: matched.filter((file) => file.analysisLevel === "semantic").length,
+          structural: matched.filter((file) => file.analysisLevel === "structural").length,
+          fileOnly: matched.filter((file) => file.analysisLevel === "file-only").length,
+          excluded: matched.filter((file) => file.analysisState === "excluded").length,
+          failed: matched.filter((file) => file.analysisState === "failed").length,
+        },
+        truncated: offset + page.length < matched.length };
+    }
     case "find_nodes": {
       const query = normalizeText(input.query)?.toLocaleLowerCase();
       const phpQuery = query?.replaceAll("->", "#").replaceAll("::", "#");

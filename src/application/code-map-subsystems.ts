@@ -135,6 +135,18 @@ export interface CodeSourceSubsystemTruncation {
 export interface CodeSourceSubsystemDerivation {
   nodes: readonly CodeSourceSubsystem[];
   relations: readonly CodeSourceSubsystemRelation[];
+  /** Exact raw-relation accounting. Counts refer to raw facts, not derived edges. */
+  relationAccounting: {
+    rawRelationCount: number;
+    unsupportedKindCount: number;
+    unmappedEndpointCount: number;
+    sameSubsystemCount: number;
+    crossSubsystemCount: number;
+    omittedBySubsystemCapCount: number;
+    omittedByRelationCapCount: number;
+    visibleRelationEvidenceCount: number;
+    omittedEvidenceSamplesCount: number;
+  };
   truncated: boolean;
   truncation: CodeSourceSubsystemTruncation;
 }
@@ -523,16 +535,20 @@ export function deriveCodeSourceSubsystems(
   }
 
   const relationAggregates = new Map<string, MutableRelationAggregate>();
+  let unsupportedKindCount = 0;
+  let unmappedEndpointCount = 0;
+  let sameSubsystemCount = 0;
+  let crossSubsystemCount = 0;
 
   for (const relation of graph.relations) {
     const kind = relationKind(relation);
-    if (!kind) continue;
+    if (!kind) { unsupportedKindCount += 1; continue; }
     const fromNode = nodesById.get(relation.from);
     const toNode = nodesById.get(relation.to);
-    if (!fromNode || !toNode) continue;
+    if (!fromNode || !toNode) { unmappedEndpointCount += 1; continue; }
     const fromSubsystem = subsystemByNodeId.get(fromNode.id);
     const toSubsystem = subsystemByNodeId.get(toNode.id);
-    if (!fromSubsystem || !toSubsystem) continue;
+    if (!fromSubsystem || !toSubsystem) { unmappedEndpointCount += 1; continue; }
 
     const fromStats = nodeStats(stats, fromNode.id);
     const toStats = nodeStats(stats, toNode.id);
@@ -543,7 +559,8 @@ export function deriveCodeSourceSubsystems(
       MAX_NODE_DIRECT_EVIDENCE,
     );
 
-    if (fromSubsystem === toSubsystem) continue;
+    if (fromSubsystem === toSubsystem) { sameSubsystemCount += 1; continue; }
+    crossSubsystemCount += 1;
 
     fromStats.outgoingCrossBoundaryRelationCount += 1;
     toStats.incomingCrossBoundaryRelationCount += 1;
@@ -659,6 +676,10 @@ export function deriveCodeSourceSubsystems(
     ? allSubsystems
     : allSubsystems.slice(0, MAX_SUBSYSTEMS);
   const selectedPaths = new Set(selectedNodes.map((node) => node.pathPrefix));
+  const omittedBySubsystemCapCount = [...relationAggregates.values()]
+    .filter((relation) => !selectedPaths.has(relation.fromPathPrefix)
+      || !selectedPaths.has(relation.toPathPrefix))
+    .reduce((count, relation) => count + relation.sourceRelationCount, 0);
 
   const allRelations: CodeSourceSubsystemRelation[] =
     [...relationAggregates.values()]
@@ -689,12 +710,29 @@ export function deriveCodeSourceSubsystems(
   const selectedRelations = options?.unbounded === true
     ? allRelations
     : allRelations.slice(0, MAX_RELATIONS);
+  const omittedByRelationCapCount = allRelations.slice(selectedRelations.length)
+    .reduce((count, relation) => count + relation.sourceRelationCount, 0);
+  const visibleRelationEvidenceCount = selectedRelations
+    .reduce((count, relation) => count + relation.sourceRelationCount, 0);
+  const omittedEvidenceSamplesCount = selectedRelations
+    .reduce((count, relation) => count + relation.sourceRelationCount - relation.sourceRelationIds.length, 0);
   const subsystemTruncated = allSubsystems.length > selectedNodes.length;
   const relationTruncated = allRelations.length > selectedRelations.length;
 
   return {
     nodes: selectedNodes,
     relations: selectedRelations,
+    relationAccounting: {
+      rawRelationCount: graph.relations.length,
+      unsupportedKindCount,
+      unmappedEndpointCount,
+      sameSubsystemCount,
+      crossSubsystemCount,
+      omittedBySubsystemCapCount,
+      omittedByRelationCapCount,
+      visibleRelationEvidenceCount,
+      omittedEvidenceSamplesCount,
+    },
     truncated: subsystemTruncated || relationTruncated,
     truncation: {
       subsystems: {
