@@ -700,6 +700,11 @@ foreach ($paths as $relative) {
                         'propertyDefinitions'=>$context['propertyDefinitions'],
                         'constantDefinitions'=>$context['constantDefinitions'],
                         'docMethods'=>$context['docMethods']];
+                } elseif ($node instanceof PhpParser\Node\Stmt\Class_
+                    && $node->name === null && ($range = $this->range($node)) !== null) {
+                    // Anonymous migration classes are syntax-only structural scopes,
+                    // never fabricated native SCIP declarations.
+                    $this->scopes[] = ['type'=>'anonymous_class','range'=>$range];
                 }
                 return null;
             }

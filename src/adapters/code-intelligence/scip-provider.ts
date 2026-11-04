@@ -187,11 +187,18 @@ export class BundledScipIndexReader implements ScipIndexReader {
 
 export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise<CodeGraphSnapshot> {
   const index = await new BundledScipIndexReader().read(input.indexPath);
+  const nativePaths = index.documents.map((document) => document.relativePath);
   const phpLexicalScopes = input.providerId === "scip-php"
-    ? await extractPhpLexicalScopes(
-        input.request.rootPath,
-        index.documents.map((document) => document.relativePath),
-      )
+    ? await extractPhpLexicalScopes(input.request.rootPath, nativePaths)
+    : undefined;
+  const nativeSet = new Set(nativePaths);
+  const syntaxOnlyPaths = input.providerId === "scip-php"
+    ? (input.eligiblePhpPaths ?? []).filter((path) =>
+        /^(?:(?:database\/migrations|routes|bootstrap|dev|public)\/).+\.php$/.test(path) && !nativeSet.has(path))
+    : [];
+  // Keep extra AST source files outside native semantic inference.
+  const phpSyntaxOnlyScopes = syntaxOnlyPaths.length
+    ? await extractPhpLexicalScopes(input.request.rootPath, syntaxOnlyPaths)
     : undefined;
   return normalizeScipGraph({
     projectId: input.request.projectId,
@@ -201,6 +208,7 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
     sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
     ...(input.eligiblePhpPaths ? { phpEligibleFilePaths: input.eligiblePhpPaths } : {}),
     ...(phpLexicalScopes ? { phpLexicalScopes } : {}),
+    ...(phpSyntaxOnlyScopes ? { phpSyntaxOnlyScopes } : {}),
     providerId: input.providerId,
     indexArtifactSha256: input.indexArtifactSha256,
   });

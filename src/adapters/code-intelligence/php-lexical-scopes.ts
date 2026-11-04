@@ -57,10 +57,12 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
         throw new Error("Invalid PHP lexical owner");
       }
       const scope = item as Record<string, unknown>;
-      if (!isRange(scope.range) || !["method", "function", "anonymous", "class", "file"].includes(String(scope.type))) {
+      if (!isRange(scope.range) || !["method", "function", "anonymous", "anonymous_class", "class", "file"].includes(String(scope.type))) {
         throw new Error("Invalid PHP lexical scope range or type");
       }
-      if (scope.type === "anonymous") {
+      if (scope.type === "anonymous_class") {
+        items.push({ type: "anonymous_class", range: scope.range });
+      } else if (scope.type === "anonymous") {
         if (scope.className !== undefined) throw new Error("Anonymous scope cannot claim a named class");
         const calls: ScipPhpTypedMethodCall[] = [];
         if (scope.calls !== undefined && !Array.isArray(scope.calls)) throw new Error("Invalid anonymous typed calls");

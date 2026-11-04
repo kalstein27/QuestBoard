@@ -62,7 +62,7 @@ export interface ScipPhpTypedPropertyAccess {
 }
 
 export interface ScipPhpLexicalScope {
-  type: "function" | "method" | "anonymous" | "class" | "file";
+  type: "function" | "method" | "anonymous" | "anonymous_class" | "class" | "file";
   range: readonly [number, number, number, number];
   name?: string;
   nameRange?: readonly [number, number, number, number];
@@ -136,6 +136,8 @@ export interface NormalizeScipGraphInput {
   phpEligibleFilePaths?: readonly string[];
   /** Verified PHP AST extents; SCIP PHP currently emits no enclosingRange. */
   phpLexicalScopes?: ReadonlyMap<string, readonly ScipPhpLexicalScope[]>;
+  /** AST structural scopes for non-SCIP migrations/routes; never semantic facts. */
+  phpSyntaxOnlyScopes?: ReadonlyMap<string, readonly ScipPhpLexicalScope[]>;
   providerId?: string;
   fidelity?: CodeFidelityLevel;
   /** SHA-256 of the actual index.scip bytes; do not substitute a source hash. */
@@ -1371,6 +1373,49 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         label: "PHP AST file-level new with verified class declaration" }],
       [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }
+  // Native SCIP alone supplies PHP semantic facts. Unindexed migrations, routes,
+  // bootstrap and entrypoint files contribute lexical containment only.
+  const phpSyntaxOnlyNodes: CodeNode[] = [];
+  const phpSyntaxOnlyFiles: CodeNode[] = [];
+  if (providerId === "scip-php" && input.phpSyntaxOnlyScopes) {
+    const nativePaths = new Set(input.index.documents.map((document) => document.relativePath));
+    for (const [path, scopes] of input.phpSyntaxOnlyScopes) {
+      if (nativePaths.has(path) || !/^(?:(?:database\/migrations|routes|bootstrap|dev|public)\/).+\.php$/.test(path)) continue;
+      const structural = scopes.filter((scope) => scope.type !== "file");
+      if (!structural.length) continue;
+      const fileIdentity = "file:" + path;
+      const fileId = stableId("node", fileIdentity);
+      const syntaxProvenance = [{ providerId: "questboard-php-ast", fidelity: "syntax" as const, freshness: "fresh" as const }];
+      phpSyntaxOnlyFiles.push({ id: fileId, kind: "file", name: path.split("/").at(-1)!,
+        canonicalIdentity: fileIdentity, language: "php", location: { path }, provenance: syntaxProvenance });
+      const entries = structural.map((scope) => {
+        const range = tupleRange(scope.range);
+        const token = scope.nameRange ? tupleRange(scope.nameRange) : range;
+        const canonicalIdentity = ["php-syntax", path, scope.type, ...scope.range].join(":");
+        const node: CodeNode = {
+          id: stableId("node", canonicalIdentity), canonicalIdentity, language: "php",
+          kind: scope.type === "class" || scope.type === "anonymous_class" ? "class"
+            : scope.type === "method" ? "method" : "function",
+          name: scope.type === "anonymous_class" ? `anonymous-class@${range.startLine + 1}:${range.startCharacter + 1}`
+            : scope.type === "anonymous" ? `closure@${range.startLine + 1}:${range.startCharacter + 1}`
+              : scope.type === "class" ? scope.className!.split("\\").at(-1)! : scope.name!,
+          location: nativeLocation(path, token), lexicalExtent: nativeLocation(path, range),
+          signature: "PHP AST syntax-only scope (not native SCIP semantic coverage)",
+          provenance: syntaxProvenance,
+        };
+        phpSyntaxOnlyNodes.push(node);
+        return { node, range };
+      });
+      for (const entry of entries) {
+        const parent = entries.filter((candidate) => candidate !== entry
+          && rangeSpan(candidate.range) > rangeSpan(entry.range)
+          && rangeContains(candidate.range, entry.range))
+          .sort((left, right) => rangeSpan(left.range) - rangeSpan(right.range))[0];
+        addRelation(relations, parent?.node.id ?? fileId, entry.node.id, "contains", 1,
+          undefined, syntaxProvenance);
+      }
+    }
+  }
   const unresolvedCounts = new Map<string, number>();
   for (const [key, site] of phpUnresolvedSites) {
     if (resolvedPhpSites.has(key)) continue;
@@ -1383,7 +1428,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     rootPath: input.rootPath,
     indexedAt: input.indexedAt,
     nodes: [...nodeBySymbol.values(), ...registrationNodes, ...externalNodeBySymbol.values(),
-      ...phpSyntheticFileNodes.values(), ...phpAnonymousNodes.values()],
+      ...phpSyntheticFileNodes.values(), ...phpAnonymousNodes.values(), ...phpSyntaxOnlyFiles, ...phpSyntaxOnlyNodes],
     relations: [...relations.values()],
     ...(providerId === "scip-php" ? {
       unresolvedPhpMethodCalls: [...unresolvedCounts].sort(([a], [b]) => a.localeCompare(b))
@@ -1406,7 +1451,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         status: "fresh",
         fidelity,
         languages: [...semanticFileCountByLanguage.keys()].sort(),
-        nodeCount: nodeBySymbol.size + registrationNodes.length + externalNodeBySymbol.size + phpAnonymousNodes.size,
+        nodeCount: nodeBySymbol.size + registrationNodes.length + externalNodeBySymbol.size + phpAnonymousNodes.size
+          + phpSyntaxOnlyFiles.length + phpSyntaxOnlyNodes.length,
         relationCount: relations.size,
       }],
       languages: [...semanticFileCountByLanguage.entries()]
