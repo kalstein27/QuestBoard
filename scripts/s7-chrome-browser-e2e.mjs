@@ -184,6 +184,21 @@ try {
   const browserVersion=await cdp.eval("navigator.userAgent");
   assert.match(browserVersion,/Chrome/);
   assert.equal(await cdp.eval("state.codeMap.graph === null"),true);
+  await cdp.wait("state.codeMapSubsystems?.nodes?.length > 0 && state.codeMapSubsystems?.relations?.length > 0",
+    "Source subsystem architecture loaded");
+  assert.ok(await cdp.eval("document.querySelector('.code-map-architecture-summary')?.textContent.includes('Source architecture')"));
+  await cdp.eval("document.querySelector('.code-map-subsystem-focus').click()");
+  await cdp.wait("state.codeMapSubsystemSelected !== null", "subsystem selection");
+  await cdp.eval("document.querySelector('.code-map-subsystem-focus[aria-pressed=true]').click()");
+  await cdp.wait("state.codeMapSubsystemSelected === null", "show all subsystem relations");
+  await cdp.eval("document.querySelector('.code-map-subsystem-relation').click()");
+  await cdp.wait("document.querySelector('.code-map-subsystem-evidence-link') !== null",
+    "real raw source evidence from aggregate relation");
+  const evidenceOwnerId = await cdp.eval("document.querySelector('.code-map-subsystem-evidence-link').dataset.codeMapNodeId");
+  assert.ok(evidenceOwnerId.startsWith("code:node:"));
+  await cdp.eval("document.querySelector('.code-map-subsystem-evidence-link').click()");
+  await cdp.wait(`state.codeMapInspectorData?.node?.id === ${JSON.stringify(evidenceOwnerId)}`,
+    "subsystem evidence owner opens raw Inspector");
   assert.ok(await cdp.eval("document.querySelectorAll('.code-map-tree-directory').length > 0"));
   await cdp.eval("document.querySelector('.code-map-tree-directory .code-map-tree-label').click()");
   await cdp.wait("state.codeMapLazyTreePages.has('src')","expand src directory");
@@ -260,6 +275,7 @@ try {
     folderNavigation:"root/src/Application/Handler.php",
     search:"handle",
     inspector:"native-node",
+    sourceArchitecture:"subsystem selection, aggregate relation evidence, raw owner Inspector",
     sourceStructure:"selected-pin-preview, unauthenticated-Apply-locked",
     codeToFlow:"preview + isolated Apply",
     explicitDialogCancel:"AbortController observed",

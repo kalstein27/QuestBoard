@@ -57,6 +57,10 @@ const state = {
   taskDrawerOwner: null,
   codeMap: { enabled: false, available: false, indexed: false, graph: null, projection: null, mode: null },
   codeMapSubsystems: null,
+  codeMapSubsystemPaging: { subsystems: false, relations: false },
+  codeMapSubsystemSelected: null,
+  codeMapSubsystemEvidence: null,
+  codeMapSubsystemError: null,
   codeMapLoading: false,
   codeMapIndexError: null,
   selectedCodeMapDetail: null,
@@ -777,6 +781,10 @@ async function loadCodeMap() {
 }
 
 async function loadCodeMapSubsystems() {
+  state.codeMapSubsystemPaging = { subsystems: false, relations: false };
+  state.codeMapSubsystemSelected = null;
+  state.codeMapSubsystemEvidence = null;
+  state.codeMapSubsystemError = null;
   if (!state.projectId) {
     state.codeMapSubsystems = null;
     return null;
@@ -788,6 +796,50 @@ async function loadCodeMapSubsystems() {
     state.codeMapSubsystems = null;
   }
   return state.codeMapSubsystems;
+}
+
+async function loadMoreCodeMapSubsystems(operation) {
+  const kind = operation === "list_subsystems" ? "subsystems" : "relations";
+  const current = state.codeMapSubsystems;
+  const projectId = state.projectId;
+  const snapshotId = state.codeMap.snapshotId;
+  if (!current || !projectId || !snapshotId || state.codeMapSubsystemPaging[kind]) return;
+  const previous = kind === "subsystems" ? current.nodes : current.relations;
+  const candidateCount = current.truncation[kind].candidateCount;
+  if (previous.length >= candidateCount) return;
+  state.codeMapSubsystemPaging[kind] = true;
+  state.codeMapSubsystemError = null;
+  renderCodeMapBoard();
+  try {
+    const { query } = await api(`/projects/${encodeURIComponent(projectId)}/code-map/subsystems/query`, {
+      method: "POST",
+      body: {
+        operation,
+        offset: previous.length,
+        limit: kind === "subsystems" ? 12 : 24,
+        expectedSnapshotId: snapshotId,
+        expectedSourceIndexedAt: current.sourceIndexedAt,
+      },
+    });
+    if (state.projectId !== projectId || state.codeMap.snapshotId !== snapshotId
+        || state.codeMapSubsystems !== current) return;
+    if (query.snapshotId !== snapshotId || query.sourceIndexedAt !== current.sourceIndexedAt) {
+      throw new Error("Source subsystem snapshot changed during pagination");
+    }
+    const next = kind === "subsystems" ? query.nodes : query.relations;
+    if (!Array.isArray(next) || query.offset !== previous.length) throw new Error("Unexpected subsystem page");
+    const seen = new Set(previous.map((item) => item.id));
+    current[kind === "subsystems" ? "nodes" : "relations"] = [
+      ...previous, ...next.filter((item) => !seen.has(item.id)),
+    ];
+  } catch (error) {
+    if (state.projectId === projectId && state.codeMapSubsystems === current) {
+      state.codeMapSubsystemError = `Source subsystem page unavailable: ${error.message || error}. Reload Code if the snapshot changed.`;
+    }
+  } finally {
+    state.codeMapSubsystemPaging[kind] = false;
+    renderCodeMapBoard();
+  }
 }
 
 async function loadCodeMapContext() {
@@ -929,10 +981,10 @@ function renderCodeMapBoard() {
   if (manualRelationsPanel) shell.append(manualRelationsPanel);
   const searchPanel = codeMapSearchPanel();
   if (searchPanel) shell.append(searchPanel);
-  if (map.boundedSourceTree) shell.append(renderCodeMapLazySourceTree(map));
-  else shell.append(renderCodeMapSourceTree(map));
   const architectureLens = codeMapArchitectureLens(map);
   if (architectureLens) shell.append(architectureLens);
+  if (map.boundedSourceTree) shell.append(renderCodeMapLazySourceTree(map));
+  else shell.append(renderCodeMapSourceTree(map));
   el["code-map-content"].replaceChildren(shell);
   renderCodeMapInspector();
 }
@@ -1519,14 +1571,16 @@ function codeMapArchitectureLens(map) {
   const projection = map.projection;
   if (!projection) return null;
   const subsystemRead = state.codeMapSubsystems;
+  const subsystemCount = subsystemRead?.truncation?.subsystems?.candidateCount || subsystemRead?.nodes?.length || 0;
+  const relationCount = subsystemRead?.truncation?.relations?.candidateCount || subsystemRead?.relations?.length || 0;
   const sparse = projection.quality?.status === "sparse";
   const details = document.createElement("details");
   details.className = `code-map-architecture-lens${sparse ? " sparse" : ""}`;
-  details.open = sparse;
+  details.open = true;
   details.append(node(
     "summary",
     "code-map-architecture-summary",
-    `Architecture views${sparse ? " · compatibility sparse" : ""} · ${projection.nodes.length} compatibility roles · ${subsystemRead?.nodes?.length || 0} source subsystems`,
+    `Source architecture · ${subsystemCount} subsystems / ${relationCount} aggregate relations · ${projection.nodes.length} compatibility roles${sparse ? " (overcompressed)" : ""}`,
   ));
 
   const quality = projection.quality;
@@ -1570,16 +1624,18 @@ function codeMapArchitectureLens(map) {
   if (subsystemRead?.nodes?.length) {
     const section = node("section", "code-map-subsystems");
     section.append(
-      node("strong", "code-map-subsystems-title", "Source subsystems / Calls · bounded evidence-backed view"),
+      node("strong", "code-map-subsystems-title", "Source subsystems / Calls · primary architecture explorer"),
       node("span", "code-map-subsystem-note", "Calls are primary. Only actual raw instantiates / implements are auxiliary. Broad depends_on, external SCIP targets, name similarity, and path-only inference are excluded from structural edges."),
       node("span", "code-map-subsystem-note", "Subsystem IDs use code-subsystem:*; notable drill-down targets use raw code:node:*. Registration context never reassigns the raw relation owner."),
+      node("span", "code-map-subsystem-quality",
+        `Browsing ${subsystemRead.nodes.length}/${subsystemCount} subsystems · ${subsystemRead.relations.length}/${relationCount} aggregate relations. Each aggregate retains actual raw evidence; counts are not inferred call edges.`),
     );
     const metrics = subsystemRead.quality;
     if (metrics) {
       section.append(node(
         "span",
         "code-map-subsystem-quality",
-        `Quality · ${metrics.eligibleProjectLocalSymbols} eligible local symbols · ${metrics.compatibilityRepresentedSymbols} represented by compatibility roles · raw calls used: subsystem ${metrics.subsystemCallEvidenceCount}/${metrics.rawCallCount}, compatibility ${metrics.compatibilityCallEvidenceCount}/${metrics.rawCallCount} · compatibility compression ${Math.round(metrics.compatibilitySymbolsPerGroup)} symbols/group`,
+        `Bounded Source subsystem sample · ${metrics.subsystemCallEvidenceCount}/${metrics.rawCallCount} raw calls (initial overview only). Separate compatibility lens: ${metrics.compatibilityRepresentedSymbols}/${metrics.eligibleProjectLocalSymbols} local symbols, ${metrics.compatibilityCallEvidenceCount}/${metrics.rawCallCount} raw calls · ${Math.round(metrics.compatibilitySymbolsPerGroup)} symbols/group.`,
       ));
       if (metrics.languageGaps?.length) {
         section.append(node(
@@ -1593,8 +1649,17 @@ function codeMapArchitectureLens(map) {
     const list = node("div", "code-map-subsystems-list");
     subsystemRead.nodes.forEach((item) => {
       const card = node("article", "code-map-subsystem");
+      if (state.codeMapSubsystemSelected === item.id) card.classList.add("selected");
+      const focus = node("button", "code-map-subsystem-focus", item.pathPrefix);
+      focus.type = "button";
+      focus.setAttribute("aria-pressed", String(state.codeMapSubsystemSelected === item.id));
+      focus.addEventListener("click", () => {
+        state.codeMapSubsystemSelected = state.codeMapSubsystemSelected === item.id ? null : item.id;
+        state.codeMapSubsystemEvidence = null;
+        renderCodeMapBoard();
+      });
       card.append(
-        node("strong", "code-map-subsystem-path", item.pathPrefix),
+        focus,
         node("span", "code-map-subsystem-meta", `${item.fileCount} files · ${item.symbolCount} symbols · ${item.outgoingCrossBoundaryCallCount} outgoing calls · ${item.incomingCrossBoundaryCallCount} incoming calls`),
         node("span", "code-map-subsystem-id", item.id),
       );
@@ -1622,27 +1687,76 @@ function codeMapArchitectureLens(map) {
       list.append(card);
     });
     section.append(list);
+    if (subsystemRead.nodes.length < subsystemCount) {
+      const more = node("button", "code-map-subsystem-more", state.codeMapSubsystemPaging.subsystems
+        ? "Loading subsystems…" : `Load more subsystems (${subsystemCount - subsystemRead.nodes.length} remaining)`);
+      more.type = "button";
+      more.disabled = state.codeMapSubsystemPaging.subsystems;
+      more.addEventListener("click", () => void loadMoreCodeMapSubsystems("list_subsystems"));
+      section.append(more);
+    }
 
     if (subsystemRead.relations?.length) {
       const relations = node("div", "code-map-subsystem-relations");
-      subsystemRead.relations.forEach((item) => {
+      if (state.codeMapSubsystemSelected) {
+        const selected = subsystemRead.nodes.find((item) => item.id === state.codeMapSubsystemSelected);
+        const clear = node("button", "code-map-subsystem-more",
+          `Connections for ${selected?.pathPrefix || "subsystem"} · Show all`);
+        clear.type = "button";
+        clear.addEventListener("click", () => {
+          state.codeMapSubsystemSelected = null;
+          state.codeMapSubsystemEvidence = null;
+          renderCodeMapBoard();
+        });
+        relations.append(clear);
+      }
+      const visibleRelations = subsystemRead.relations.filter((item) =>
+        !state.codeMapSubsystemSelected
+        || item.fromSubsystemId === state.codeMapSubsystemSelected
+        || item.toSubsystemId === state.codeMapSubsystemSelected);
+      visibleRelations.forEach((item) => {
         const evidenceCount = item.evidenceSample?.length || item.sourceRelationIds?.length || 0;
-        relations.append(node(
-          "span",
-          "code-map-subsystem-relation",
-          `${item.fromPathPrefix} → ${item.toPathPrefix} · ${item.kind} · total ${item.sourceRelationCount} raw evidence · sample ${evidenceCount}${item.evidenceTruncated ? ` · truncated: ${item.evidenceTruncationReason}` : ""}`,
-        ));
+        const entry = node("div", "code-map-subsystem-relation-entry");
+        const toggle = node("button", "code-map-subsystem-relation",
+          `${item.fromPathPrefix} → ${item.toPathPrefix} · ${item.kind} · ${item.sourceRelationCount} raw facts (sample ${evidenceCount})`);
+        toggle.type = "button";
+        toggle.setAttribute("aria-expanded", String(state.codeMapSubsystemEvidence === item.id));
+        toggle.addEventListener("click", () => {
+          state.codeMapSubsystemEvidence = state.codeMapSubsystemEvidence === item.id ? null : item.id;
+          renderCodeMapBoard();
+        });
+        entry.append(toggle);
+        if (state.codeMapSubsystemEvidence === item.id) {
+          const samples = node("div", "code-map-subsystem-evidence");
+          (item.evidenceSample || []).forEach((evidence) => {
+            const location = evidence.sourceLocation;
+            const source = location?.path ? `${location.path}:${location.startLine || "?"}` : "Source location unavailable";
+            const link = node("button", "code-map-subsystem-evidence-link",
+              `${source} · ${evidence.label || item.kind} · ${evidence.relationId}`);
+            link.type = "button";
+            link.dataset.codeMapNodeId = evidence.fromNodeId;
+            link.addEventListener("click", () => selectCodeMapDetail("node", evidence.fromNodeId));
+            samples.append(link);
+          });
+          if (item.evidenceTruncated) samples.append(node("span", "code-map-subsystem-note",
+            `Showing ${evidenceCount}/${item.sourceRelationCount} source facts · ${item.evidenceTruncationReason}. Inspect a raw owner for its original provenance and relationships.`));
+          entry.append(samples);
+        }
+        relations.append(entry);
       });
+      if (!visibleRelations.length) relations.append(node("span", "code-map-subsystem-note",
+        "No connections in loaded pages for this subsystem. Load more relationships to inspect additional edges."));
       section.append(relations);
     }
-    if (subsystemRead.truncation?.subsystems?.truncated) {
-      const cap = subsystemRead.truncation.subsystems;
-      section.append(node("span", "code-map-subsystem-note", `Subsystems bounded: ${cap.returnedCount}/${cap.candidateCount} · ${cap.reason}.`));
+    if (subsystemRead.relations.length < relationCount) {
+      const more = node("button", "code-map-subsystem-more", state.codeMapSubsystemPaging.relations
+        ? "Loading relationships…" : `Load more relationships (${relationCount - subsystemRead.relations.length} remaining)`);
+      more.type = "button";
+      more.disabled = state.codeMapSubsystemPaging.relations;
+      more.addEventListener("click", () => void loadMoreCodeMapSubsystems("list_relations"));
+      section.append(more);
     }
-    if (subsystemRead.truncation?.relations?.truncated) {
-      const cap = subsystemRead.truncation.relations;
-      section.append(node("span", "code-map-subsystem-note", `Relations bounded: ${cap.returnedCount}/${cap.candidateCount} · ${cap.reason}.`));
-    }
+    if (state.codeMapSubsystemError) section.append(node("span", "code-map-subsystem-error", state.codeMapSubsystemError));
     details.append(section);
   }
 

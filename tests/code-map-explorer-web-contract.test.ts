@@ -83,7 +83,7 @@ test("coverage health and semantic capability stay distinct while architecture r
   assert.match(app, /Semantic coverage:/);
   assert.match(app, /semantic analysis not applicable/);
   assert.match(app, /codeMapArchitectureLens/);
-  assert.match(app, /Architecture views/);
+  assert.match(app, /Source architecture/);
   assert.match(app, /Compatibility roles/);
   assert.match(app, /document\.createElement\("details"\)/);
   assert.match(css, /\.code-map-architecture-lens/);
@@ -108,6 +108,70 @@ test("Web separates compatibility roles from the bounded Source subsystems / Cal
   assert.match(app, /raw code:node:\*/);
   assert.match(css, /\.code-map-subsystems-list/);
   assert.match(css, /\.code-map-compatibility-roles/);
+});
+
+test("Source architecture paginates all groups and raw-evidenced edges using pinned snapshot IDs", async () => {
+  const sandbox: any = {
+    window: { addEventListener() {} },
+    location: { search: "" },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    URLSearchParams,
+  };
+  await runInNewContext(`${app}
+    (async () => {
+      const sent = [];
+      renderCodeMapBoard = () => {};
+      state.projectId = "chatgpt2codex";
+      state.codeMap = { snapshotId: "pinned-snapshot" };
+      state.codeMapSubsystems = {
+        sourceIndexedAt: "indexed-at",
+        nodes: Array.from({ length: 12 }, (_, n) => ({ id: "group-" + n })),
+        relations: Array.from({ length: 24 }, (_, n) => ({
+          id: "edge-" + n, sourceRelationIds: ["raw-edge-" + n],
+        })),
+        truncation: {
+          subsystems: { candidateCount: 20 },
+          relations: { candidateCount: 71 },
+        },
+      };
+      api = async (path, options) => {
+        sent.push({ path, ...options.body });
+        const body = options.body;
+        const total = body.operation === "list_subsystems" ? 20 : 71;
+        const length = Math.min(body.limit, total - body.offset);
+        return { query: {
+          offset: body.offset, snapshotId: "pinned-snapshot", sourceIndexedAt: "indexed-at",
+          ...(body.operation === "list_subsystems"
+            ? { nodes: Array.from({ length }, (_, n) => ({ id: "group-" + (body.offset + n) })) }
+            : { relations: Array.from({ length }, (_, n) => ({
+              id: "edge-" + (body.offset + n),
+              sourceRelationIds: ["raw-edge-" + (body.offset + n)],
+            })) }),
+        } };
+      };
+      await loadMoreCodeMapSubsystems("list_subsystems");
+      await loadMoreCodeMapSubsystems("list_relations");
+      await loadMoreCodeMapSubsystems("list_relations");
+      globalThis.__paged = {
+        nodeCount: state.codeMapSubsystems.nodes.length,
+        edgeCount: state.codeMapSubsystems.relations.length,
+        lastEvidence: state.codeMapSubsystems.relations.at(-1).sourceRelationIds[0],
+        sent,
+        pinned: state.codeMap.snapshotId,
+      };
+    })()
+  `, sandbox);
+  assert.equal(sandbox.__paged.nodeCount, 20);
+  assert.equal(sandbox.__paged.edgeCount, 71);
+  assert.equal(sandbox.__paged.lastEvidence, "raw-edge-70");
+  assert.deepEqual(Array.from(sandbox.__paged.sent, (item: any) => item.offset), [12, 24, 48]);
+  assert.ok(sandbox.__paged.sent.every((item: any) =>
+    item.expectedSnapshotId === "pinned-snapshot" && item.expectedSourceIndexedAt === "indexed-at"));
+  assert.ok(sandbox.__paged.sent.every((item: any) =>
+    item.path.endsWith("/code-map/subsystems/query")));
+  assert.match(app, /selectCodeMapDetail\("node", evidence\.fromNodeId\)/);
+  assert.match(app, /item\.sourceRelationCount/);
+  assert.match(app, /Compatibility roles · six-role Investigation sync lens/);
 });
 
 test("sparse Architecture lens exposes bounded raw call-root entrypoints without mixing ID spaces", () => {
