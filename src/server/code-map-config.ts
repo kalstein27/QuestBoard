@@ -8,6 +8,7 @@ import { CodeMapService } from "../application/code-map-service.js";
 import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import { FileSystemCodeFileInventory } from "../adapters/code-intelligence/file-inventory.js";
 import { ScipPhpProvider } from "../adapters/code-intelligence/scip-php-provider.js";
+import { SourceKitLspProvider } from "../adapters/code-intelligence/sourcekit-lsp-provider.js";
 import {
   ExecFileScipProcessRunner,
   loadScipGraphInProcess,
@@ -22,7 +23,7 @@ import {
 } from "../adapters/code-intelligence/code-map-persistence.js";
 import { assertCodeMapStorageRootOutsideProject } from "../adapters/code-intelligence/code-map-persistence.js";
 
-export type QuestBoardCodeMapProvider = "scip-php" | "scip-typescript";
+export type QuestBoardCodeMapProvider = "scip-php" | "scip-typescript" | "sourcekit-lsp";
 
 export interface QuestBoardCodeMapConfig {
   /** First configured provider retained for legacy diagnostics/config consumers. */
@@ -88,7 +89,9 @@ function createCompositeService(
 function providerMetadata(provider: QuestBoardCodeMapProvider): { languages?: readonly string[]; fidelity: CodeFidelityLevel } {
   return provider === "scip-typescript"
     ? { languages: ["typescript", "javascript"], fidelity: "semantic-call" }
-    : { languages: ["php"], fidelity: "semantic-call" };
+    : provider === "sourcekit-lsp"
+      ? { languages: ["swift"], fidelity: "semantic-call" }
+      : { languages: ["php"], fidelity: "semantic-call" };
 }
 
 export function semanticFactsProvider(
@@ -131,7 +134,7 @@ export function semanticFactsProvider(
 
 function parseProvider(value: string): QuestBoardCodeMapProvider {
   const normalized = value.trim().toLowerCase();
-  if (normalized !== "scip-php" && normalized !== "scip-typescript") {
+  if (normalized !== "scip-php" && normalized !== "scip-typescript" && normalized !== "sourcekit-lsp") {
     throw new TypeError(`Unsupported Code Map provider: ${normalized || value}`);
   }
   return normalized;
@@ -159,7 +162,9 @@ function providerExecutable(
   cwd: string,
   rootPath?: string,
 ): string {
-  return provider === "scip-typescript"
+  return provider === "sourcekit-lsp"
+    ? env.QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE?.trim() || "/usr/bin/xcrun"
+    : provider === "scip-typescript"
     ? env.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE?.trim()
       || join(cwd, "node_modules", ".bin", process.platform === "win32" ? "scip-typescript.cmd" : "scip-typescript")
     : env.QUESTBOARD_SCIP_PHP_EXECUTABLE?.trim()
@@ -169,6 +174,12 @@ function providerExecutable(
 }
 
 const CODE_MAP_PROVIDER_DEFINITIONS: readonly CodeProviderDefinition[] = [
+  {
+    providerId: "sourcekit-lsp",
+    languages: ["swift"],
+    fidelity: "semantic-call",
+    version: null,
+  },
   {
     providerId: "scip-typescript",
     languages: ["typescript", "javascript"],
@@ -340,6 +351,13 @@ export function createConfiguredCodeMapService(
     ], providerRegistry, manualRelations, persistence);
   }
 
+  if (config.provider === "sourcekit-lsp") {
+    return createCompositeService([
+      withProviderMetadata(new SourceKitLspProvider({ executable: config.executable }),
+        { languages: ["swift"], fidelity: "semantic-call" }, config.storageRoot),
+    ], providerRegistry, manualRelations, persistence);
+  }
+
   const provider = new ScipPhpProvider(new ExecFileScipProcessRunner(), {
     storageRoot: config.storageRoot,
     ...(env.QUESTBOARD_CODE_MAP_ISOLATED_CHILD === "1"
@@ -435,6 +453,8 @@ export function createConfiguredCodeMapRuntime(
         resolvedEnv.QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE = entry.executable;
       } else if (entry.provider === "scip-php") {
         resolvedEnv.QUESTBOARD_SCIP_PHP_EXECUTABLE = entry.executable ?? entry.requestedExecutable;
+      } else if (entry.provider === "sourcekit-lsp" && entry.executable) {
+        resolvedEnv.QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE = entry.executable;
       }
     }
     const configuredService = createConfiguredCodeMapService(resolvedEnv, providerRegistry, manualRelations, persistence);

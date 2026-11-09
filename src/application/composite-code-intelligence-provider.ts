@@ -384,6 +384,7 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
         // persisted file-only graph. The last durable snapshot remains intact.
         // Other language providers retain their existing degraded fallback.
         if (error instanceof CodeMapSemanticIndexFailureError) throw error;
+        if ((error as { code?: string } | null)?.code === "code_map_semantic_index_failed") throw error;
         const stale = this.#lastGood.get(providerId)?.get(request.projectId);
         if (stale) {
           contributions.push({ provider, providerId, status: "stale", graph: stale });

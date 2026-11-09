@@ -101,11 +101,12 @@ The Web UI exposes Quest, Flow, and Code workspaces plus Agent Follow presence c
 | `QUESTBOARD_ACTOR_PROVIDER` | Default CLI actor provider | `cli` |
 | `QUESTBOARD_CONCURRENCY_LOG` | Set to `0` to disable concurrency JSONL diagnostics | enabled |
 | `QUESTBOARD_CODE_MAP` | Set to `1` or `true` to enable Code Map indexing; managed-service mode defaults it on when unset | disabled normally; enabled in managed-service mode |
-| `QUESTBOARD_CODE_MAP_PROVIDER` | Optional single-provider override: `scip-typescript` or `scip-php` | unset |
+| `QUESTBOARD_CODE_MAP_PROVIDER` | Optional single-provider override: `scip-typescript`, `scip-php`, or `sourcekit-lsp` | unset |
 | `QUESTBOARD_CODE_MAP_PROVIDERS` | Ordered semantic provider set | `scip-typescript,scip-php` |
 | `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
 | `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | Optional override for the bundled `scip-typescript` indexer executable | local `node_modules/.bin/scip-typescript` |
 | `QUESTBOARD_SCIP_PHP_EXECUTABLE` | Optional SCIP PHP executable override | target project's `vendor/bin/scip-php` |
+| `QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE` | Optional Swift SourceKit-LSP launcher override | `/usr/bin/xcrun` |
 
 ### Code Map provider setup
 
@@ -114,6 +115,8 @@ Code Map is opt-in for ordinary daemon launches, while ChatGPT2Codex managed-ser
 If a semantic indexer is unavailable, QuestBoard still starts normally and preserves file-only coverage. TypeScript provisioning remains self-contained. PHP semantic indexing requires the target project to have `composer.json`, `composer.lock`, installed `vendor/autoload.php`, and the trusted `davidrjenni/scip-php` development dependency that provides `vendor/bin/scip-php`. Provider-install requests are approval-only external-host plans and never install dependencies or start indexing by themselves. Generated Code Map indexes are retained under `QUESTBOARD_CODE_MAP_STORAGE_ROOT`; the temporary root `index.scip` produced by SCIP PHP is copied out and removed, and a pre-existing project `index.scip` is never overwritten.
 
 Use `QUESTBOARD_CODE_MAP_PROVIDER` only when intentionally forcing one provider. Mixed TypeScript/JavaScript/PHP repositories should normally keep the default plural provider set so unsupported or unprepared languages remain explicit coverage gaps instead of disappearing from the file hierarchy.
+
+Swift semantic calls are an explicit `sourcekit-lsp` opt-in (add it to `QUESTBOARD_CODE_MAP_PROVIDERS` or select it alone). On macOS, install `xcode-build-server`, generate a project-local `buildServer.json` with `xcode-build-server config -project <project>.xcodeproj -scheme <scheme>`, and build the Xcode scheme once to populate its compiler index before refreshing Code Map. Only SourceKit-resolved project-local function calls with exact source locations become `calls` edges. Unindexed Swift files remain visible as partial semantic coverage; the legacy architecture compatibility projection may still be overcompressed despite a populated raw call graph.
 
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
