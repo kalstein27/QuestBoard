@@ -35,9 +35,14 @@ final class ResetJob {
     $unknown->getTimestamp(); // unresolved receiver
   }
 }
-final class Wallet { public function lock(): void {} public function reset(): void {} }
+final class Wallet {
+  public function lock(): void {} public function reset(): void {}
+  public function setBalance(int $n): self { return $this; }
+  public function setStep(int $n): self { return $this; }
+}
 final class WalletDAO { public static function find(int $id): ?Wallet { return null; } }
 final class WalletService {
+  public static function create(int $id): Wallet { return new Wallet(); }
   /** @param Wallet[] $list */
   public static function settle(int $id, array $list): void {
     $wallet = WalletDAO::find($id);
@@ -62,6 +67,89 @@ final class WalletService {
     $instance = WalletDAO::find($id);
     if (!($instance instanceof Wallet)) { return; }
     $guarded = function () use ($instance) { $instance->reset(); }; // instanceof guard
+  }
+}
+final class MemoryObject {
+  const DELETED = 0;
+  public function getStatus(): int { return 1; }
+  public function getData(): array { return []; }
+}
+final class MemoryStore {
+  public static function replace(&$value): void { $value = new OtherClock(); }
+  public function replaceObject(&$value): void { $value = new OtherClock(); }
+  public static function find(array|object $target, bool $raw): array {
+    $result = [];
+    if (is_array($target) === false) {
+      /** @var MemoryObject $target */
+      if ($target->getStatus() !== MemoryObject::DELETED) { // d1 method condition
+        $result[] = $target->getData(); // d1 method body
+      }
+    } else {
+      array_walk_recursive($target, function ($value) use (&$result) {
+        /** @var MemoryObject $value */
+        if ($value->getStatus() !== MemoryObject::DELETED) { // d1 closure condition
+          $result[] = $value->getData(); // d1 closure body
+        }
+      });
+    }
+    return $result;
+  }
+  public static function negative(object $value, bool $flag): void {
+    if ($flag) {
+      /** @var MemoryObject $value */
+      if ($value->getStatus()) { // d1 branch known
+        $value = new OtherClock();
+        $value->getData(); // d1 reassigned
+      }
+    }
+    $value->getData(); // d1 outside
+    /** @var MemoryObject|OtherClock $unknown */
+    if ($unknown->getStatus()) {} // d1 union
+    /** @var MemoryObject $other */
+    if ($unknown->getStatus()) {} // d1 other variable
+  }
+  public static function byReference(object $value): void {
+    /** @var MemoryObject $value */
+    if ($value->getStatus()) { // d1 reference before
+      self::replace($value);
+      $value->getData(); // d1 reference after
+    }
+  }
+  public static function branchReference(object $value, bool $flag): void {
+    /** @var MemoryObject $value */
+    if ($value->getStatus()) {
+      if ($flag) {
+        $store = new MemoryStore();
+        $store->replaceObject($value);
+      }
+      $value->getData(); // d1 branch reference after
+    }
+  }
+}
+final class WalletHandler {
+  public function process(int $userId): void {
+    $wallet = WalletDAO::find($userId);
+    if ($wallet instanceof Wallet === false) {
+      $wallet = WalletService::create($userId);
+    }
+    $wallet->lock();
+    $reset = static function () use ($wallet): void {
+      $wallet->setBalance(0)->setStep(0); // d2 good
+    };
+    $reset();
+  }
+  public function negative(int $id, bool $flag): void {
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) {
+      if ($flag) $wallet = WalletService::create($id);
+    }
+    $unsafe = function () use ($wallet) { $wallet->setBalance(0); }; // d2 conditional
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) { $wallet = new OtherClock(); }
+    $wrong = function () use ($wallet) { $wallet->setBalance(0); }; // d2 conflict
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) { $wallet = WalletDAO::find($id); }
+    $nullable = function () use ($wallet) { $wallet->setBalance(0); }; // d2 nullable
   }
 }
 try {
@@ -122,6 +210,23 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     check("Wallet", "reset", "calls", "// invalidated array", "", false);
     check("Clock", "getTimeStamp", "calls", "// invalid static dispatch", "", false);
     check("Clock", "getTimeStamp", "calls", "// unresolved receiver", "", false);
+    check("MemoryObject", "getStatus", "calls", "// d1 method condition", "find");
+    check("MemoryObject", "getData", "calls", "// d1 method body", "find");
+    check("MemoryObject", "getStatus", "calls", "// d1 closure condition", "closure@");
+    check("MemoryObject", "getData", "calls", "// d1 closure body", "closure@");
+    check("MemoryObject", "getStatus", "calls", "// d1 branch known", "negative");
+    check("MemoryObject", "getData", "calls", "// d1 reassigned", "", false);
+    check("MemoryObject", "getData", "calls", "// d1 outside", "", false);
+    check("MemoryObject", "getStatus", "calls", "// d1 union", "", false);
+    check("MemoryObject", "getStatus", "calls", "// d1 other variable", "", false);
+    check("MemoryObject", "getStatus", "calls", "// d1 reference before", "byReference");
+    check("MemoryObject", "getData", "calls", "// d1 reference after", "", false);
+    check("MemoryObject", "getData", "calls", "// d1 branch reference after", "", false);
+    check("Wallet", "setBalance", "calls", "// d2 good", "closure@");
+    check("Wallet", "setStep", "calls", "// d2 good", "closure@");
+    check("Wallet", "setBalance", "calls", "// d2 conditional", "", false);
+    check("Wallet", "setBalance", "calls", "// d2 conflict", "", false);
+    check("Wallet", "setBalance", "calls", "// d2 nullable", "", false);
     assert.deepEqual(failures, []);
     const file = graph.nodes.find(node => node.canonicalIdentity === "file:" + path)!;
     const timestamp = graph.nodes.find(node => node.name === "getTimeStamp" && node.canonicalIdentity.includes("/Clock#"))!;
