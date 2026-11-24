@@ -848,15 +848,37 @@ foreach ($paths as $relative) {
                     }
                     foreach ($taintBranches as $tainted) $referenceTainted += $tainted;
                     foreach ($referenceTainted as $name=>$_) unset($types[$name],$arrays[$name]);
-                    // Only a simple, unconditional early exit proves the
-                    // opposite guard on the surviving path. Never infer past
-                    // a nonterminating/conditional body or a reference alias.
-                    if (!$part->elseifs && $part->else === null && count($part->stmts) === 1
-                        && ($part->stmts[0] instanceof PhpParser\Node\Stmt\Return_
-                            || ($part->stmts[0] instanceof PhpParser\Node\Stmt\Expression
-                                && $part->stmts[0]->expr instanceof PhpParser\Node\Expr\Throw_))) {
+                    // A directly terminating guard has no fallthrough fact
+                    // from its rejected arm. Restore only the checked variable,
+                    // not unrelated mutations (notably on loop exits).
+                    $last=$part->stmts ? $part->stmts[count($part->stmts)-1] : null;
+                    $terminal=$last instanceof PhpParser\Node\Stmt\Return_
+                        || ($last instanceof PhpParser\Node\Stmt\Expression
+                            && ($last->expr instanceof PhpParser\Node\Expr\Throw_
+                                || $last->expr instanceof PhpParser\Node\Expr\Exit_));
+                    // Only straight-line prefixes are proven to reach a direct
+                    // return/throw/exit. Loop transfers with earlier mutations
+                    // need separate loop-exit facts, so remain conservative.
+                    if ($terminal) {
+                        foreach (array_slice($part->stmts,0,-1) as $prefix) {
+                            if (!$prefix instanceof PhpParser\Node\Stmt\Expression
+                                && !$prefix instanceof PhpParser\Node\Stmt\Nop) { $terminal=false; break; }
+                        }
+                    } elseif (count($part->stmts) === 1
+                        && ($last instanceof PhpParser\Node\Stmt\Continue_ || $last instanceof PhpParser\Node\Stmt\Break_)) {
+                        $terminal=$last->num === null || $last->num instanceof PhpParser\Node\Scalar\Int_;
+                    }
+                    if (!$part->elseifs && $part->else === null && $terminal) {
                         $cond=$part->cond;
-                        if ($cond instanceof PhpParser\Node\Expr\BinaryOp\Identical) {
+                        if ($negativeInstanceof !== null
+                            && $negativeInstanceof->expr instanceof PhpParser\Node\Expr\Variable
+                            && is_string($negativeInstanceof->expr->name)) {
+                            $name=$negativeInstanceof->expr->name;
+                            $narrow=qbPhpName($negativeInstanceof->class,$currentClass);
+                            if ($narrow!==null && !isset($referenceTainted[$name])) {
+                                $types[$name]=['className'=>$narrow,'source'=>'native','nullable'=>false];
+                            }
+                        } elseif ($cond instanceof PhpParser\Node\Expr\BinaryOp\Identical) {
                             $left=$cond->left; $right=$cond->right;
                             if ($left instanceof PhpParser\Node\Expr\ConstFetch) { $tmp=$left; $left=$right; $right=$tmp; }
                             if ($left instanceof PhpParser\Node\Expr\Variable && is_string($left->name)
@@ -866,14 +888,6 @@ foreach ($paths as $relative) {
                                 $types[$left->name]=$before[$left->name];
                                 $types[$left->name]['nullable']=false;
                             }
-                        } elseif ($cond instanceof PhpParser\Node\Expr\BooleanNot
-                            && $cond->expr instanceof PhpParser\Node\Expr\Instanceof_
-                            && $cond->expr->expr instanceof PhpParser\Node\Expr\Variable
-                            && is_string($cond->expr->expr->name)) {
-                            $name=$cond->expr->expr->name;
-                            $narrow=qbPhpName($cond->expr->class,$currentClass);
-                            if ($narrow!==null && !isset($referenceTainted[$name]))
-                                $types[$name]=['className'=>$narrow,'source'=>'native','nullable'=>false];
                         }
                     }
                     return;

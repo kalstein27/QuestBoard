@@ -152,6 +152,51 @@ final class WalletHandler {
     $nullable = function () use ($wallet) { $wallet->setBalance(0); }; // d2 nullable
   }
 }
+final class Ticket { public function setUsed(bool $used): void {} }
+final class TicketService { public static function get(int $id, int $ticket): ?Ticket { return null; } }
+final class TicketHandler {
+  public function process(int $id, array $ids): void {
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) { throw new \\RuntimeException('no wallet'); }
+    $wallet->lock(); // e1 throw
+    foreach ($ids as $ticketId) {
+      $ticket = TicketService::get($id, $ticketId);
+      if ($ticket instanceof Ticket === false) { continue; }
+      $ticket->setUsed(true); // e1 continue
+    }
+  }
+  public function returning(int $id): void {
+    $wallet = WalletDAO::find($id);
+    if (false === ($wallet instanceof Wallet)) { return; }
+    $wallet->setBalance(0)->setStep(0); // e1 return chain
+    $job = function () use ($wallet) { $wallet->reset(); }; // e1 return capture
+  }
+  public function breaking(array $ids): void {
+    foreach ($ids as $id) {
+      $wallet = WalletDAO::find($id);
+      if (!($wallet instanceof Wallet)) { break; }
+      $wallet->lock(); // e1 break
+    }
+  }
+  public function exiting(int $id): void {
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) { exit; }
+    $wallet->lock(); // e1 exit
+  }
+  public function conditional(int $id, bool $flag): void {
+    $wallet = WalletDAO::find($id);
+    if ($wallet instanceof Wallet === false) { if ($flag) return; }
+    $job = function () use ($wallet) { $wallet->reset(); }; // e1 conditional capture
+  }
+  public function mutatedBreak(int $id, array $ids): void {
+    $wallet = WalletService::create($id);
+    foreach ($ids as $unused) {
+      if ($wallet instanceof Wallet === false) { $wallet = new OtherClock(); break; }
+      $wallet->lock();
+    }
+    $job = function () use ($wallet) { $wallet->reset(); }; // e1 mutated break capture
+  }
+}
 try {
   Clock::getCurrentTimeStamp(); // file static
   Clock::getInstance()->getTimeStamp(); // file object
@@ -227,6 +272,15 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     check("Wallet", "setBalance", "calls", "// d2 conditional", "", false);
     check("Wallet", "setBalance", "calls", "// d2 conflict", "", false);
     check("Wallet", "setBalance", "calls", "// d2 nullable", "", false);
+    check("Wallet", "lock", "calls", "// e1 throw", "process");
+    check("Ticket", "setUsed", "calls", "// e1 continue", "process");
+    check("Wallet", "setBalance", "calls", "// e1 return chain", "returning");
+    check("Wallet", "setStep", "calls", "// e1 return chain", "returning");
+    check("Wallet", "reset", "calls", "// e1 return capture", "closure@");
+    check("Wallet", "lock", "calls", "// e1 break", "breaking");
+    check("Wallet", "lock", "calls", "// e1 exit", "exiting");
+    check("Wallet", "reset", "calls", "// e1 conditional capture", "", false);
+    check("Wallet", "reset", "calls", "// e1 mutated break capture", "", false);
     assert.deepEqual(failures, []);
     const file = graph.nodes.find(node => node.canonicalIdentity === "file:" + path)!;
     const timestamp = graph.nodes.find(node => node.name === "getTimeStamp" && node.canonicalIdentity.includes("/Clock#"))!;
@@ -237,5 +291,11 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     assert.equal(refs.operation, "relations");
     assert.ok(callers.entries.some(entry => entry.relation.from === file.id));
     assert.ok(refs.entries.some(entry => entry.relation.from === file.id && entry.relation.kind === "reads"));
+    for (const [className, method, marker] of [["Wallet", "lock", "// e1 throw"], ["Ticket", "setUsed", "// e1 continue"]] as const) {
+      const target = graph.nodes.find(node => node.name === method && node.canonicalIdentity.includes("/" + className + "#"))!;
+      const result = queryCodeGraph(graph, "scip-php", { operation: "relations", semantic: "callers", nodeId: target.id });
+      assert.equal(result.operation, "relations");
+      assert.ok(result.entries.some(entry => nodes.get(entry.relation.from)?.name === "process" && entry.relation.evidence?.some(ev => ev.location.path === path && ev.location.startLine === at(marker))));
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
