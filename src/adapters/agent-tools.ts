@@ -92,6 +92,42 @@ import { SourceStructureBindingConflict } from "../application/source-structure-
 
 const CLIENT_ACTIVITY_TYPES = ["note_added", "agent_handoff"] as const satisfies readonly ActivityType[];
 
+// Leave room for MCP's compatibility text and structured representations.
+const AGENT_LIST_MAX_BYTES = 128 * 1024;
+const AGENT_LIST_MAX_LIMIT = 100;
+
+function agentListPage<T>(key: string, rows: readonly T[], args: Record<string, unknown>) {
+  const limit = args.limit === undefined ? 50 : requirePositiveInteger(args, "limit");
+  const offset = args.offset === undefined ? 0 : args.offset;
+  if (limit > AGENT_LIST_MAX_LIMIT) throw new TypeError("limit must be at most 100");
+  if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) {
+    throw new TypeError("offset must be a nonnegative integer");
+  }
+  const selected: T[] = [];
+  let bytes = 0;
+  for (const row of rows.slice(offset, offset + limit)) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), "utf8") + 1;
+    if (bytes + rowBytes > AGENT_LIST_MAX_BYTES) {
+      if (!selected.length) throw new QuestBoardRemoteToolError(
+        "response_too_large", "A single list entry exceeds the response budget. Use view=summary and read individual task details only when needed.");
+      break;
+    }
+    selected.push(row);
+    bytes += rowBytes;
+  }
+  const next = offset + selected.length;
+  return {
+    [key]: selected,
+    page: { offset, limit, total: rows.length, returned: selected.length,
+      nextOffset: next < rows.length ? next : null },
+  };
+}
+
+function compactTitle(title: string) {
+  const points = Array.from(title);
+  return { title: points.slice(0, 256).join(""), ...(points.length > 256 ? { titleTruncated: true } : {}) };
+}
+
 export interface QuestBoardAgentToolDefinition {
   name: string;
   description: string;
@@ -216,13 +252,16 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_list_tasks",
-    description: "List tasks, optionally filtered by project and status.",
+    description: "List tasks filtered by project and status. Prefer view=summary (IDs, titles, status, priority and revision only) for discovery, then questboard_get_task_resume for one task. Large results are paged; follow page.nextOffset until null. Explicit limit (1-100) and offset enable paging.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         projectId: { type: "string", minLength: 1 },
         status: { type: "string", enum: TASK_STATUSES },
+        view: { type: "string", enum: ["summary", "full"] },
+        limit: { type: "integer", minimum: 1, maximum: AGENT_LIST_MAX_LIMIT },
+        offset: { type: "integer", minimum: 0 },
       },
     },
   },
@@ -505,11 +544,25 @@ export const QUESTBOARD_AGENT_TOOLS = [
   },
   {
     name: "questboard_get_investigation_graph",
-    description: "Read the project flow graph: visual Work Groups/memberships, Investigation Nodes, Items, flow/task links, canonical Tasks, and positions.",
+    description: "Read the full project flow graph for small projects only. For large projects use questboard_list_flow_work_groups, then questboard_get_flow_work_group_graph for a specific group; use questboard_list_tasks with view=summary for task discovery.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: { projectId: { type: "string", minLength: 1 } },
+      required: ["projectId"],
+    },
+  },
+  {
+    name: "questboard_list_flow_work_groups",
+    description: "Discover Work Group IDs, titles, parent groups and linked tasks without reading the full project graph. Follow page.nextOffset until null, then query one group with questboard_get_flow_work_group_graph.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        limit: { type: "integer", minimum: 1, maximum: AGENT_LIST_MAX_LIMIT },
+        offset: { type: "integer", minimum: 0 },
+      },
       required: ["projectId"],
     },
   },
@@ -1310,12 +1363,23 @@ export function executeQuestBoardAgentTool(
     case "questboard_list_tasks": {
       const projectId = optionalString(args, "projectId");
       const status = optionalEnum(args, "status", TASK_STATUSES);
-      return {
-        tasks: service.listTasks({
+      const view = optionalEnum(args, "view", ["summary", "full"] as const);
+      const tasks = service.listTasks({
           ...(projectId !== undefined ? { projectId } : {}),
           ...(status !== undefined ? { status } : {}),
-        }),
-      };
+      });
+      if (view === "summary") {
+        return agentListPage("tasks", tasks.map(task => ({
+          id: task.id, projectId: task.projectId, ...compactTitle(task.title),
+          status: task.status, priority: task.priority, revision: task.revision, updatedAt: task.updatedAt,
+        })), args);
+      }
+      // Preserve the legacy response for small unpaged reads. Never send an
+      // unbounded list through agent transports, even when no limit is supplied.
+      if (args.limit === undefined && args.offset === undefined &&
+          tasks.length <= AGENT_LIST_MAX_LIMIT &&
+          Buffer.byteLength(JSON.stringify({ tasks }), "utf8") <= AGENT_LIST_MAX_BYTES) return { tasks };
+      return agentListPage("tasks", tasks, args);
     }
     case "questboard_get_task": {
       const taskId = requireString(args, "taskId");
@@ -1445,6 +1509,11 @@ export function executeQuestBoardAgentTool(
       return { deleted: true };
     case "questboard_get_investigation_graph":
       return service.getInvestigationGraph(requireString(args, "projectId"));
+    case "questboard_list_flow_work_groups":
+      return agentListPage("groups", service.listFlowWorkGroups(requireString(args, "projectId")).map(group => ({
+        id: group.id, ...compactTitle(group.title), parentGroupId: group.parentGroupId,
+        linkedTaskId: group.linkedTaskId, revision: group.revision,
+      })), args);
     case "questboard_get_flow_work_group_graph":
       return service.getFlowWorkGroupGraph(requireString(args, "groupId"));
     case "questboard_create_flow_work_group": {

@@ -124,11 +124,11 @@ export function createQuestBoardMcpHandler(
               const result = executeQuestBoardAgentTool(runtime, name, args);
               if (isPromiseLike(result)) {
                 return result.then(
-                  (resolved) => rpcSuccess(requestId, toolResult(resolved)),
+                  (resolved) => rpcSuccess(requestId, toolResult(resolved, name)),
                   (error) => rpcSuccess(requestId, toolError(describeQuestBoardError(error))),
                 );
               }
-              return rpcSuccess(requestId, toolResult(result));
+              return rpcSuccess(requestId, toolResult(result, name));
             } catch (error) {
               const described = describeQuestBoardError(error);
               return rpcSuccess(requestId, toolError(described));
@@ -242,9 +242,17 @@ function rpcError(id: string | number | null, code: number, message: string, dat
   };
 }
 
-function toolResult(value: unknown): Record<string, unknown> {
+function toolResult(value: unknown, name: string): Record<string, unknown> {
+  const text = JSON.stringify(value);
+  // The full graph is a legacy Web/HTTP surface. Keep small MCP graphs
+  // compatible, but direct large agent reads to bounded discovery tools.
+  if (name === "questboard_get_investigation_graph" &&
+      Buffer.byteLength(text, "utf8") > 128 * 1024) {
+    return toolError({ code: "response_too_large",
+      message: "Full graph exceeds the agent response budget. Use questboard_list_flow_work_groups with projectId, then questboard_get_flow_work_group_graph with groupId. For tasks use questboard_list_tasks with view=summary and follow page.nextOffset." });
+  }
   return {
-    content: [{ type: "text", text: JSON.stringify(value) }],
+    content: [{ type: "text", text }],
     structuredContent: value,
   };
 }
