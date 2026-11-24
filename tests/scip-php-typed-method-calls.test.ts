@@ -277,8 +277,12 @@ test("real PHP AST: cross-file nullable native returns, docblock foreach and sel
     assert.ok(graph.relations.some((edge) => edge.kind === "calls"
       && graph.nodes.find((node) => node.id === edge.from)?.kind === "file"
       && graph.nodes.find((node) => node.id === edge.to)?.name === "reset"), "A2 file top-level call");
-    assert.ok(graph.unresolvedPhpMethodCalls?.some((entry) => entry.name === "setstatus" && entry.count > 0),
-      "A1 closure arrow call must be flagged");
+    // The explicitly typed arrow parameter is a verified call, but its owner
+    // must remain the anonymous arrow scope, never the enclosing method.
+    assert.ok(callOwners(status.id).some((entry) => entry.name?.startsWith("closure@")),
+      "A1 typed arrow call must belong to its anonymous lexical owner");
+    assert.ok(!callOwners(status.id).some((entry) => entry.name === "closureCall"),
+      "A1 arrow call must not leak into the enclosing method");
     for (const excluded of ["skipUnknown", "skipUnion", "skipAfterBranch", "skipAfterLoop"]) {
       assert.ok(!owners.some((entry) => entry.name === excluded), "incorrect inferred call from " + excluded);
     }

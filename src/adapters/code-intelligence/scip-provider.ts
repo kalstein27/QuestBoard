@@ -103,8 +103,10 @@ export interface ScipGraphLoadInput {
   indexedAt: string;
   providerId: string;
   indexArtifactSha256?: string | undefined;
-  /** For scip-php: first-party PHP file paths, not dependency/vendor documents. */
+  /** For scip-php: first-party PHP paths within Composer semantic scope. */
   eligiblePhpPaths?: readonly string[];
+  /** All first-party PHP-shaped files, including out-of-scope templates and scripts. */
+  discoveredPhpPaths?: readonly string[];
 }
 
 export interface ScipGraphLoader {
@@ -193,7 +195,7 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
     : undefined;
   const nativeSet = new Set(nativePaths);
   const syntaxOnlyPaths = input.providerId === "scip-php"
-    ? (input.eligiblePhpPaths ?? []).filter((path) =>
+    ? (input.discoveredPhpPaths ?? input.eligiblePhpPaths ?? []).filter((path) =>
         /^(?:(?:database\/migrations|routes|bootstrap|dev|public)\/).+\.php$/.test(path) && !nativeSet.has(path))
     : [];
   // Keep extra AST source files outside native semantic inference.
@@ -207,6 +209,7 @@ export async function loadScipGraphInProcess(input: ScipGraphLoadInput): Promise
     index,
     sourceTextByPath: readIndexedSourceText(input.request.rootPath, index),
     ...(input.eligiblePhpPaths ? { phpEligibleFilePaths: input.eligiblePhpPaths } : {}),
+    ...(input.discoveredPhpPaths ? { phpDiscoveredFilePaths: input.discoveredPhpPaths } : {}),
     ...(phpLexicalScopes ? { phpLexicalScopes } : {}),
     ...(phpSyntaxOnlyScopes ? { phpSyntaxOnlyScopes } : {}),
     providerId: input.providerId,

@@ -137,6 +137,58 @@ test("SCIP PHP coverage reports all first-party eligible files rather than calli
   }
 });
 
+test("Composer source scope excludes views and translations without hiding native out-of-scope documents or real misses", async () => {
+  const root = mkdtempSync(join(tmpdir(), "questboard-scip-php-composer-scope-"));
+  const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-php-storage-"));
+  try {
+    preparePhpProject(root);
+    writeFileSync(join(root, "composer.json"), JSON.stringify({
+      autoload: { "psr-4": { "App\\": "app/" } },
+      "autoload-dev": { "psr-4": { "Tests\\": "tests/" } },
+      bin: ["bin/cli.php"],
+    }));
+    const samples = new Map([
+      ["app/Controller.php", "<?php class Controller {}"],
+      ["app/Config/settings.php", "<?php return ['enabled' => true];"],
+      ["app/views/panel.blade.php", "{{ $value }}"],
+      ["tests/FeatureTest.php", "<?php class FeatureTest {}"],
+      ["bin/cli.php", "<?php function command() {}"],
+      ["database/migrations/2026_create.php", "<?php return new class {};"],
+      ["routes/api.php", "<?php function routeHandler() {}"],
+      ["lang/en/messages.php", "<?php return ['ok' => 'Okay'];"],
+      ["resources/views/page.blade.php", "{{ $value }}"],
+    ]);
+    for (const [path, contents] of samples) {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), contents);
+    }
+    const index = phpIndex();
+    index.documents.push({ relativePath: "app/Controller.php", language: "php", symbols: [], occurrences: [] });
+    index.documents.push({ relativePath: "vendor/external.php", language: "php", symbols: [], occurrences: [] });
+    const runner = new FakeRunner(({ cwd }) => writeFileSync(join(cwd, "index.scip"), "fixture"));
+    const provider = new ScipPhpProvider(runner, { storageRoot, indexReader: new FakeIndexReader(index) });
+    const graph = await provider.indexProject({ projectId: "composer-scope", rootPath: root });
+    const php = graph.coverage?.languages.find((entry) => entry.language === "php");
+    assert.equal(php?.fileCount, 10, "all first-party PHP files remain discoverable");
+    assert.equal(php?.semanticEligibleFileCount, 5,
+      "Composer app/tests/bin plus a genuine native document outside those roots");
+    assert.equal(php?.semanticIndexedFileCount, 2, "vendor-native PHP is not a first-party success");
+    assert.equal(php?.semanticExcludedFileCount, 5,
+      "Blade inside a PSR-4 root and out-of-scope translation/migration/route remain file-only");
+    assert.equal(php?.semanticExclusionReason, "provider_project_scope");
+    writeFileSync(join(root, "composer.json"), JSON.stringify({
+      autoload: { classmap: ["app/*/src"] },
+    }));
+    const uncertainGraph = await provider.indexProject({ projectId: "composer-wildcard", rootPath: root });
+    const uncertainPhp = uncertainGraph.coverage?.languages.find((entry) => entry.language === "php");
+    assert.equal(uncertainPhp?.semanticEligibleFileCount, 8,
+      "unknown Composer patterns must retain every non-template PHP file as eligible");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
+});
+
 test("SCIP PHP refuses to overwrite a pre-existing project index.scip", async () => {
   const root = mkdtempSync(join(tmpdir(), "questboard-scip-php-existing-"));
   const storageRoot = mkdtempSync(join(tmpdir(), "questboard-scip-php-storage-"));

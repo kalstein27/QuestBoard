@@ -94,8 +94,14 @@ function qbPhpAliases(array $statements): array {
     return $aliases;
 }
 $methodReturns = [];
+$methodNullableReturns = [];
 $methodArrayElements = [];
 $propertyTypes = [];
+$propertyNullableTypes = [];
+$functionByRefArgs = [];
+$methodByRefArgs = [];
+$classParents = [];
+$fileStaticReturns = [];
 foreach ($paths as $relative) {
     $parsedFile = qbPhpParsedFile($root, $relative, $parser);
     if ($parsedFile === null) continue;
@@ -107,9 +113,26 @@ foreach ($paths as $relative) {
             ? ($namespaceNode->name?->toString() ?? '') : '';
         $aliases = qbPhpAliases($statements);
         foreach ($statements as $declaration) {
+            if ($declaration instanceof PhpParser\Node\Stmt\Function_) {
+                $qualified = $declaration->namespacedName ?? $declaration->getAttribute('namespacedName');
+                $functionName = $qualified instanceof PhpParser\Node\Name
+                    ? $qualified->toString()
+                    : ($namespace === '' ? '' : $namespace . '\\') . $declaration->name->toString();
+                $key = strtolower($functionName);
+                $byRef = [];
+                foreach ($declaration->getParams() as $position => $parameter) {
+                    if ($parameter->byRef && $parameter->var instanceof PhpParser\Node\Expr\Variable
+                        && is_string($parameter->var->name))
+                        $byRef[] = ['position'=>$position, 'name'=>$parameter->var->name];
+                }
+                $functionByRefArgs[$key] = array_key_exists($key,$functionByRefArgs) ? null : $byRef;
+            }
             if (!$declaration instanceof PhpParser\Node\Stmt\ClassLike || $declaration->name === null) continue;
             $qualified = $declaration->namespacedName ?? $declaration->getAttribute('namespacedName');
             $class = $qualified instanceof PhpParser\Node\Name ? $qualified->toString() : $declaration->name->toString();
+            if ($declaration instanceof PhpParser\Node\Stmt\Class_
+                && $declaration->extends instanceof PhpParser\Node\Name)
+                $classParents[strtolower($class)] = $declaration->extends->toString();
             foreach ($declaration->stmts as $member) {
                 if (!$member instanceof PhpParser\Node\Stmt\Property) continue;
                 $propertyType = qbPhpName($member->type, $class);
@@ -117,11 +140,34 @@ foreach ($paths as $relative) {
                     $key = strtolower($class . '::' . $property->name->toString());
                     $propertyTypes[$key] = array_key_exists($key, $propertyTypes)
                         ? null : $propertyType;
+                    $propertyNullableTypes[$key] = array_key_exists($key, $propertyNullableTypes)
+                        || $member->type instanceof PhpParser\Node\NullableType;
                 }
             }
             foreach ($declaration->getMethods() as $method) {
                 $key = strtolower($class . '::' . $method->name->toString());
+                $byRef = [];
+                foreach ($method->getParams() as $position => $parameter) {
+                    if ($parameter->byRef && $parameter->var instanceof PhpParser\Node\Expr\Variable
+                        && is_string($parameter->var->name))
+                        $byRef[] = ['position'=>$position, 'name'=>$parameter->var->name];
+                }
+                $methodByRefArgs[$key] = array_key_exists($key,$methodByRefArgs) ? null : $byRef;
                 $return = qbPhpName($method->returnType, $class);
+                // Keep the existing A2 method-return narrowing, but remember
+                // nullability separately so a closure cannot treat ?T as T.
+                $methodNullableReturns[$key] = array_key_exists($key, $methodReturns)
+                    || $method->returnType instanceof PhpParser\Node\NullableType;
+                // File-level X::factory()->method() may use only one native,
+                // non-nullable, non-union return class from a static method.
+                // Late static binding and duplicate signatures are ambiguous.
+                $fileReturn = $method->isStatic() && $method->isPublic() && !$method->isAbstract()
+                    && $method->returnType instanceof PhpParser\Node\Name
+                    && strtolower($method->returnType->toString()) !== 'static'
+                    && strtolower($method->returnType->toString()) !== 'parent'
+                    ? $return : null;
+                $fileStaticReturns[$key] = array_key_exists($key, $fileStaticReturns)
+                    ? null : $fileReturn;
                 // Docblock arrays are accepted only for an array or absent native return type.
                 $nativeArray = $method->returnType instanceof PhpParser\Node\Identifier
                     && strtolower($method->returnType->toString()) === 'array';
@@ -169,17 +215,24 @@ foreach ($paths as $relative) {
     while (($offset = strpos($source, "\n", $offset + 1)) !== false) {
         $lineStarts[] = $offset + 1;
     }
-    $visitor = new class($source, $lineStarts, $methodReturns, $methodArrayElements, $propertyTypes) extends PhpParser\NodeVisitorAbstract {
+    $visitor = new class($source, $lineStarts, $methodReturns, $methodNullableReturns, $methodArrayElements, $propertyTypes, $propertyNullableTypes, $functionByRefArgs, $methodByRefArgs, $classParents, $fileStaticReturns) extends PhpParser\NodeVisitorAbstract {
         public array $scopes = [];
         public int $callCount = 0;
         public int $unresolvedCount = 0;
         private array $classStack = [];
+        // AST-node-local snapshots: never promote a closure's captured types
+        // into its enclosing method or a sibling anonymous function.
+        private array $closureCaptures = [];
         private string $namespace = '';
         private array $aliases = [];
         public function __construct(
             private readonly string $source, private readonly array $lineStarts,
-            private readonly array $methodReturns, private readonly array $methodArrayElements,
-            private readonly array $propertyTypes,
+            private readonly array $methodReturns, private readonly array $methodNullableReturns,
+            private readonly array $methodArrayElements,
+            private readonly array $propertyTypes, private readonly array $propertyNullableTypes,
+            private readonly array $functionByRefArgs, private readonly array $methodByRefArgs,
+            private readonly array $classParents,
+            private readonly array $fileStaticReturns,
         ) {}
 
         private function range(PhpParser\Node $node): ?array {
@@ -207,6 +260,15 @@ foreach ($paths as $relative) {
             // source columns. Non-ASCII offsets are excluded, never guessed.
             if (preg_match('/[^\\x00-\\x7F]/', $prefix) === 1) return null;
             return [$line - 1, strlen($prefix)];
+        }
+
+        private function initializerRange(?PhpParser\Node\Expr $value, array $nameRange): ?array {
+            if ($value === null || ($range = $this->range($value)) === null) return null;
+            // Keep only the expression owned by this member. In particular, a
+            // multi-constant/property statement must not own the next member.
+            if ($range[0] < $nameRange[2]
+                || ($range[0] === $nameRange[2] && $range[1] < $nameRange[3])) return null;
+            return $range;
         }
 
 
@@ -255,7 +317,9 @@ foreach ($paths as $relative) {
                 $type = $this->resolvedType($member->type);
                 foreach ($member->props as $prop) {
                     if (($range = $this->range($prop->name)) !== null) {
-                        $propertyDefinitions[] = ['name'=>$prop->name->toString(), 'nameRange'=>$range];
+                        $valueRange = $this->initializerRange($prop->default, $range);
+                        $propertyDefinitions[] = ['name'=>$prop->name->toString(), 'nameRange'=>$range,
+                            ...($valueRange === null ? [] : ['valueRange'=>$valueRange])];
                     }
                     if ($type !== null) $properties[$prop->name->toString()] = $type;
                 }
@@ -264,15 +328,19 @@ foreach ($paths as $relative) {
                 if ($member instanceof PhpParser\Node\Stmt\ClassConst) {
                     foreach ($member->consts as $const) {
                         if (($range = $this->range($const->name)) !== null) {
+                            $valueRange = $this->initializerRange($const->value, $range);
                             $constantDefinitions[] = [
                                 'name'=>$const->name->toString(), 'nameRange'=>$range, 'kind'=>'constant',
+                                ...($valueRange === null ? [] : ['valueRange'=>$valueRange]),
                             ];
                         }
                     }
                 } elseif ($member instanceof PhpParser\Node\Stmt\EnumCase) {
                     if (($range = $this->range($member->name)) !== null) {
+                        $valueRange = $this->initializerRange($member->expr, $range);
                         $constantDefinitions[] = [
                             'name'=>$member->name->toString(), 'nameRange'=>$range, 'kind'=>'enum_case',
+                            ...($valueRange === null ? [] : ['valueRange'=>$valueRange]),
                         ];
                     }
                 }
@@ -300,23 +368,52 @@ foreach ($paths as $relative) {
 
         private function methodCalls(PhpParser\Node $function, array $properties): array {
             $known = []; $arrayTypes = []; $calls = []; $unresolved = []; $propertyAccesses = [];
+            // Reference aliases outlive assignments. Once an alias exists,
+            // reassigning either name does not prove a stable receiver type.
+            $referenceTainted = [];
+            if ($function instanceof PhpParser\Node\Expr\Closure) {
+                $known = $this->closureCaptures[spl_object_id($function)] ?? [];
+                unset($this->closureCaptures[spl_object_id($function)]);
+            }
             $doc = $function->getDocComment()?->getText();
             if ($doc) {
                 preg_match_all('/@param\\s+([^\\r\\n$]{1,160}?)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)/i', $doc, $paramMatches, PREG_SET_ORDER);
                 foreach ($paramMatches as $match) {
                     $type = qbPhpDocArray('/** @return ' . $match[1] . ' */', 'return', $this->namespace, $this->aliases);
-                    if ($type !== null) $arrayTypes[$match[2]] = $type;
+                    // An array-or-null annotation cannot prove that indexing
+                    // will yield a single receiver. Element unions/shapes
+                    // already fail closed in qbPhpDocArray().
+                    if ($type !== null && !preg_match('/\|\s*null\b/i', $match[1]))
+                        $arrayTypes[$match[2]] = $type;
                 }
             }
             $currentClass = $this->classStack ? ($this->classStack[count($this->classStack)-1]['class'] ?? null) : null;
+            $arrayParams = [];
             foreach ($function->getParams() as $param) {
                 $name = $param->var instanceof PhpParser\Node\Expr\Variable ? $param->var->name : null;
                 $type = $this->resolvedType($param->type);
-                if (is_string($name) && $type !== null) $known[$name] = ['className'=>$type, 'source'=>'native'];
+                if (is_string($name) && $type !== null) $known[$name] = [
+                    'className'=>$type, 'source'=>'native',
+                    'nullable'=>$param->type instanceof PhpParser\Node\NullableType,
+                ];
+                if (is_string($name)) $arrayParams[$name] = true;
+                // An array-element docblock must not contradict a native
+                // scalar/object/nullable/union parameter declaration.
+                if (is_string($name) && isset($arrayTypes[$name])
+                    && $param->type !== null
+                    && !($param->type instanceof PhpParser\Node\Identifier
+                        && strtolower($param->type->toString()) === 'array'))
+                    unset($arrayTypes[$name]);
+            }
+            // A @param tag alone cannot introduce a phantom local variable.
+            foreach (array_keys($arrayTypes) as $name) {
+                if (!isset($arrayParams[$name])) unset($arrayTypes[$name]);
             }
             $key = static fn(string $class, string $name): string => strtolower(ltrim($class, '\\').'::'.$name);
-            $infer = function($expr, array $known) use (&$infer, $properties, $currentClass, $key): ?array {
+            $infer = function($expr, array $known) use (&$infer, $properties, $currentClass, $key, &$referenceTainted): ?array {
+                if ($expr instanceof PhpParser\Node\Expr\CallLike && $expr->isFirstClassCallable()) return null;
                 if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name)) {
+                    if (isset($referenceTainted[$expr->name])) return null;
                     return $expr->name === 'this' && $currentClass !== null
                         ? ['className'=>$currentClass,'source'=>'native'] : ($known[$expr->name] ?? null);
                 }
@@ -327,11 +424,13 @@ foreach ($paths as $relative) {
                 if ($expr instanceof PhpParser\Node\Expr\Clone_) return $infer($expr->expr,$known);
                 if ($expr instanceof PhpParser\Node\Expr\BinaryOp\Coalesce) {
                     $left=$infer($expr->left,$known); $right=$infer($expr->right,$known);
+                    if ($left !== null && !($left['nullable'] ?? false)) return $left;
                     return $left !== null && $right !== null
                         && strcasecmp($left['className'],$right['className']) === 0
                         ? ['className'=>$left['className'],
                             'source'=>$left['source'] === 'docblock' || $right['source'] === 'docblock'
-                                ? 'docblock' : 'native'] : null;
+                                ? 'docblock' : 'native',
+                            'nullable'=>$right['nullable'] ?? false] : null;
                 }
                 if ($expr instanceof PhpParser\Node\Expr\Ternary) {
                     $left=$infer($expr->if ?? $expr->cond,$known); $right=$infer($expr->else,$known);
@@ -339,41 +438,52 @@ foreach ($paths as $relative) {
                         && strcasecmp($left['className'],$right['className']) === 0
                         ? ['className'=>$left['className'],
                             'source'=>$left['source'] === 'docblock' || $right['source'] === 'docblock'
-                                ? 'docblock' : 'native'] : null;
+                                ? 'docblock' : 'native',
+                            'nullable'=>($left['nullable'] ?? false) || ($right['nullable'] ?? false)] : null;
                 }
                 if ($expr instanceof PhpParser\Node\Expr\PropertyFetch
                     && $expr->var instanceof PhpParser\Node\Expr\Variable && $expr->var->name === 'this'
                     && $expr->name instanceof PhpParser\Node\Identifier) {
                     $type = $properties[$expr->name->toString()] ?? null;
-                    return $type === null ? null : ['className'=>$type,'source'=>'native'];
+                    return $type === null ? null : ['className'=>$type,'source'=>'native',
+                        'nullable'=>$currentClass !== null
+                            && ($this->propertyNullableTypes[$key($currentClass,$expr->name->toString())] ?? false)];
                 }
                 if (($expr instanceof PhpParser\Node\Expr\PropertyFetch
                     || $expr instanceof PhpParser\Node\Expr\NullsafePropertyFetch)
                     && $expr->name instanceof PhpParser\Node\Identifier) {
                     $receiver=$infer($expr->var,$known);
-                    $type=$receiver === null ? null
-                        : ($this->propertyTypes[$key($receiver['className'],$expr->name->toString())] ?? null);
+                    $propertyKey = $receiver === null ? null : $key($receiver['className'],$expr->name->toString());
+                    $type=$propertyKey === null ? null : ($this->propertyTypes[$propertyKey] ?? null);
                     return $type === null ? null
-                        : ['className'=>$type,'source'=>$receiver['source']];
+                        : ['className'=>$type,'source'=>$receiver['source'],
+                            'nullable'=>($receiver['nullable'] ?? false)
+                                || ($this->propertyNullableTypes[$propertyKey] ?? false)];
                 }
                 if ($expr instanceof PhpParser\Node\Expr\StaticCall
                     && $expr->name instanceof PhpParser\Node\Identifier) {
                     $class = qbPhpName($expr->class,$currentClass);
-                    $type = $class === null ? null : ($this->methodReturns[$key($class,$expr->name->toString())] ?? null);
-                    return $type === null ? null : ['className'=>$type,'source'=>'native'];
+                    $methodKey = $class === null ? null : $key($class,$expr->name->toString());
+                    $type = $methodKey === null ? null : ($this->methodReturns[$methodKey] ?? null);
+                    return $type === null ? null : ['className'=>$type,'source'=>'native',
+                        'nullable'=>$this->methodNullableReturns[$methodKey] ?? false];
                 }
                 if (($expr instanceof PhpParser\Node\Expr\MethodCall
                     || $expr instanceof PhpParser\Node\Expr\NullsafeMethodCall)
                     && $expr->name instanceof PhpParser\Node\Identifier) {
                     $receiver = $infer($expr->var,$known);
-                    $type = $receiver === null ? null
-                        : ($this->methodReturns[$key($receiver['className'],$expr->name->toString())] ?? null);
-                    return $type === null ? null : ['className'=>$type,'source'=>$receiver['source']];
+                    $methodKey = $receiver === null ? null : $key($receiver['className'],$expr->name->toString());
+                    $type = $methodKey === null ? null : ($this->methodReturns[$methodKey] ?? null);
+                    return $type === null ? null : ['className'=>$type,'source'=>$receiver['source'],
+                        'nullable'=>($receiver['nullable'] ?? false)
+                            || ($this->methodNullableReturns[$methodKey] ?? false)];
                 }
                 return null;
             };
-            $inferArray = function($expr,array $known,array $arrays) use (&$inferArray,$infer,$key,$currentClass): ?string {
-                if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name)) return $arrays[$expr->name] ?? null;
+            $inferArray = function($expr,array $known,array $arrays) use (&$inferArray,$infer,$key,$currentClass,&$referenceTainted): ?string {
+                if ($expr instanceof PhpParser\Node\Expr\CallLike && $expr->isFirstClassCallable()) return null;
+                if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name))
+                    return isset($referenceTainted[$expr->name]) ? null : ($arrays[$expr->name] ?? null);
                 if ($expr instanceof PhpParser\Node\Expr\ArrayDimFetch) {
                     $element=$inferArray($expr->var,$known,$arrays);
                     return $element !== null && str_ends_with($element,'[]')
@@ -397,22 +507,166 @@ foreach ($paths as $relative) {
                 }
                 return null;
             };
-            $modified = function($part,array &$names) use (&$modified): void {
-                if (is_array($part)) { foreach ($part as $entry) $modified($entry,$names); return; }
+            $arrayElementReceiver = function($expr, array $types, array $arrays) use ($inferArray): ?array {
+                if (!$expr instanceof PhpParser\Node\Expr\ArrayDimFetch) return null;
+                // An ordinary variable index is valid with a proven
+                // homogeneous array element type. Arbitrary index
+                // expressions, append syntax and dynamic array bases are not.
+                for ($part = $expr; $part instanceof PhpParser\Node\Expr\ArrayDimFetch; $part = $part->var) {
+                    if ($part->dim === null
+                        || !($part->dim instanceof PhpParser\Node\Expr\Variable
+                            && is_string($part->dim->name))
+                        && !$part->dim instanceof PhpParser\Node\Scalar\Int_
+                        && !$part->dim instanceof PhpParser\Node\Scalar\String_) return null;
+                }
+                if (!$part instanceof PhpParser\Node\Expr\Variable
+                    || !is_string($part->name)) return null;
+                $element = $inferArray($expr->var, $types, $arrays);
+                if ($element === null || str_ends_with($element, '[]')
+                    || !preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*$/D', $element))
+                    return null;
+                return ['className'=>$element,'source'=>'docblock'];
+            };
+            // These builtins can replace or add elements through an array
+            // argument. They invalidate homogeneous element-type evidence.
+            $arrayMutationTargets = function($part, array $types = []) use ($infer,$currentClass,$key): array {
+                $byRef = [];
+                if ($part instanceof PhpParser\Node\Expr\FuncCall
+                    && $part->name instanceof PhpParser\Node\Name) {
+                    $name = strtolower(ltrim($part->name->toString(), '\\'));
+                    $byRef = in_array($name,
+                        ['array_push', 'array_unshift', 'array_splice', 'array_walk', 'array_walk_recursive'], true)
+                        ? [['position'=>0,'name'=>'array']] : null;
+                    if ($byRef === null) {
+                        $qualified = $part->name instanceof PhpParser\Node\Name\FullyQualified
+                            ? $name : ($this->namespace === '' ? $name : strtolower($this->namespace) . '\\' . $name);
+                        $byRef = $this->functionByRefArgs[$qualified] ?? $this->functionByRefArgs[$name] ?? [];
+                    }
+                } elseif (($part instanceof PhpParser\Node\Expr\MethodCall
+                    || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
+                    && $part->name instanceof PhpParser\Node\Identifier) {
+                    $receiver = $infer($part->var, $types);
+                    $class = $receiver['className'] ?? null;
+                } elseif ($part instanceof PhpParser\Node\Expr\StaticCall
+                    && $part->name instanceof PhpParser\Node\Identifier) {
+                    $class = qbPhpName($part->class,$currentClass);
+                } else return [];
+                if (isset($class) && $class !== null) {
+                    // A child may inherit an implementation with by-reference
+                    // parameters. A declared override takes precedence.
+                    for ($depth = 0; $depth < 24; $depth++) {
+                        $signature = $key($class,$part->name->toString());
+                        if (array_key_exists($signature,$this->methodByRefArgs)) {
+                            $byRef = $this->methodByRefArgs[$signature] ?? [];
+                            break;
+                        }
+                        $class = $this->classParents[strtolower(ltrim($class,'\\'))] ?? null;
+                        if ($class === null) break;
+                    }
+                }
+                $names = [];
+                foreach ($part->args as $index => $arg) {
+                    if (!$arg instanceof PhpParser\Node\Arg
+                        || !$arg->value instanceof PhpParser\Node\Expr\Variable
+                        || !is_string($arg->value->name)) continue;
+                    foreach ($byRef as $parameter) {
+                        if ($arg->name !== null
+                            ? strcasecmp($arg->name->toString(), $parameter['name']) !== 0
+                            : $index !== $parameter['position']) continue;
+                        $names[] = $arg->value->name;
+                    }
+                }
+                return array_values(array_unique($names));
+            };
+            $modified = function($part,array &$names,array $types = []) use (&$modified,$arrayMutationTargets): void {
+                if (is_array($part)) { foreach ($part as $entry) $modified($entry,$names,$types); return; }
                 if (!$part instanceof PhpParser\Node || $part instanceof PhpParser\Node\FunctionLike
                     || $part instanceof PhpParser\Node\Stmt\ClassLike) return;
+                foreach ($arrayMutationTargets($part,$types) as $name) $names[$name] = true;
+                if ($part instanceof PhpParser\Node\Expr\AssignRef) {
+                    foreach ([$part->var,$part->expr] as $value)
+                        if ($value instanceof PhpParser\Node\Expr\Variable && is_string($value->name))
+                            $names[$value->name] = true;
+                }
+                if ($part instanceof PhpParser\Node\Stmt\Unset_) {
+                    foreach ($part->vars as $value) {
+                        while ($value instanceof PhpParser\Node\Expr\ArrayDimFetch) $value=$value->var;
+                        if ($value instanceof PhpParser\Node\Expr\Variable && is_string($value->name))
+                            $names[$value->name] = true;
+                    }
+                }
                 if (($part instanceof PhpParser\Node\Expr\Assign || $part instanceof PhpParser\Node\Expr\AssignOp)
                     && $part->var instanceof PhpParser\Node\Expr\Variable && is_string($part->var->name)) $names[$part->var->name]=true;
+                if (($part instanceof PhpParser\Node\Expr\Assign || $part instanceof PhpParser\Node\Expr\AssignOp)
+                    && $part->var instanceof PhpParser\Node\Expr\ArrayDimFetch) {
+                    $base = $part->var;
+                    while ($base instanceof PhpParser\Node\Expr\ArrayDimFetch) $base = $base->var;
+                    if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name))
+                        $names[$base->name] = true;
+                }
                 if ($part instanceof PhpParser\Node\Stmt\Foreach_) {
                     foreach ([$part->valueVar,$part->keyVar] as $bound)
                         if ($bound instanceof PhpParser\Node\Expr\Variable && is_string($bound->name)) $names[$bound->name]=true;
+                    if ($part->byRef) {
+                        $base=$part->expr;
+                        while ($base instanceof PhpParser\Node\Expr\ArrayDimFetch) $base=$base->var;
+                        if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name))
+                            $names[$base->name]=true;
+                    }
                 }
-                foreach ($part->getSubNodeNames() as $field) $modified($part->$field,$names);
+                foreach ($part->getSubNodeNames() as $field) $modified($part->$field,$names,$types);
             };
-            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$modified,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function): void {
+            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$arrayElementReceiver,$arrayMutationTargets,$modified,&$referenceTainted,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry,$types,$arrays); return; }
+                if ($part instanceof PhpParser\Node\Expr\Closure) {
+                    $captured = [];
+                    $changed = [];
+                    $modified($part->stmts,$changed,$types);
+                    foreach ($part->uses as $use) {
+                        $name = $use->var instanceof PhpParser\Node\Expr\Variable ? $use->var->name : null;
+                        if ($use->byRef && is_string($name)) {
+                            // A by-ref capture that can write this variable
+                            // can mutate it after a later assignment. Merely
+                            // observing an object through a reference does not
+                            // invalidate a subsequent by-value capture.
+                            if (isset($changed[$name])) {
+                                $referenceTainted[$name] = true;
+                                unset($types[$name],$arrays[$name]);
+                            }
+                            continue;
+                        }
+                        if (!$use->byRef && is_string($name) && !isset($referenceTainted[$name])
+                            && isset($types[$name]) && !($types[$name]['nullable'] ?? false))
+                            $captured[$name] = $types[$name];
+                    }
+                    $this->closureCaptures[spl_object_id($part)] = $captured;
+                    return;
+                }
                 if (!$part instanceof PhpParser\Node || $part instanceof PhpParser\Node\FunctionLike
                     || $part instanceof PhpParser\Node\Stmt\ClassLike) return;
+                if ($part instanceof PhpParser\Node\Expr\FuncCall) {
+                    foreach ($part->getSubNodeNames() as $field) $walk($part->$field,$types,$arrays);
+                    foreach ($arrayMutationTargets($part,$types) as $name) unset($arrays[$name]);
+                    return;
+                }
+                if ($part instanceof PhpParser\Node\Expr\AssignRef) {
+                    $walk($part->expr,$types,$arrays);
+                    // Both roots can be mutated through the other alias even
+                    // after a later assignment or a flow-branch join.
+                    foreach ([$part->var,$part->expr] as $value) {
+                        while ($value instanceof PhpParser\Node\Expr\ArrayDimFetch) $value=$value->var;
+                        if ($value instanceof PhpParser\Node\Expr\Variable && is_string($value->name)) {
+                            $referenceTainted[$value->name] = true;
+                            unset($arrays[$value->name],$types[$value->name]);
+                        }
+                    }
+                    return;
+                }
+                if ($part instanceof PhpParser\Node\Stmt\Unset_) {
+                    $changed=[]; $modified($part,$changed,$types);
+                    foreach ($changed as $name=>$_) unset($types[$name],$arrays[$name]);
+                    return;
+                }
                 if ($part instanceof PhpParser\Node\Stmt\Expression && $part->expr instanceof PhpParser\Node\Expr\Assign) {
                     $walk($part->expr,$types,$arrays);
                     $name = $part->expr->var instanceof PhpParser\Node\Expr\Variable ? $part->expr->var->name : null;
@@ -431,6 +685,15 @@ foreach ($paths as $relative) {
                     return;
                 }
                 if ($part instanceof PhpParser\Node\Expr\Assign) {
+                    if ($part->var instanceof PhpParser\Node\Expr\ArrayDimFetch) {
+                        $walk($part->expr,$types,$arrays);
+                        $walk($part->var,$types,$arrays);
+                        $base=$part->var;
+                        while ($base instanceof PhpParser\Node\Expr\ArrayDimFetch) $base=$base->var;
+                        if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name))
+                            unset($arrays[$base->name]);
+                        return;
+                    }
                     if ($part->var instanceof PhpParser\Node\Expr\PropertyFetch
                         && $part->var->name instanceof PhpParser\Node\Identifier) {
                         $receiver = $infer($part->var->var, $types);
@@ -467,7 +730,7 @@ foreach ($paths as $relative) {
                 }
                 if ($part instanceof PhpParser\Node\Stmt\If_) {
                     $walk($part->cond,$types,$arrays);
-                    $before=$types; $beforeArrays=$arrays;
+                    $before=$types; $beforeArrays=$arrays; $beforeTaint=$referenceTainted;
                     $then=$before; $thenArrays=$beforeArrays;
                     if ($part->cond instanceof PhpParser\Node\Expr\Instanceof_
                         && $part->cond->expr instanceof PhpParser\Node\Expr\Variable
@@ -476,20 +739,26 @@ foreach ($paths as $relative) {
                         if ($narrow!==null) $then[$part->cond->expr->name]=['className'=>$narrow,'source'=>'native'];
                     }
                     $walk($part->stmts,$then,$thenArrays);
-                    $branches=[$then]; $arrayBranches=[$thenArrays];
+                    $branches=[$then]; $arrayBranches=[$thenArrays]; $taintBranches=[$referenceTainted];
                     foreach ($part->elseifs as $arm) {
                         $tmp=$before; $tmpArrays=$beforeArrays;
+                        $referenceTainted=$beforeTaint;
                         $walk($arm,$tmp,$tmpArrays);
                         $branches[]=$tmp; $arrayBranches[]=$tmpArrays;
+                        $taintBranches[]=$referenceTainted;
                     }
                     if ($part->else!==null) {
                         $tmp=$before; $tmpArrays=$beforeArrays;
+                        $referenceTainted=$beforeTaint;
                         $walk($part->else,$tmp,$tmpArrays);
                         $branches[]=$tmp; $arrayBranches[]=$tmpArrays;
+                        $taintBranches[]=$referenceTainted;
                     } else {
                         $branches[]=$before; $arrayBranches[]=$beforeArrays;
+                        $taintBranches[]=$beforeTaint;
                     }
-                    $changed=[]; $modified($part,$changed);
+                    $referenceTainted=$beforeTaint;
+                    $changed=[]; $modified($part,$changed,$before);
                     foreach ($changed as $name=>$_) {
                         $candidate=$branches[0][$name] ?? null;
                         foreach ($branches as $branch) {
@@ -499,15 +768,22 @@ foreach ($paths as $relative) {
                                 $candidate=null; break;
                             }
                             if ($other['source']==='docblock') $candidate['source']='docblock';
+                            if ($other['nullable'] ?? false) $candidate['nullable']=true;
                         }
                         if ($candidate!==null) $types[$name]=$candidate; else unset($types[$name]);
-                        $item=$arrayBranches[0][$name] ?? null;
-                        foreach ($arrayBranches as $branch) {
-                            if ($item===null || !isset($branch[$name])
-                                || strcasecmp($item,$branch[$name]) !== 0) { $item=null; break; }
-                        }
-                        if ($item!==null) $arrays[$name]=$item; else unset($arrays[$name]);
                     }
+                    // Join array element evidence once, including mutations
+                    // through receivers first created inside a branch.
+                    foreach (array_unique([...array_keys($changed), ...array_keys($beforeArrays)]) as $name) {
+                        $element=$arrayBranches[0][$name] ?? null;
+                        foreach ($arrayBranches as $branch) {
+                            if ($element===null || !isset($branch[$name])
+                                || strcasecmp($branch[$name],$element) !== 0) { $element=null; break; }
+                        }
+                        if ($element!==null) $arrays[$name]=$element; else unset($arrays[$name]);
+                    }
+                    foreach ($taintBranches as $tainted) $referenceTainted += $tainted;
+                    foreach ($referenceTainted as $name=>$_) unset($types[$name],$arrays[$name]);
                     return;
                 }
                 if ($part instanceof PhpParser\Node\Stmt\Foreach_) {
@@ -527,8 +803,11 @@ foreach ($paths as $relative) {
                     }
                     if ($part->keyVar instanceof PhpParser\Node\Expr\Variable && is_string($part->keyVar->name))
                         unset($tmp[$part->keyVar->name],$tmpArrays[$part->keyVar->name]);
+                    if ($part->byRef && $part->expr instanceof PhpParser\Node\Expr\Variable
+                        && is_string($part->expr->name))
+                        unset($tmpArrays[$part->expr->name]);
                     $walk($part->stmts,$tmp,$tmpArrays);
-                    $changed=[]; $modified($part,$changed);
+                    $changed=[]; $modified($part,$changed,$types);
                     foreach ($changed as $name=>$_) {
                         if (!isset($types[$name],$tmp[$name])
                             || strcasecmp($types[$name]['className'],$tmp[$name]['className']) !== 0) {
@@ -537,14 +816,93 @@ foreach ($paths as $relative) {
                         if (!isset($arrays[$name],$tmpArrays[$name])
                             || strcasecmp($arrays[$name],$tmpArrays[$name]) !== 0) unset($arrays[$name]);
                     }
+                    if ($part->byRef && $part->expr instanceof PhpParser\Node\Expr\Variable
+                        && is_string($part->expr->name)) unset($arrays[$part->expr->name]);
+                    return;
+                }
+                if ($part instanceof PhpParser\Node\Stmt\TryCatch) {
+                    // Catch may execute before any assignment inside try.
+                    // Re-analyze every arm from the pre-try facts, and discard
+                    // facts touched anywhere before continuing after try.
+                    $beforeTaint=$referenceTainted;
+                    $tryTypes=$types; $tryArrays=$arrays;
+                    foreach ($part->stmts as $stmt) {
+                        $walk($stmt,$tryTypes,$tryArrays);
+                        // An unconditional throw makes later try statements
+                        // unreachable, including reference aliases.
+                        if ($stmt instanceof PhpParser\Node\Stmt\Expression
+                            && $stmt->expr instanceof PhpParser\Node\Expr\Throw_) break;
+                    }
+                    $taintArms=[$referenceTainted];
+                    foreach ($part->catches as $catch) {
+                        $catchTypes=$types; $catchArrays=$arrays;
+                        $referenceTainted=$taintArms[0];
+                        $walk($catch,$catchTypes,$catchArrays);
+                        $taintArms[]=$referenceTainted;
+                    }
+                    if ($part->finally !== null) {
+                        $finallyTypes=$types; $finallyArrays=$arrays;
+                        $referenceTainted=$beforeTaint;
+                        foreach ($taintArms as $taint) $referenceTainted += $taint;
+                        $walk($part->finally,$finallyTypes,$finallyArrays);
+                        $taintArms[]=$referenceTainted;
+                    }
+                    $referenceTainted=$beforeTaint;
+                    foreach ($taintArms as $taint) $referenceTainted += $taint;
+                    $changed=[]; $modified($part,$changed,$types);
+                    foreach ($changed as $name=>$_) unset($types[$name],$arrays[$name]);
+                    foreach ($referenceTainted as $name=>$_) unset($types[$name],$arrays[$name]);
+                    return;
+                }
+                if ($part instanceof PhpParser\Node\Stmt\Switch_) {
+                    $walk($part->cond,$types,$arrays);
+                    $beforeTypes=$types; $beforeArrays=$arrays;
+                    $beforeTaint=$referenceTainted;
+                    $fallthrough=false;
+                    $fallthroughTypes=[]; $fallthroughArrays=[]; $fallthroughTaint=$beforeTaint;
+                    $taintArms=[$beforeTaint];
+                    foreach ($part->cases as $case) {
+                        $caseTypes=$beforeTypes; $caseArrays=$beforeArrays;
+                        if ($fallthrough) {
+                            // Each case is directly enterable, or reachable
+                            // from the previous case without a break.
+                            foreach ($caseTypes as $name=>$type) {
+                                if (!isset($fallthroughTypes[$name])
+                                    || strcasecmp($type['className'],$fallthroughTypes[$name]['className'])!==0)
+                                    unset($caseTypes[$name]);
+                            }
+                            foreach ($caseArrays as $name=>$element) {
+                                if (!isset($fallthroughArrays[$name])
+                                    || strcasecmp($element,$fallthroughArrays[$name])!==0)
+                                    unset($caseArrays[$name]);
+                            }
+                        }
+                        $referenceTainted=$fallthrough ? ($beforeTaint + $fallthroughTaint) : $beforeTaint;
+                        if ($case->cond !== null) $walk($case->cond,$caseTypes,$caseArrays);
+                        $walk($case->stmts,$caseTypes,$caseArrays);
+                        $taintArms[]=$referenceTainted;
+                        $last=$case->stmts ? $case->stmts[count($case->stmts)-1] : null;
+                        $fallthrough=!($last instanceof PhpParser\Node\Stmt\Break_
+                            || $last instanceof PhpParser\Node\Stmt\Return_
+                            || ($last instanceof PhpParser\Node\Stmt\Expression
+                                && $last->expr instanceof PhpParser\Node\Expr\Throw_));
+                        $fallthroughTypes=$caseTypes;
+                        $fallthroughArrays=$caseArrays;
+                        $fallthroughTaint=$referenceTainted;
+                    }
+                    $referenceTainted=$beforeTaint;
+                    $changed=[]; $modified($part,$changed,$types);
+                    foreach ($changed as $name=>$_) unset($types[$name],$arrays[$name]);
+                    foreach ($taintArms as $taint) $referenceTainted += $taint;
+                    foreach ($referenceTainted as $name=>$_) unset($types[$name],$arrays[$name]);
                     return;
                 }
                 if ($part instanceof PhpParser\Node\Stmt\For_ || $part instanceof PhpParser\Node\Stmt\While_
-                    || $part instanceof PhpParser\Node\Stmt\Do_ || $part instanceof PhpParser\Node\Stmt\Switch_
-                    || $part instanceof PhpParser\Node\Stmt\TryCatch) {
+                    || $part instanceof PhpParser\Node\Stmt\Do_
+                ) {
                     $tmp=$types; $tmpArrays=$arrays;
                     foreach ($part->getSubNodeNames() as $field) $walk($part->$field,$tmp,$tmpArrays);
-                    $changed=[]; $modified($part,$changed);
+                    $changed=[]; $modified($part,$changed,$types);
                     $loop = $part instanceof PhpParser\Node\Stmt\For_
                         || $part instanceof PhpParser\Node\Stmt\While_
                         || $part instanceof PhpParser\Node\Stmt\Do_;
@@ -570,7 +928,15 @@ foreach ($paths as $relative) {
                 }
                 if ($part instanceof PhpParser\Node\Expr\AssignOp && $part->var instanceof PhpParser\Node\Expr\Variable
                     && is_string($part->var->name)) unset($types[$part->var->name],$arrays[$part->var->name]);
+                if ($part instanceof PhpParser\Node\Expr\AssignOp
+                    && $part->var instanceof PhpParser\Node\Expr\ArrayDimFetch) {
+                    $base=$part->var;
+                    while ($base instanceof PhpParser\Node\Expr\ArrayDimFetch) $base=$base->var;
+                    if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name))
+                        unset($arrays[$base->name]);
+                }
                 if ($part instanceof PhpParser\Node\Expr\StaticCall
+                    && !$part->isFirstClassCallable()
                     && $part->name instanceof PhpParser\Node\Identifier
                     && ($range = $this->range($part->name)) !== null) {
                     $special = $part->class instanceof PhpParser\Node\Name
@@ -590,15 +956,19 @@ foreach ($paths as $relative) {
                     else $unresolved[] = ['name'=>$part->name->toString(),'nameRange'=>$range];
                 }
                 if (($part instanceof PhpParser\Node\Expr\MethodCall || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
+                    && !$part->isFirstClassCallable()
                     && $part->name instanceof PhpParser\Node\Identifier) {
-                    $type=$infer($part->var,$types); $range=$this->range($part->name);
+                    $type=$arrayElementReceiver($part->var,$types,$arrays) ?? $infer($part->var,$types);
+                    $range=$this->range($part->name);
                     if ($range!==null) {
                         if ($type!==null) $calls[]=['className'=>$type['className'],'name'=>$part->name->toString(),
                             'nameRange'=>$range,'evidenceSource'=>$type['source']];
                         else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
                     }
                 }
+                $mutations = $arrayMutationTargets($part,$types);
                 foreach ($part->getSubNodeNames() as $field) $walk($part->$field,$types,$arrays);
+                foreach ($mutations as $name) unset($arrays[$name]);
             };
             // Arrow functions expose their body as expr, not getStmts().
             $walk($function instanceof PhpParser\Node\Expr\ArrowFunction
@@ -610,7 +980,20 @@ foreach ($paths as $relative) {
 
         public function fileCallSites(array $statements): array {
             $calls = []; $unresolved = []; $instantiations = [];
-            $walk = function($part, array &$known) use (&$walk, &$calls, &$unresolved, &$instantiations): void {
+            $receiverClass = function($expr, array $known): ?string {
+                if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name))
+                    return $known[$expr->name] ?? null;
+                if ($expr instanceof PhpParser\Node\Expr\New_)
+                    return qbPhpName($expr->class);
+                if ($expr instanceof PhpParser\Node\Expr\StaticCall
+                    && $expr->name instanceof PhpParser\Node\Identifier) {
+                    $class = qbPhpName($expr->class);
+                    return $class === null ? null
+                        : ($this->fileStaticReturns[strtolower($class . '::' . $expr->name->toString())] ?? null);
+                }
+                return null;
+            };
+            $walk = function($part, array &$known) use (&$walk, $receiverClass, &$calls, &$unresolved, &$instantiations): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry, $known); return; }
                 if (!$part instanceof PhpParser\Node) return;
                 if ($part instanceof PhpParser\Node\Stmt\ClassLike
@@ -620,6 +1003,22 @@ foreach ($paths as $relative) {
                     $walk($part->stmts, $namespaceKnown);
                     return;
                 }
+                if ($part instanceof PhpParser\Node\Stmt\TryCatch) {
+                    // A catch starts from the state before entering try.
+                    // Assignments later in try may never execute if it throws.
+                    $tryKnown = $known;
+                    $walk($part->stmts, $tryKnown);
+                    foreach ($part->catches as $catch) {
+                        $catchKnown = $known;
+                        $walk($catch, $catchKnown);
+                    }
+                    if ($part->finally !== null) {
+                        $finallyKnown = $known;
+                        $walk($part->finally, $finallyKnown);
+                    }
+                    $known = [];
+                    return;
+                }
                 // Values assigned in conditional or loop branches cannot escape
                 // as a single proven type. Invalidate known top-level variables.
                 if ($part instanceof PhpParser\Node\Stmt\If_
@@ -627,8 +1026,7 @@ foreach ($paths as $relative) {
                     || $part instanceof PhpParser\Node\Stmt\For_
                     || $part instanceof PhpParser\Node\Stmt\While_
                     || $part instanceof PhpParser\Node\Stmt\Do_
-                    || $part instanceof PhpParser\Node\Stmt\Switch_
-                    || $part instanceof PhpParser\Node\Stmt\TryCatch) {
+                    || $part instanceof PhpParser\Node\Stmt\Switch_) {
                     $branchKnown = $known;
                     foreach ($part->getSubNodeNames() as $field) $walk($part->$field, $branchKnown);
                     $known = [];
@@ -669,10 +1067,7 @@ foreach ($paths as $relative) {
                     || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
                     && $part->name instanceof PhpParser\Node\Identifier
                     && ($range = $this->range($part->name)) !== null) {
-                    $class = $part->var instanceof PhpParser\Node\Expr\Variable
-                        && is_string($part->var->name) ? ($known[$part->var->name] ?? null)
-                        : ($part->var instanceof PhpParser\Node\Expr\New_
-                            ? qbPhpName($part->var->class) : null);
+                    $class = $receiverClass($part->var, $known);
                     if ($class !== null) $calls[] = ['className'=>$class,
                         'name'=>$part->name->toString(),'nameRange'=>$range,
                         'evidenceSource'=>'native','callStyle'=>'object'];

@@ -29,6 +29,28 @@ function isRange(value: unknown): value is [number, number, number, number] {
       || (value[0] === value[2] && (value[1] as number) <= (value[3] as number)));
 }
 
+function pointAtOrBefore(aLine: number, aColumn: number, bLine: number, bColumn: number): boolean {
+  return aLine < bLine || (aLine === bLine && aColumn <= bColumn);
+}
+
+function validInitializerRange(
+  value: unknown, name: readonly [number, number, number, number],
+  owner: readonly [number, number, number, number],
+): value is [number, number, number, number] {
+  if (!isRange(value)) return false;
+  return pointAtOrBefore(name[2], name[3], value[0], value[1])
+    && pointAtOrBefore(owner[0], owner[1], value[0], value[1])
+    && pointAtOrBefore(value[2], value[3], owner[2], owner[3])
+    && !pointAtOrBefore(value[2], value[3], value[0], value[1]);
+}
+
+function rangesOverlap(
+  a: readonly [number, number, number, number], b: readonly [number, number, number, number],
+): boolean {
+  return !pointAtOrBefore(a[2], a[3], b[0], b[1])
+    && !pointAtOrBefore(b[2], b[3], a[0], a[1]);
+}
+
 function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<string, readonly ScipPhpLexicalScope[]> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid PHP AST lexical response");
@@ -135,17 +157,26 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
             || !["extends", "implements", "trait"].includes(String(ancestor.relation))) throw new Error("Invalid PHP ancestor");
           ancestors.push({ className: ancestor.className, relation: ancestor.relation as "extends" | "implements" | "trait" });
         }
-        const definitions: Array<{ name: string; nameRange: [number, number, number, number] }> = [];
+        const definitions: Array<{
+          name: string; nameRange: [number, number, number, number];
+          valueRange?: [number, number, number, number];
+        }> = [];
         if (scope.propertyDefinitions !== undefined && !Array.isArray(scope.propertyDefinitions)) throw new Error("Invalid property definitions");
         for (const raw of (scope.propertyDefinitions ?? []) as unknown[]) {
           if (!raw || typeof raw !== "object") throw new Error("Invalid PHP property definition");
           const definition = raw as Record<string, unknown>;
           if (!validName(definition.name, 255) || !isRange(definition.nameRange)) throw new Error("Invalid PHP property definition range");
-          definitions.push({ name: definition.name, nameRange: definition.nameRange });
+          if (definition.valueRange !== undefined
+            && !validInitializerRange(definition.valueRange, definition.nameRange, scope.range)) {
+            throw new Error("Invalid PHP property initializer range");
+          }
+          definitions.push({ name: definition.name, nameRange: definition.nameRange,
+            ...(definition.valueRange ? { valueRange: definition.valueRange as [number, number, number, number] } : {}) });
           if (definitions.length > 15000) throw new Error("Too many PHP property declarations");
         }
         const constantDefinitions: Array<{
           name: string; nameRange: [number, number, number, number]; kind: "constant" | "enum_case";
+          valueRange?: [number, number, number, number];
         }> = [];
         if (scope.constantDefinitions !== undefined && !Array.isArray(scope.constantDefinitions)) {
           throw new Error("Invalid PHP constant definitions");
@@ -157,7 +188,12 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
             || !["constant", "enum_case"].includes(String(entry.kind))) {
             throw new Error("Invalid PHP constant definition token");
           }
+          if (entry.valueRange !== undefined
+            && !validInitializerRange(entry.valueRange, entry.nameRange, scope.range)) {
+            throw new Error("Invalid PHP constant initializer range");
+          }
           constantDefinitions.push({ name: entry.name, nameRange: entry.nameRange,
+            ...(entry.valueRange ? { valueRange: entry.valueRange as [number, number, number, number] } : {}),
             kind: entry.kind as "constant" | "enum_case" });
           if (constantDefinitions.length > 15000) throw new Error("Too many PHP constant definitions");
         }
@@ -239,6 +275,22 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
       } else throw new Error("Invalid PHP lexical named scope");
       total++;
       if (total > 150000) throw new Error("PHP lexical scope count exceeds cap");
+    }
+    // A member's initializer may not consume another member's name/value or
+    // an executable lexical scope. Reject ambiguous AST data, don't assign a
+    // reference to a plausible class/member by name.
+    const executables = items.filter(item => ["method", "function", "anonymous", "anonymous_class"].includes(item.type));
+    for (const owner of items) {
+      if (owner.type !== "class") continue;
+      const members = [...(owner.propertyDefinitions ?? []), ...(owner.constantDefinitions ?? [])];
+      for (const member of members) {
+        if (!member.valueRange) continue;
+        if (members.some(other => other !== member && (rangesOverlap(member.valueRange!, other.nameRange)
+          || (other.valueRange && rangesOverlap(member.valueRange!, other.valueRange))))
+          || executables.some(scope => rangesOverlap(member.valueRange!, scope.range))) {
+          throw new Error("Ambiguous PHP initializer owner or executable overlap");
+        }
+      }
     }
     scopes.set(path, items);
   }

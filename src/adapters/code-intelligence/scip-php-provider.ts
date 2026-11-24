@@ -1,4 +1,4 @@
-import { constants, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
@@ -32,6 +32,48 @@ export interface ScipPhpProviderOptions {
 
 function projectLocalExecutable(rootPath: string): string {
   return join(rootPath, "vendor", "bin", process.platform === "win32" ? "scip-php.bat" : "scip-php");
+}
+
+/** Composer's declared first-party source roots, not every PHP-shaped repository file. */
+function composerPhpSourceRoots(rootPath: string): string[] | undefined {
+  let manifest: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(rootPath, "composer.json"), "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    manifest = parsed as Record<string, unknown>;
+  } catch {
+    return undefined; // Never silently narrow coverage on an unreadable manifest.
+  }
+  const paths: string[] = [];
+  let uncertain = false;
+  const collect = (value: unknown): void => {
+    if (typeof value === "string") {
+      const path = value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
+      // An unsupported path pattern must not hide an unindexed source file.
+      if (/[*?\[\]{}]/.test(path) || path.startsWith("/") || /^[A-Za-z]:/.test(path)
+        || path.split("/").some(part => part === ".." || (part === "." && path !== "."))) {
+        uncertain = true;
+        return;
+      }
+      if (path === "." || path === "" || (!path.startsWith("/") && !path.split("/").includes(".."))) {
+        paths.push(path === "." ? "" : path);
+      }
+    } else if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+    } else if (value && typeof value === "object") {
+      for (const item of Object.values(value)) collect(item);
+    }
+  };
+  // Native scip-php also indexes Composer's explicitly declared executables.
+  collect(manifest.bin);
+  for (const key of ["autoload", "autoload-dev"]) {
+    const section = manifest[key];
+    if (!section || typeof section !== "object" || Array.isArray(section)) continue;
+    for (const field of ["psr-4", "psr-0", "classmap", "files"]) {
+      collect((section as Record<string, unknown>)[field]);
+    }
+  }
+  return !uncertain && paths.length ? [...new Set(paths)] : undefined;
 }
 
 async function assertReadable(path: string, description: string): Promise<void> {
@@ -127,10 +169,17 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
     try {
       const indexedAt = this.#now();
       const indexArtifactSha256 = scipArtifactSha256(indexPath);
-      const eligiblePhpPaths = phpFiles.map((entry) => entry.path);
+      const discoveredPhpPaths = phpFiles.map((entry) => entry.path);
+      const declaredRoots = composerPhpSourceRoots(request.rootPath);
+      // A Blade view is a template, not a PHP translation unit. Native SCIP
+      // documents outside declared Composer roots remain eligible downstream.
+      const eligiblePhpPaths = discoveredPhpPaths.filter((path) => !path.endsWith(".blade.php")
+        && (!declaredRoots || declaredRoots.some((root) =>
+          root === "" || path === root || path.startsWith(root + "/"))));
       if (this.#graphLoader) {
         return await this.#graphLoader.load({
-          indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256, eligiblePhpPaths,
+          indexPath, request, indexedAt, providerId: this.providerId, indexArtifactSha256,
+          eligiblePhpPaths, discoveredPhpPaths,
         });
       }
       const index = await this.#indexReader.read(indexPath);
@@ -143,6 +192,7 @@ export class ScipPhpProvider implements CodeIntelligenceProvider {
         providerId: this.providerId,
         indexArtifactSha256,
         phpEligibleFilePaths: eligiblePhpPaths,
+        phpDiscoveredFilePaths: discoveredPhpPaths,
       });
     } catch (error) {
       throw new CodeMapSemanticIndexFailureError(this.providerId, error);

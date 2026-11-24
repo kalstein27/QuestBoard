@@ -76,10 +76,16 @@ export interface ScipPhpLexicalScope {
   instantiations?: readonly ScipPhpFileInstantiation[];
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
   ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
-  propertyDefinitions?: readonly { name: string; nameRange: readonly [number, number, number, number] }[];
+  propertyDefinitions?: readonly {
+    name: string;
+    nameRange: readonly [number, number, number, number];
+    /** Exact member initializer expression, when present; never the whole declaration. */
+    valueRange?: readonly [number, number, number, number];
+  }[];
   constantDefinitions?: readonly {
     name: string;
     nameRange: readonly [number, number, number, number];
+    valueRange?: readonly [number, number, number, number];
     kind: "constant" | "enum_case";
   }[];
   /** Explicit @method tokens belonging to this class's PHPDoc, never inferred from names. */
@@ -134,6 +140,8 @@ export interface NormalizeScipGraphInput {
   sourceTextByPath?: ReadonlyMap<string, string>;
   /** Optional first-party PHP file inventory. Installed dependency SCIP docs remain facts, not indexed first-party coverage. */
   phpEligibleFilePaths?: readonly string[];
+  /** All first-party PHP paths, including files outside Composer autoload scope. */
+  phpDiscoveredFilePaths?: readonly string[];
   /** Verified PHP AST extents; SCIP PHP currently emits no enclosingRange. */
   phpLexicalScopes?: ReadonlyMap<string, readonly ScipPhpLexicalScope[]>;
   /** AST structural scopes for non-SCIP migrations/routes; never semantic facts. */
@@ -308,7 +316,12 @@ export function parseScipJsonIndex(value: unknown): ScipJsonIndex {
   const externalSymbols = array(field(object, "externalSymbols", "external_symbols"))
     .map(parseSymbolInformation)
     .filter((item): item is ScipSymbolInformation => Boolean(item));
-  const positionEncoding = field(object, "positionEncoding", "position_encoding");
+  // Native SCIP stores its encoding in Index.metadata.text_document_encoding.
+  // Dropping that field treats UTF-8 byte columns as UTF-16 columns and
+  // silently loses member ownership after multibyte comments or identifiers.
+  const metadata = record(object.metadata);
+  const positionEncoding = field(object, "positionEncoding", "position_encoding")
+    ?? (metadata ? field(metadata, "textDocumentEncoding", "text_document_encoding") : undefined);
   return { documents, externalSymbols,
     ...((typeof positionEncoding === "number" || typeof positionEncoding === "string") ? { positionEncoding } : {}),
   };
@@ -623,7 +636,16 @@ function isCallOccurrence(source: string, lineStarts: readonly number[], range: 
     offset += 2;
     while (offset < source.length && /\s/.test(source[offset]!)) offset += 1;
   }
-  return source[offset] === "(";
+  if (source[offset] !== "(") return false;
+  // PHP's foo(...) creates a first-class callable; it does not invoke foo.
+  let argumentStart = offset + 1;
+  while (argumentStart < source.length && /\s/.test(source[argumentStart]!)) argumentStart += 1;
+  if (source.startsWith("...", argumentStart)) {
+    argumentStart += 3;
+    while (argumentStart < source.length && /\s/.test(source[argumentStart]!)) argumentStart += 1;
+    if (source[argumentStart] === ")") return false;
+  }
+  return true;
 }
 
 function isInstantiationOccurrence(source: string, lineStarts: readonly number[], range: ScipRange): boolean {
@@ -773,13 +795,23 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const eligiblePhpPaths = input.phpEligibleFilePaths
     ? new Set(input.phpEligibleFilePaths.map((path) => path.replaceAll("\\", "/").replace(/^\.\//, "")))
     : undefined;
-  const nativeIndexedFirstPartyPhpPaths = eligiblePhpPaths
+  const discoveredPhpPaths = input.phpDiscoveredFilePaths
+    ? new Set(input.phpDiscoveredFilePaths.map((path) => path.replaceAll("\\", "/").replace(/^\.\//, "")))
+    : eligiblePhpPaths;
+  const nativeIndexedFirstPartyPhpPaths = discoveredPhpPaths
     ? new Set(input.index.documents
       .filter((document) => normalizeCodeLanguage(
         document.language ?? inferCodeLanguageFromPath(document.relativePath),
-      ) === "php" && eligiblePhpPaths.has(document.relativePath.replaceAll("\\", "/").replace(/^\.\//, "")))
+      ) === "php" && discoveredPhpPaths.has(document.relativePath.replaceAll("\\", "/").replace(/^\.\//, "")))
       .map((document) => document.relativePath.replaceAll("\\", "/").replace(/^\.\//, "")))
     : undefined;
+  // A real first-party native document is never excluded just because the
+  // upstream indexer reached it outside a declared Composer autoload root.
+  const effectiveEligiblePhpPaths = eligiblePhpPaths && nativeIndexedFirstPartyPhpPaths
+    ? new Set([...eligiblePhpPaths, ...nativeIndexedFirstPartyPhpPaths])
+    : eligiblePhpPaths;
+  const excludedPhpCount = discoveredPhpPaths && effectiveEligiblePhpPaths
+    ? Math.max(0, discoveredPhpPaths.size - effectiveEligiblePhpPaths.size) : 0;
   if (eligiblePhpPaths && !semanticFileCountByLanguage.has("php")) {
     semanticFileCountByLanguage.set("php", 0);
   }
@@ -868,6 +900,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpOwnersByDocument = new Map<ScipDocument, Array<{
     range: ScipRange; ownerId: string | undefined;
   }>>();
+  const phpInitializerOwnersByDocument = new Map<ScipDocument, Array<{
+    range: ScipRange; ownerId: string;
+  }>>();
   const phpMethodsByQualifiedName = new Map<string, string | null>();
   const phpClassNodes = new Map<string, string | null>();
   const phpClassAncestors = new Map<string, readonly { className: string; relation: "extends" | "implements" | "trait" }[]>();
@@ -919,12 +954,51 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
           const matches = documentDefinitions.filter((definition) => {
             const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
             const position = definition.occurrence.range;
-            return node && position && ["class", "interface", "type", "enum"].includes(node.kind)
-              && position.startLine === token.startLine && position.startCharacter === token.startCharacter;
+            // Native scip-php can omit the class kind. The exact SCIP class
+            // descriptor plus the AST name token is still sufficient proof;
+            // a same-named non-class symbol must never pass this check.
+            const descriptor = definition.symbol.split(" ").at(-1)?.replaceAll("\\", "/");
+            const qualifiedClass = scope.className!.replaceAll("\\", "/") + "#";
+            const nativeClass = descriptor === qualifiedClass || descriptor?.endsWith("/" + qualifiedClass);
+            return node && position && (["class", "interface", "type", "enum"].includes(node.kind)
+              || (node.kind === "unknown" && definition.symbol.startsWith("scip-php ") && nativeClass))
+              && position.startLine === token.startLine && position.startCharacter === token.startCharacter
+              && position.endLine === token.endLine && position.endCharacter === token.endCharacter;
           });
           phpClassNodes.set(classKey, matches.length === 1 ? matches[0]!.nodeId : null);
           phpClassAncestors.set(classKey, scope.ancestors ?? []);
           const classId = matches.length === 1 ? matches[0]!.nodeId : undefined;
+          const classDescriptor = matches[0]?.symbol.split(" ").at(-1)?.replaceAll("\\", "/");
+          const exactClass = scope.className.replaceAll("\\", "/") + "#";
+          if (classId && (classDescriptor === exactClass || classDescriptor?.endsWith("/" + exactClass))) {
+            // A member initializer has no executable lexical owner. Associate
+            // it only with a unique SCIP definition at the exact AST name
+            // token; never substitute the surrounding class as the owner.
+            for (const member of [...(scope.constantDefinitions ?? []), ...(scope.propertyDefinitions ?? [])]) {
+              if (!member.valueRange) continue;
+              const name = tupleRange(member.nameRange);
+              const value = tupleRange(member.valueRange);
+              if (!rangeContains(extent, value) || !rangeContains(extent, name)
+                || !rangeContains({ ...extent, startLine: name.endLine, startCharacter: name.endCharacter }, value)) {
+                continue;
+              }
+              const isProperty = !("kind" in member);
+              const aligned = documentDefinitions.filter((definition) => {
+                const node = nodeBySymbol.get(scopedSymbolKey(document, definition.symbol));
+                const position = definition.occurrence.range;
+                return node && position && position.startLine === name.startLine
+                  && position.startCharacter === name.startCharacter
+                  && position.endLine === name.endLine && position.endCharacter === name.endCharacter
+                  && node.name.replace(/^\$/, "").toLowerCase() === member.name.toLowerCase()
+                  && (isProperty ? ["property", "variable", "unknown"].includes(node.kind)
+                    : ["variable", "property", "unknown"].includes(node.kind));
+              });
+              if (aligned.length !== 1) continue;
+              const owners = phpInitializerOwnersByDocument.get(document) ?? [];
+              owners.push({ range: value, ownerId: aligned[0]!.nodeId });
+              phpInitializerOwnersByDocument.set(document, owners);
+            }
+          }
           if (classId) for (const constant of scope.constantDefinitions ?? []) {
             const location = tupleRange(constant.nameRange);
             const definitions = documentDefinitions.filter((definition) => {
@@ -1222,6 +1296,24 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       }
       const phpOwners = phpOwnersByDocument.get(document);
       const lexical = phpOwners?.find((scope) => rangeContains(scope.range, occurrence.range!));
+      // Restrict initializer recovery to resolved native constant/enum reads.
+      // A missing or ambiguous member owner never becomes a class-level edge,
+      // and calls/imports/writes remain subject to their existing paths.
+      if (!lexical && phpOwners) {
+        const initializers = (phpInitializerOwnersByDocument.get(document) ?? [])
+          .filter((item) => rangeContains(item.range, occurrence.range!));
+        if (initializers.length) {
+          if (initializers.length === 1 && initializers[0]!.ownerId !== target
+            && phpConstantNodeIds.has(target)
+            && (occurrence.symbolRoles & (SCIP_ROLE_IMPORT | SCIP_ROLE_WRITE)) === 0) {
+            addRelation(relations, initializers[0]!.ownerId, target, "reads", 0.9,
+              [{ location: nativeLocation(document.relativePath, occurrence.range),
+                label: "SCIP native constant reference in AST-verified member initializer" }],
+              [{ providerId, fidelity, freshness: "fresh" }]);
+          }
+          continue;
+        }
+      }
       // If PHP AST knows this reference belongs to an anonymous function or
       // an unmatched function, fail closed rather than using an outer owner.
       const owner = lexical
@@ -1352,6 +1444,15 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
       continue;
     }
+    // Never override a conflicting native SCIP reference at this exact token.
+    // A type-proven receiver does not authorize replacing another target.
+    const competingNative = document.occurrences.some((occurrence) =>
+      (occurrence.symbolRoles & SCIP_ROLE_DEFINITION) === 0 && occurrence.range
+      && occurrence.range.startLine === location.startLine
+      && occurrence.range.startCharacter === location.startCharacter
+      && (nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
+        ?? externalNodeBySymbol.get(occurrence.symbol)?.id) !== target);
+    if (competingNative) continue;
     const fileNode = phpFileNode(document);
     resolvedPhpSites.add(siteKey(document, location, call.name));
     addRelation(relations, fileNode.id, target, "calls", 1,
@@ -1459,10 +1560,15 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([language, fileCount]) => ({
           language,
-          fileCount: language === "php" && eligiblePhpPaths ? eligiblePhpPaths.size : fileCount,
-          semanticEligibleFileCount: language === "php" && eligiblePhpPaths ? eligiblePhpPaths.size : fileCount,
+          fileCount: language === "php" && discoveredPhpPaths ? discoveredPhpPaths.size : fileCount,
+          semanticEligibleFileCount: language === "php" && effectiveEligiblePhpPaths
+            ? effectiveEligiblePhpPaths.size : fileCount,
           semanticIndexedFileCount: language === "php" && nativeIndexedFirstPartyPhpPaths
             ? nativeIndexedFirstPartyPhpPaths.size : fileCount,
+          ...(language === "php" && discoveredPhpPaths ? {
+            semanticExcludedFileCount: excludedPhpCount,
+            ...(excludedPhpCount ? { semanticExclusionReason: "provider_project_scope" as const } : {}),
+          } : {}),
           fidelity,
           providerIds: [providerId],
           degraded: false,
