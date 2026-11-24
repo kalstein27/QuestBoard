@@ -38,8 +38,8 @@ export interface ScipPhpTypedMethodCall {
   name: string;
   nameRange: readonly [number, number, number, number];
   evidenceSource?: "native" | "docblock";
-  /** File-scope instance calls are distinct from legacy static calls. */
-  callStyle?: "object";
+  /** AST-proven dispatch style; absent in legacy fixtures. */
+  callStyle?: "object" | "static";
 }
 
 /** PHP Parser-proven new ClassName in executable file-level code. */
@@ -74,6 +74,7 @@ export interface ScipPhpLexicalScope {
   /** Directly owned AST method calls with a statically proved receiver type. */
   calls?: readonly ScipPhpTypedMethodCall[];
   instantiations?: readonly ScipPhpFileInstantiation[];
+  fileConstantReads?: readonly (readonly [number, number, number, number])[];
   unresolvedCalls?: readonly ScipPhpUnresolvedMethodCall[];
   ancestors?: readonly { className: string; relation: "extends" | "implements" | "trait" }[];
   propertyDefinitions?: readonly {
@@ -909,6 +910,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpDocVirtualMethods = new Map<string, {
     className: string; methodName: string; classId: string; isStatic: boolean;
   }>();
+  const phpVirtualByQualifiedName = new Map<string, string | null>();
+  const phpFileConstantSites = new Map<ScipDocument, Set<string>>();
+  const tokenKey = (range: ScipRange): string => [range.startLine, range.startCharacter, range.endLine, range.endCharacter].join(":");
   const phpConstantNodeIds = new Set<string>();
   const phpConstantOwners = new Map<string, string>();
   const phpConcreteMethodFlags = new Map<string, { isStatic: boolean; isConcretePublic: boolean }>();
@@ -938,6 +942,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       const owners = scopes.map((scope) => {
         const extent = tupleRange(scope.range);
         if (scope.type === "file") {
+          phpFileConstantSites.set(document, new Set((scope.fileConstantReads ?? []).map(range => tokenKey(tupleRange(range)))));
           for (const call of scope.calls ?? []) phpFileCalls.push({ document, call });
           for (const instantiation of scope.instantiations ?? []) {
             phpFileInstantiations.push({ document, ...instantiation });
@@ -1036,6 +1041,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
             phpDocVirtualMethods.set(nodeId, {
               className: scope.className, methodName: declaration.name, classId, isStatic: declaration.isStatic,
             });
+            const key = qualifiedMethodKey(scope.className, declaration.name);
+            const previous = phpVirtualByQualifiedName.get(key);
+            phpVirtualByQualifiedName.set(key, previous === undefined || previous === nodeId ? nodeId : null);
             const node = nodeBySymbol.get(scopedSymbolKey(document, virtual[0]!.symbol));
             if (node) node.signature = node.signature
               ? node.signature + " [PHPDoc @method virtual declaration]"
@@ -1192,6 +1200,36 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
         undefined, [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
     }
   }
+  function verifiedPhpCallTarget(call: ScipPhpTypedMethodCall): string | undefined {
+    const concrete = verifiedPhpMethodTarget(call.className, call.name);
+    if (concrete) return concrete;
+    // No guessing through dynamic receivers, duplicate declarations or ancestor
+    // ambiguity. A direct, exact class PHPDoc declaration is a virtual target,
+    // not an executable implementation.
+    const classKey = call.className.replace(/^\\+/, "").toLowerCase();
+    const classId = phpClassNodes.get(classKey);
+    if (!call.callStyle || !classId) return undefined;
+    const key = qualifiedMethodKey(call.className, call.name);
+    const id = phpVirtualByQualifiedName.get(key);
+    const declaration = id ? phpDocVirtualMethods.get(id) : undefined;
+    if (!id || !declaration || declaration.classId !== classId
+      || declaration.isStatic !== (call.callStyle === "static")) return undefined;
+    // A failed concrete lookup may mean ambiguity, rather than absence.
+    // Do not hide that ambiguity by switching to a documentation declaration.
+    const visited = new Set<string>();
+    let frontier = [classKey];
+    for (let depth = 0; depth < 24 && frontier.length; depth++) {
+      const next: string[] = [];
+      for (const current of frontier) {
+        if (visited.has(current)) continue;
+        visited.add(current);
+        if (phpMethodsByQualifiedName.has(qualifiedMethodKey(current, call.name))) return undefined;
+        next.push(...(phpClassAncestors.get(current) ?? []).map(entry => entry.className.toLowerCase()));
+      }
+      frontier = next;
+    }
+    return frontier.length ? undefined : id;
+  }
   const nativeReferenceCounts = new Map<string, number>();
   for (const node of nodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
   for (const node of externalNodeBySymbol.values()) nativeReferenceCounts.set(node.canonicalIdentity, 0);
@@ -1245,7 +1283,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   const phpReceiverBySite = new Map<string, { className: string; target: string }>();
   const ambiguousPhpReceiverSites = new Set<string>();
   for (const { document, call } of phpTypedCalls) {
-    const target = verifiedPhpMethodTarget(call.className, call.name);
+    const target = verifiedPhpCallTarget(call);
     if (!target) continue;
     const key = siteKey(document, tupleRange(call.nameRange), call.name);
     const existing = phpReceiverBySite.get(key);
@@ -1296,6 +1334,13 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       }
       const phpOwners = phpOwnersByDocument.get(document);
       const lexical = phpOwners?.find((scope) => rangeContains(scope.range, occurrence.range!));
+      if (!lexical && phpFileConstantSites.get(document)?.has(tokenKey(occurrence.range))
+        && phpConstantNodeIds.has(target) && (occurrence.symbolRoles & (SCIP_ROLE_IMPORT | SCIP_ROLE_WRITE)) === 0) {
+        addRelation(relations, phpFileNode(document).id, target, "reads", 0.9,
+          [{ location: nativeLocation(document.relativePath, occurrence.range), label: "SCIP native constant reference in AST-verified file code" }],
+          [{ providerId, fidelity, freshness: "fresh" }]);
+        continue;
+      }
       // Restrict initializer recovery to resolved native constant/enum reads.
       // A missing or ambiguous member owner never becomes a class-level edge,
       // and calls/imports/writes remain subject to their existing paths.
@@ -1377,7 +1422,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   // native SCIP method definition. Do not manufacture target nodes or treat
   // an unresolved/dynamic receiver as a semantic call.
   for (const { document, ownerId, call } of phpTypedCalls) {
-    const target = verifiedPhpMethodTarget(call.className, call.name);
+    const target = verifiedPhpCallTarget(call);
     const location = tupleRange(call.nameRange);
     if (!target) {
       phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
@@ -1424,7 +1469,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
 
   // A2. The file itself is the owner for executable PHP top-level statements.
   // Only exact SCIP-verified method targets become call relations.
-  const phpFileNode = (document: ScipDocument): CodeNode => {
+  function phpFileNode(document: ScipDocument): CodeNode {
     const existing = phpSyntheticFileNodes.get(document.relativePath);
     if (existing) return existing;
     const canonicalIdentity = "file:" + document.relativePath;
@@ -1436,10 +1481,10 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     };
     phpSyntheticFileNodes.set(document.relativePath, node);
     return node;
-  };
+  }
   for (const { document, call } of phpFileCalls) {
     const location = tupleRange(call.nameRange);
-    const target = verifiedPhpMethodTarget(call.className, call.name);
+    const target = verifiedPhpCallTarget(call);
     if (!target) {
       phpUnresolvedSites.set(siteKey(document, location, call.name), { name: call.name, document, range: location });
       continue;

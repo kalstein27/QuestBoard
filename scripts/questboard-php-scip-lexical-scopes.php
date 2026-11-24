@@ -389,6 +389,7 @@ foreach ($paths as $relative) {
             }
             $currentClass = $this->classStack ? ($this->classStack[count($this->classStack)-1]['class'] ?? null) : null;
             $arrayParams = [];
+            $untypedClosureParams = [];
             foreach ($function->getParams() as $param) {
                 $name = $param->var instanceof PhpParser\Node\Expr\Variable ? $param->var->name : null;
                 $type = $this->resolvedType($param->type);
@@ -397,6 +398,8 @@ foreach ($paths as $relative) {
                     'nullable'=>$param->type instanceof PhpParser\Node\NullableType,
                 ];
                 if (is_string($name)) $arrayParams[$name] = true;
+                if ($function instanceof PhpParser\Node\Expr\Closure && is_string($name)
+                    && $param->type === null && !$param->byRef) $untypedClosureParams[$name] = true;
                 // An array-element docblock must not contradict a native
                 // scalar/object/nullable/union parameter declaration.
                 if (is_string($name) && isset($arrayTypes[$name])
@@ -616,7 +619,7 @@ foreach ($paths as $relative) {
                 }
                 foreach ($part->getSubNodeNames() as $field) $modified($part->$field,$names,$types);
             };
-            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$arrayElementReceiver,$arrayMutationTargets,$modified,&$referenceTainted,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function): void {
+            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$arrayElementReceiver,$arrayMutationTargets,$modified,&$referenceTainted,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function,$untypedClosureParams): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry,$types,$arrays); return; }
                 if ($part instanceof PhpParser\Node\Expr\Closure) {
                     $captured = [];
@@ -666,6 +669,29 @@ foreach ($paths as $relative) {
                     $changed=[]; $modified($part,$changed,$types);
                     foreach ($changed as $name=>$_) unset($types[$name],$arrays[$name]);
                     return;
+                }
+                // A local @var on a direct closure-parameter call is evidence
+                // for that statement only, not a new parameter declaration.
+                if ($part instanceof PhpParser\Node\Stmt\Expression
+                    && $part->expr instanceof PhpParser\Node\Expr\MethodCall
+                    && !$part->expr->isFirstClassCallable()
+                    && $part->expr->var instanceof PhpParser\Node\Expr\Variable
+                    && is_string($part->expr->var->name)) {
+                    $name = $part->expr->var->name;
+                    $doc = $part->getDocComment()?->getText();
+                    if (isset($untypedClosureParams[$name])
+                        && !isset($referenceTainted[$name]) && !isset($types[$name]) && !isset($arrays[$name])
+                        && $doc !== null && preg_match_all('/@var\s+(\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*)\s+\$([A-Za-z_][A-Za-z0-9_]*)\b/i',
+                            $doc, $annotations, PREG_SET_ORDER) === 1 && $annotations[0][2] === $name) {
+                        $type = qbPhpDocArray('/** @return '.$annotations[0][1].'[] */',
+                            'return',$this->namespace,$this->aliases);
+                        if ($type !== null && !str_ends_with($type,'[]')) {
+                            $types[$name]=['className'=>$type,'source'=>'docblock'];
+                            $walk($part->expr,$types,$arrays);
+                            unset($types[$name],$arrays[$name]);
+                            return;
+                        }
+                    }
                 }
                 if ($part instanceof PhpParser\Node\Stmt\Expression && $part->expr instanceof PhpParser\Node\Expr\Assign) {
                     $walk($part->expr,$types,$arrays);
@@ -784,6 +810,34 @@ foreach ($paths as $relative) {
                     }
                     foreach ($taintBranches as $tainted) $referenceTainted += $tainted;
                     foreach ($referenceTainted as $name=>$_) unset($types[$name],$arrays[$name]);
+                    // Only a simple, unconditional early exit proves the
+                    // opposite guard on the surviving path. Never infer past
+                    // a nonterminating/conditional body or a reference alias.
+                    if (!$part->elseifs && $part->else === null && count($part->stmts) === 1
+                        && ($part->stmts[0] instanceof PhpParser\Node\Stmt\Return_
+                            || ($part->stmts[0] instanceof PhpParser\Node\Stmt\Expression
+                                && $part->stmts[0]->expr instanceof PhpParser\Node\Expr\Throw_))) {
+                        $cond=$part->cond;
+                        if ($cond instanceof PhpParser\Node\Expr\BinaryOp\Identical) {
+                            $left=$cond->left; $right=$cond->right;
+                            if ($left instanceof PhpParser\Node\Expr\ConstFetch) { $tmp=$left; $left=$right; $right=$tmp; }
+                            if ($left instanceof PhpParser\Node\Expr\Variable && is_string($left->name)
+                                && $right instanceof PhpParser\Node\Expr\ConstFetch
+                                && strtolower($right->name->toString()) === 'null'
+                                && isset($before[$left->name]) && !isset($referenceTainted[$left->name])) {
+                                $types[$left->name]=$before[$left->name];
+                                $types[$left->name]['nullable']=false;
+                            }
+                        } elseif ($cond instanceof PhpParser\Node\Expr\BooleanNot
+                            && $cond->expr instanceof PhpParser\Node\Expr\Instanceof_
+                            && $cond->expr->expr instanceof PhpParser\Node\Expr\Variable
+                            && is_string($cond->expr->expr->name)) {
+                            $name=$cond->expr->expr->name;
+                            $narrow=qbPhpName($cond->expr->class,$currentClass);
+                            if ($narrow!==null && !isset($referenceTainted[$name]))
+                                $types[$name]=['className'=>$narrow,'source'=>'native','nullable'=>false];
+                        }
+                    }
                     return;
                 }
                 if ($part instanceof PhpParser\Node\Stmt\Foreach_) {
@@ -952,7 +1006,7 @@ foreach ($paths as $relative) {
                                 : null)
                             : qbPhpName($part->class, $currentClass));
                     if ($class !== null) $calls[] = ['className'=>$class,
-                        'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native'];
+                        'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native','callStyle'=>'static'];
                     else $unresolved[] = ['name'=>$part->name->toString(),'nameRange'=>$range];
                 }
                 if (($part instanceof PhpParser\Node\Expr\MethodCall || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
@@ -962,7 +1016,7 @@ foreach ($paths as $relative) {
                     $range=$this->range($part->name);
                     if ($range!==null) {
                         if ($type!==null) $calls[]=['className'=>$type['className'],'name'=>$part->name->toString(),
-                            'nameRange'=>$range,'evidenceSource'=>$type['source']];
+                            'nameRange'=>$range,'evidenceSource'=>$type['source'],'callStyle'=>'object'];
                         else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
                     }
                 }
@@ -979,7 +1033,7 @@ foreach ($paths as $relative) {
         }
 
         public function fileCallSites(array $statements): array {
-            $calls = []; $unresolved = []; $instantiations = [];
+            $calls = []; $unresolved = []; $instantiations = []; $constantReads = [];
             $receiverClass = function($expr, array $known): ?string {
                 if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name))
                     return $known[$expr->name] ?? null;
@@ -993,11 +1047,18 @@ foreach ($paths as $relative) {
                 }
                 return null;
             };
-            $walk = function($part, array &$known) use (&$walk, $receiverClass, &$calls, &$unresolved, &$instantiations): void {
+            $walk = function($part, array &$known) use (&$walk, $receiverClass, &$calls, &$unresolved, &$instantiations, &$constantReads): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry, $known); return; }
                 if (!$part instanceof PhpParser\Node) return;
                 if ($part instanceof PhpParser\Node\Stmt\ClassLike
                     || $part instanceof PhpParser\Node\FunctionLike) return;
+                if ($part instanceof PhpParser\Node\Stmt\Use_ || $part instanceof PhpParser\Node\Stmt\GroupUse
+                    || $part instanceof PhpParser\Node\Stmt\Const_) return;
+                if ($part instanceof PhpParser\Node\Expr\ClassConstFetch
+                    && $part->class instanceof PhpParser\Node\Name
+                    && $part->name instanceof PhpParser\Node\Identifier
+                    && strtolower($part->name->toString()) !== 'class'
+                    && ($range = $this->range($part->name)) !== null) $constantReads[] = $range;
                 if ($part instanceof PhpParser\Node\Stmt\Namespace_) {
                     $namespaceKnown = [];
                     $walk($part->stmts, $namespaceKnown);
@@ -1055,16 +1116,18 @@ foreach ($paths as $relative) {
                         $instantiations[] = ['className'=>$class,'nameRange'=>$range];
                 }
                 if ($part instanceof PhpParser\Node\Expr\StaticCall
+                    && !$part->isFirstClassCallable()
                     && $part->name instanceof PhpParser\Node\Identifier) {
                     $range = $this->range($part->name);
                     $class = qbPhpName($part->class);
                     if ($range !== null) {
                         if ($class !== null) $calls[] = ['className'=>$class,
-                            'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native'];
+                            'name'=>$part->name->toString(),'nameRange'=>$range,'evidenceSource'=>'native','callStyle'=>'static'];
                         else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
                     }
                 } elseif (($part instanceof PhpParser\Node\Expr\MethodCall
                     || $part instanceof PhpParser\Node\Expr\NullsafeMethodCall)
+                    && !$part->isFirstClassCallable()
                     && $part->name instanceof PhpParser\Node\Identifier
                     && ($range = $this->range($part->name)) !== null) {
                     $class = $receiverClass($part->var, $known);
@@ -1077,7 +1140,7 @@ foreach ($paths as $relative) {
             };
             $known = [];
             $walk($statements, $known);
-            return ['calls'=>$calls,'unresolvedCalls'=>$unresolved,'instantiations'=>$instantiations];
+            return ['calls'=>$calls,'unresolvedCalls'=>$unresolved,'instantiations'=>$instantiations,'constantReads'=>$constantReads];
         }
 
         public function enterNode(PhpParser\Node $node): ?int {
@@ -1157,20 +1220,21 @@ foreach ($paths as $relative) {
     $traverser->addVisitor($visitor);
     $traverser->traverse($resolved);
     $globalSites = $visitor->fileCallSites($resolved);
-    if ($globalSites['calls'] || $globalSites['unresolvedCalls'] || $globalSites['instantiations']) {
+    if ($globalSites['calls'] || $globalSites['unresolvedCalls'] || $globalSites['instantiations'] || $globalSites['constantReads']) {
         $visitor->scopes[] = [
             'type'=>'file',
             'range'=>[0,0,count($lineStarts)-1,strlen($source) - $lineStarts[count($lineStarts)-1]],
             ...($globalSites['calls'] ? ['calls'=>$globalSites['calls']] : []),
             ...($globalSites['unresolvedCalls'] ? ['unresolvedCalls'=>$globalSites['unresolvedCalls']] : []),
             ...($globalSites['instantiations'] ? ['instantiations'=>$globalSites['instantiations']] : []),
+            ...($globalSites['constantReads'] ? ['fileConstantReads'=>$globalSites['constantReads']] : []),
         ];
     }
     $globalScopes += count($visitor->scopes);
     foreach ($visitor->scopes as $scope) {
         $globalCallReferenceSites += count($scope['calls'] ?? [])
             + count($scope['unresolvedCalls'] ?? [])
-            + count($scope['propertyAccesses'] ?? []) + count($scope['instantiations'] ?? []);
+            + count($scope['propertyAccesses'] ?? []) + count($scope['instantiations'] ?? []) + count($scope['fileConstantReads'] ?? []);
     }
     if ($globalScopes > 150000 || $globalCallReferenceSites > $maxCallReferenceSites) {
         fwrite(STDERR, "PHP scope or call/reference site count exceeds bounded contract\n");

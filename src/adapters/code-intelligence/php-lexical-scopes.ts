@@ -92,10 +92,12 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (!raw || typeof raw !== "object") throw new Error("Invalid anonymous typed call");
           const call = raw as Record<string, unknown>;
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)
-            || (call.evidenceSource !== undefined && !["native", "docblock"].includes(String(call.evidenceSource)))) {
+            || (call.evidenceSource !== undefined && !["native", "docblock"].includes(String(call.evidenceSource)))
+            || (call.callStyle !== undefined && !["object", "static"].includes(String(call.callStyle)))) {
             throw new Error("Invalid anonymous call identity or range");
           }
           calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
+            ...(call.callStyle ? { callStyle: call.callStyle as "object" | "static" } : {}),
             ...(call.evidenceSource ? { evidenceSource: call.evidenceSource as "native" | "docblock" } : {}) });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP anonymous call sites exceed cap");
         }
@@ -119,9 +121,9 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (!raw || typeof raw !== "object") throw new Error("Invalid PHP file call");
           const call = raw as Record<string, unknown>;
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) throw new Error("Invalid file call");
-          if (call.callStyle !== undefined && call.callStyle !== "object") throw new Error("Invalid file call style");
+          if (call.callStyle !== undefined && !["object", "static"].includes(String(call.callStyle))) throw new Error("Invalid file call style");
           calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
-            ...(call.callStyle === "object" ? { callStyle: "object" as const } : {}) });
+            ...(call.callStyle ? { callStyle: call.callStyle as "object" | "static" } : {}) });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
         }
         if (scope.instantiations !== undefined && !Array.isArray(scope.instantiations)) {
@@ -143,7 +145,16 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           unresolvedCalls.push({ name: call.name, nameRange: call.nameRange });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP call cap exceeded");
         }
+        const fileConstantReads: Array<[number, number, number, number]> = [];
+        if (scope.fileConstantReads !== undefined && !Array.isArray(scope.fileConstantReads)) throw new Error("Invalid file constant reads");
+        for (const range of (scope.fileConstantReads ?? []) as unknown[]) {
+          if (!isRange(range) || !pointAtOrBefore(scope.range[0], scope.range[1], range[0], range[1])
+            || !pointAtOrBefore(range[2], range[3], scope.range[2], scope.range[3])) throw new Error("Invalid file constant read range");
+          fileConstantReads.push(range);
+          if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP reference site cap exceeded");
+        }
         items.push({ type: "file", range: scope.range,
+          ...(fileConstantReads.length ? { fileConstantReads } : {}),
           ...(calls.length ? { calls } : {}),
           ...(instantiations.length ? { instantiations } : {}),
           ...(unresolvedCalls.length ? { unresolvedCalls } : {}) });
@@ -229,7 +240,9 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (call.evidenceSource !== undefined && !["native", "docblock"].includes(String(call.evidenceSource))) {
             throw new Error("Invalid PHP typed call evidence source");
           }
+          if (call.callStyle !== undefined && !["object", "static"].includes(String(call.callStyle))) throw new Error("Invalid PHP call style");
           calls.push({ className: call.className, name: call.name, nameRange: call.nameRange,
+            ...(call.callStyle ? { callStyle: call.callStyle as "object" | "static" } : {}),
             ...(call.evidenceSource ? { evidenceSource: call.evidenceSource as "native" | "docblock" } : {}) });
           if (++totalCalls > MAX_CALL_REFERENCE_SITES) throw new Error("PHP typed call count exceeds cap");
         }
