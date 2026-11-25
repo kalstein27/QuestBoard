@@ -80,6 +80,35 @@ function qbPhpDocArray(?string $doc, string $tag, string $namespace, array $alia
         : ($namespace !== '' ? $namespace . '\\' . $name : $name);
     return $resolved . str_repeat('[]', $depth - 1);
 }
+// Accept a single exact class (not a union, intersection, or scalar).
+function qbPhpDocClass(string $type, string $namespace, array $aliases): ?string {
+    $type=trim($type);
+    if (!preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*$/D',$type)
+        || in_array(strtolower($type),['int','integer','float','double','string','bool','boolean','array',
+            'object','mixed','null','false','true','void','never','iterable','callable','resource','self','static','parent'],true))
+        return null;
+    return qbPhpDocArray('/** @return '.$type.'[] */','return',$namespace,$aliases);
+}
+function qbPhpNamedVar(?string $doc, string $name): ?string {
+    if (!$doc || preg_match_all('/@var\s+([^\r\n$]{1,160}?)\s+\$([A-Za-z_][A-Za-z0-9_]*)\b/i',
+        $doc,$matches,PREG_SET_ORDER) !== 1 || $matches[0][2] !== $name) return null;
+    return trim($matches[0][1]);
+}
+function qbPhpIsSubtype(string $child, string $base, array $ancestors): bool {
+    $base=strtolower($base);
+    $frontier=[strtolower($child)]; $seen=[];
+    for ($i=0; $i<24 && $frontier; $i++) {
+        $next=[];
+        foreach ($frontier as $class) {
+            if ($class===$base) return true;
+            if (isset($seen[$class])) continue;
+            $seen[$class]=true;
+            foreach ($ancestors[$class] ?? [] as $parent) $next[]=strtolower($parent);
+        }
+        $frontier=$next;
+    }
+    return false;
+}
 function qbPhpAliases(array $statements): array {
     $aliases = [];
     foreach ($statements as $statement) {
@@ -98,9 +127,11 @@ $methodNullableReturns = [];
 $methodArrayElements = [];
 $propertyTypes = [];
 $propertyNullableTypes = [];
+$propertyArrayElements = [];
 $functionByRefArgs = [];
 $methodByRefArgs = [];
 $classParents = [];
+$classAncestors = [];
 $fileStaticReturns = [];
 foreach ($paths as $relative) {
     $parsedFile = qbPhpParsedFile($root, $relative, $parser);
@@ -133,6 +164,17 @@ foreach ($paths as $relative) {
             if ($declaration instanceof PhpParser\Node\Stmt\Class_
                 && $declaration->extends instanceof PhpParser\Node\Name)
                 $classParents[strtolower($class)] = $declaration->extends->toString();
+            $parents=[];
+            if ($declaration instanceof PhpParser\Node\Stmt\Class_) {
+                if ($declaration->extends !== null) $parents[]=$declaration->extends->toString();
+                foreach ($declaration->implements as $iface) $parents[]=$iface->toString();
+            } elseif ($declaration instanceof PhpParser\Node\Stmt\Interface_) {
+                foreach ($declaration->extends as $iface) $parents[]=$iface->toString();
+            } elseif ($declaration instanceof PhpParser\Node\Stmt\Enum_) {
+                foreach ($declaration->implements as $iface) $parents[]=$iface->toString();
+            }
+            $classKey=strtolower($class);
+            $classAncestors[$classKey]=array_key_exists($classKey,$classAncestors) ? [] : $parents;
             foreach ($declaration->stmts as $member) {
                 if (!$member instanceof PhpParser\Node\Stmt\Property) continue;
                 $propertyType = qbPhpName($member->type, $class);
@@ -142,6 +184,16 @@ foreach ($paths as $relative) {
                         ? null : $propertyType;
                     $propertyNullableTypes[$key] = array_key_exists($key, $propertyNullableTypes)
                         || $member->type instanceof PhpParser\Node\NullableType;
+                    $doc=$member->getDocComment()?->getText();
+                    $nativeArray=$member->type instanceof PhpParser\Node\Identifier
+                        && strtolower($member->type->toString())==='array';
+                    $element=count($member->props)===1 && !$member->isStatic()
+                        && ($nativeArray || $member->type===null)
+                        && $doc && !preg_match('/\|\s*null\b/i',$doc)
+                        ? qbPhpDocArray($doc,'var',$namespace,$aliases) : null;
+                    $propertyName=$property->name->toString();
+                    $propertyArrayElements[$classKey][$propertyName]=array_key_exists($propertyName,$propertyArrayElements[$classKey] ?? [])
+                        ? null : $element;
                 }
             }
             foreach ($declaration->getMethods() as $method) {
@@ -215,7 +267,7 @@ foreach ($paths as $relative) {
     while (($offset = strpos($source, "\n", $offset + 1)) !== false) {
         $lineStarts[] = $offset + 1;
     }
-    $visitor = new class($source, $lineStarts, $methodReturns, $methodNullableReturns, $methodArrayElements, $propertyTypes, $propertyNullableTypes, $functionByRefArgs, $methodByRefArgs, $classParents, $fileStaticReturns) extends PhpParser\NodeVisitorAbstract {
+    $visitor = new class($source, $lineStarts, $methodReturns, $methodNullableReturns, $methodArrayElements, $propertyTypes, $propertyNullableTypes, $functionByRefArgs, $methodByRefArgs, $classParents, $fileStaticReturns, $classAncestors, $propertyArrayElements) extends PhpParser\NodeVisitorAbstract {
         public array $scopes = [];
         public int $callCount = 0;
         public int $unresolvedCount = 0;
@@ -233,6 +285,7 @@ foreach ($paths as $relative) {
             private readonly array $functionByRefArgs, private readonly array $methodByRefArgs,
             private readonly array $classParents,
             private readonly array $fileStaticReturns,
+            private readonly array $classAncestors, private readonly array $propertyArrayElements,
         ) {}
 
         private function range(PhpParser\Node $node): ?array {
@@ -376,9 +429,12 @@ foreach ($paths as $relative) {
                 unset($this->closureCaptures[spl_object_id($function)]);
             }
             $doc = $function->getDocComment()?->getText();
+            $paramClasses=[];
             if ($doc) {
                 preg_match_all('/@param\\s+([^\\r\\n$]{1,160}?)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)/i', $doc, $paramMatches, PREG_SET_ORDER);
                 foreach ($paramMatches as $match) {
+                    $class=qbPhpDocClass($match[1],$this->namespace,$this->aliases);
+                    $paramClasses[$match[2]]=array_key_exists($match[2],$paramClasses) ? null : $class;
                     $type = qbPhpDocArray('/** @return ' . $match[1] . ' */', 'return', $this->namespace, $this->aliases);
                     // An array-or-null annotation cannot prove that indexing
                     // will yield a single receiver. Element unions/shapes
@@ -397,6 +453,31 @@ foreach ($paths as $relative) {
                     'className'=>$type, 'source'=>'native',
                     'nullable'=>$param->type instanceof PhpParser\Node\NullableType,
                 ];
+                $docClass=is_string($name) ? ($paramClasses[$name] ?? null) : null;
+                if ($type!==null && $docClass!==null && !$param->byRef
+                    && strcasecmp($type,$docClass)!==0
+                    && qbPhpIsSubtype($docClass,$type,$this->classAncestors)) {
+                    $known[$name]['className']=$docClass;
+                    $known[$name]['source']='docblock';
+                }
+                // A bounded native class union is one flow fact. Keep all
+                // alternatives together until a direct receiver is emitted.
+                // Never let a scalar/intersection arm masquerade as a class.
+                if (is_string($name) && !$param->byRef && $param->type instanceof PhpParser\Node\UnionType) {
+                    $classes=[]; $nullable=false; $valid=true;
+                    foreach ($param->type->types as $arm) {
+                        if ($arm instanceof PhpParser\Node\Identifier && strtolower($arm->toString())==='null') {
+                            $nullable=true; continue;
+                        }
+                        $armClass=$this->resolvedType($arm);
+                        if ($armClass===null) { $valid=false; break; }
+                        $classes[strtolower($armClass)]=$armClass;
+                    }
+                    if ($valid && count($classes)>=2 && count($classes)<=8) {
+                        ksort($classes);
+                        $known[$name]=['className'=>implode('|',$classes),'source'=>'native','nullable'=>$nullable];
+                    }
+                }
                 if (is_string($name)) $arrayParams[$name] = true;
                 if (is_string($name) && !$param->byRef && ($param->type === null
                     || ($param->type instanceof PhpParser\Node\Identifier
@@ -418,6 +499,29 @@ foreach ($paths as $relative) {
                 if (!isset($arrayParams[$name])) unset($arrayTypes[$name]);
             }
             $key = static fn(string $class, string $name): string => strtolower(ltrim($class, '\\').'::'.$name);
+            // Property docs are declarations, not flow facts. Do not rely on
+            // them in a method that writes or may pass that property by reference.
+            $unsafeProperties=[];
+            if ($currentClass!==null && array_filter($this->propertyArrayElements[strtolower($currentClass)] ?? [])) {
+                $body=$function instanceof PhpParser\Node\Expr\ArrowFunction ? [$function->expr] : ($function->getStmts() ?? []);
+                $finder=new PhpParser\NodeFinder();
+                foreach ($finder->find($body, static fn($n) => $n instanceof PhpParser\Node\Expr\Assign
+                    || $n instanceof PhpParser\Node\Expr\AssignOp || $n instanceof PhpParser\Node\Expr\AssignRef
+                    || $n instanceof PhpParser\Node\Stmt\Unset_ || $n instanceof PhpParser\Node\Arg
+                    || $n instanceof PhpParser\Node\Stmt\Foreach_ && $n->byRef) as $mutation) {
+                    $values=$mutation instanceof PhpParser\Node\Expr\AssignRef ? [$mutation->var,$mutation->expr]
+                        : ($mutation instanceof PhpParser\Node\Stmt\Unset_ ? $mutation->vars
+                            : ($mutation instanceof PhpParser\Node\Arg ? [$mutation->value]
+                                : ($mutation instanceof PhpParser\Node\Stmt\Foreach_ ? [$mutation->expr] : [$mutation->var])));
+                    foreach ($values as $value) {
+                        while ($value instanceof PhpParser\Node\Expr\ArrayDimFetch) $value=$value->var;
+                        if ($value instanceof PhpParser\Node\Expr\PropertyFetch
+                            && $value->var instanceof PhpParser\Node\Expr\Variable && $value->var->name==='this'
+                            && $value->name instanceof PhpParser\Node\Identifier)
+                            $unsafeProperties[$value->name->toString()]=true;
+                    }
+                }
+            }
             $infer = function($expr, array $known) use (&$infer, $properties, $currentClass, $key, &$referenceTainted): ?array {
                 if ($expr instanceof PhpParser\Node\Expr\CallLike && $expr->isFirstClassCallable()) return null;
                 if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name)) {
@@ -488,10 +592,16 @@ foreach ($paths as $relative) {
                 }
                 return null;
             };
-            $inferArray = function($expr,array $known,array $arrays) use (&$inferArray,$infer,$key,$currentClass,&$referenceTainted): ?string {
+            $inferArray = function($expr,array $known,array $arrays) use (&$inferArray,$infer,$key,$currentClass,&$referenceTainted,$unsafeProperties): ?string {
                 if ($expr instanceof PhpParser\Node\Expr\CallLike && $expr->isFirstClassCallable()) return null;
                 if ($expr instanceof PhpParser\Node\Expr\Variable && is_string($expr->name))
-                    return isset($referenceTainted[$expr->name]) ? null : ($arrays[$expr->name] ?? null);
+                    return isset($referenceTainted[$expr->name]) || !isset($arrays[$expr->name])
+                        ? null : ltrim($arrays[$expr->name],'@');
+                if ($currentClass!==null && $expr instanceof PhpParser\Node\Expr\PropertyFetch
+                    && $expr->var instanceof PhpParser\Node\Expr\Variable && $expr->var->name==='this'
+                    && $expr->name instanceof PhpParser\Node\Identifier
+                    && !isset($unsafeProperties[$expr->name->toString()]))
+                    return $this->propertyArrayElements[strtolower($currentClass)][$expr->name->toString()] ?? null;
                 if ($expr instanceof PhpParser\Node\Expr\ArrayDimFetch) {
                     $element=$inferArray($expr->var,$known,$arrays);
                     return $element !== null && str_ends_with($element,'[]')
@@ -527,8 +637,10 @@ foreach ($paths as $relative) {
                         && !$part->dim instanceof PhpParser\Node\Scalar\Int_
                         && !$part->dim instanceof PhpParser\Node\Scalar\String_) return null;
                 }
-                if (!$part instanceof PhpParser\Node\Expr\Variable
-                    || !is_string($part->name)) return null;
+                if (!($part instanceof PhpParser\Node\Expr\Variable && is_string($part->name))
+                    && !($part instanceof PhpParser\Node\Expr\PropertyFetch
+                        && $part->var instanceof PhpParser\Node\Expr\Variable && $part->var->name==='this'
+                        && $part->name instanceof PhpParser\Node\Identifier)) return null;
                 $element = $inferArray($expr->var, $types, $arrays);
                 if ($element === null || str_ends_with($element, '[]')
                     || !preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*$/D', $element))
@@ -562,14 +674,16 @@ foreach ($paths as $relative) {
                 if (isset($class) && $class !== null) {
                     // A child may inherit an implementation with by-reference
                     // parameters. A declared override takes precedence.
-                    for ($depth = 0; $depth < 24; $depth++) {
-                        $signature = $key($class,$part->name->toString());
-                        if (array_key_exists($signature,$this->methodByRefArgs)) {
-                            $byRef = $this->methodByRefArgs[$signature] ?? [];
-                            break;
+                    foreach (explode('|',$class) as $receiverClass) {
+                        for ($depth = 0; $depth < 24; $depth++) {
+                            $signature = $key($receiverClass,$part->name->toString());
+                            if (array_key_exists($signature,$this->methodByRefArgs)) {
+                                $byRef = array_merge($byRef,$this->methodByRefArgs[$signature] ?? []);
+                                break;
+                            }
+                            $receiverClass = $this->classParents[strtolower(ltrim($receiverClass,'\\'))] ?? null;
+                            if ($receiverClass === null) break;
                         }
-                        $class = $this->classParents[strtolower(ltrim($class,'\\'))] ?? null;
-                        if ($class === null) break;
                     }
                 }
                 $names = [];
@@ -625,7 +739,8 @@ foreach ($paths as $relative) {
                 foreach ($part->getSubNodeNames() as $field) $modified($part->$field,$names,$types);
             };
             $activeInlineHints = [];
-            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$arrayElementReceiver,$arrayMutationTargets,$modified,&$referenceTainted,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function,$inlineHintParams,&$activeInlineHints): void {
+            $unknownForeachValues=[];
+            $walk = function($part,array &$types,array &$arrays) use (&$walk,$infer,$inferArray,$arrayElementReceiver,$arrayMutationTargets,$modified,&$referenceTainted,&$calls,&$unresolved,&$propertyAccesses,$currentClass,$function,$inlineHintParams,&$activeInlineHints,&$unknownForeachValues): void {
                 if (is_array($part)) { foreach ($part as $entry) $walk($entry,$types,$arrays); return; }
                 if ($part instanceof PhpParser\Node\Expr\Closure) {
                     $captured = [];
@@ -707,7 +822,16 @@ foreach ($paths as $relative) {
                     $name = $part->expr->var instanceof PhpParser\Node\Expr\Variable ? $part->expr->var->name : null;
                     $doc=$part->getDocComment()?->getText();
                     $hint = qbPhpDocArray($doc,'var',$this->namespace,$this->aliases);
-                    if (is_string($name) && $hint !== null) $arrays[$name]=$hint;
+                    if (is_string($name) && $hint !== null) {
+                        // Only an explicitly annotated local empty array may
+                        // trust subsequent unknown variable elements. Keep this
+                        // provenance in the fact through existing branch joins.
+                        $named=qbPhpNamedVar($doc,$name);
+                        $explicit=$named!==null && !str_contains($named,'|')
+                            && $part->expr->expr instanceof PhpParser\Node\Expr\Array_
+                            && !$part->expr->expr->items && !isset($referenceTainted[$name]);
+                        $arrays[$name]=($explicit ? '@' : '').$hint;
+                    }
                     if (is_string($name) && $doc !== null
                         && preg_match('/@var\s+(\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*)\s+\$([A-Za-z_][A-Za-z0-9_]*)/i',
                             $doc,$annotation)
@@ -725,15 +849,29 @@ foreach ($paths as $relative) {
                         $walk($part->var,$types,$arrays);
                         $base=$part->var;
                         while ($base instanceof PhpParser\Node\Expr\ArrayDimFetch) $base=$base->var;
-                        if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name))
-                            unset($arrays[$base->name]);
+                        if ($base instanceof PhpParser\Node\Expr\Variable && is_string($base->name)) {
+                            $name=$base->name;
+                            $fact=$arrays[$name] ?? '';
+                            $value=$infer($part->expr,$types);
+                            $expected=ltrim($fact,'@');
+                            $direct=$part->var->var===$base;
+                            $compatible=$direct && $fact!=='' && !isset($referenceTainted[$name])
+                                && !str_ends_with($expected,'[]') && $value!==null && !($value['nullable'] ?? false)
+                                && qbPhpIsSubtype($value['className'],$expected,$this->classAncestors);
+                            $trustedUnknown=$direct && str_starts_with($fact,'@') && $value===null
+                                && $part->expr instanceof PhpParser\Node\Expr\Variable && is_string($part->expr->name)
+                                && isset($unknownForeachValues[$part->expr->name])
+                                && !isset($referenceTainted[$part->expr->name]) && !isset($arrays[$part->expr->name])
+                                && !isset($referenceTainted[$name]) && !str_ends_with($expected,'[]');
+                            if (!$compatible && !$trustedUnknown) unset($arrays[$name]);
+                        }
                         return;
                     }
                     if ($part->var instanceof PhpParser\Node\Expr\PropertyFetch
                         && $part->var->name instanceof PhpParser\Node\Identifier) {
                         $receiver = $infer($part->var->var, $types);
                         $range = $this->range($part->var->name);
-                        if ($receiver !== null && $range !== null) {
+                        if ($receiver !== null && !str_contains($receiver['className'],'|') && $range !== null) {
                             $propertyAccesses[] = ['className'=>$receiver['className'],
                                 'name'=>$part->var->name->toString(),'nameRange'=>$range,'kind'=>'writes',
                                 'evidenceSource'=>$receiver['source']];
@@ -895,8 +1033,18 @@ foreach ($paths as $relative) {
                 if ($part instanceof PhpParser\Node\Stmt\Foreach_) {
                     $walk($part->expr,$types,$arrays);
                     $tmp=$types; $tmpArrays=$arrays;
+                    $outerUnknown=$unknownForeachValues;
                     if ($part->valueVar instanceof PhpParser\Node\Expr\Variable && is_string($part->valueVar->name)) {
                         $name=$part->valueVar->name; $element=$inferArray($part->expr,$types,$arrays);
+                        unset($unknownForeachValues[$name]);
+                        if ($element===null && !$part->byRef && !isset($referenceTainted[$name])) {
+                            $annotation=qbPhpNamedVar($part->getDocComment()?->getText(),$name);
+                            if ($annotation!==null && !str_contains($annotation,'|')) {
+                                $class=qbPhpDocClass($annotation,$this->namespace,$this->aliases);
+                                $nested=qbPhpDocArray('/** @var '.$annotation.' */','var',$this->namespace,$this->aliases);
+                                $element=$class ?? ($nested===null ? null : $nested.'[]');
+                            }
+                        }
                         if ($element!==null && !str_ends_with($element,'[]')) {
                             $tmp[$name]=['className'=>$element,'source'=>'docblock'];
                             unset($tmpArrays[$name]);
@@ -905,14 +1053,26 @@ foreach ($paths as $relative) {
                             $tmpArrays[$name]=substr($element,0,-2);
                         } else {
                             unset($tmp[$name],$tmpArrays[$name]);
+                            // A local documented empty array is a contract for
+                            // collecting untouched values from an untyped input
+                            // loop, not for arbitrary unknown/scalar assignments.
+                            if (!$part->byRef && !isset($referenceTainted[$name])
+                                && array_filter($arrays,static fn($fact)=>str_starts_with($fact,'@'))) {
+                                $bodyChanges=[]; $modified($part->stmts,$bodyChanges,$tmp);
+                                $escaped=(new PhpParser\NodeFinder())->findFirst($part->stmts,static fn($n)=>
+                                    ($n instanceof PhpParser\Node\Arg && $n->value instanceof PhpParser\Node\Expr\Variable
+                                        && $n->value->name===$name));
+                                if (!isset($bodyChanges[$name]) && $escaped===null) $unknownForeachValues[$name]=true;
+                            }
                         }
                     }
                     if ($part->keyVar instanceof PhpParser\Node\Expr\Variable && is_string($part->keyVar->name))
-                        unset($tmp[$part->keyVar->name],$tmpArrays[$part->keyVar->name]);
+                        unset($tmp[$part->keyVar->name],$tmpArrays[$part->keyVar->name],$unknownForeachValues[$part->keyVar->name]);
                     if ($part->byRef && $part->expr instanceof PhpParser\Node\Expr\Variable
                         && is_string($part->expr->name))
                         unset($tmpArrays[$part->expr->name]);
                     $walk($part->stmts,$tmp,$tmpArrays);
+                    $unknownForeachValues=$outerUnknown;
                     $changed=[]; $modified($part,$changed,$types);
                     foreach ($changed as $name=>$_) {
                         if (!isset($types[$name],$tmp[$name])
@@ -921,6 +1081,10 @@ foreach ($paths as $relative) {
                         }
                         if (!isset($arrays[$name],$tmpArrays[$name])
                             || strcasecmp($arrays[$name],$tmpArrays[$name]) !== 0) unset($arrays[$name]);
+                    }
+                    foreach (array_keys($arrays) as $name) {
+                        if (!isset($tmpArrays[$name]) || strcasecmp($arrays[$name],$tmpArrays[$name])!==0)
+                            unset($arrays[$name]);
                     }
                     if ($part->byRef && $part->expr instanceof PhpParser\Node\Expr\Variable
                         && is_string($part->expr->name)) unset($arrays[$part->expr->name]);
@@ -1026,7 +1190,7 @@ foreach ($paths as $relative) {
                     && $part->name instanceof PhpParser\Node\Identifier) {
                     $receiver = $infer($part->var, $types);
                     $range = $this->range($part->name);
-                    if ($receiver !== null && $range !== null) {
+                    if ($receiver !== null && !str_contains($receiver['className'],'|') && $range !== null) {
                         $propertyAccesses[] = ['className'=>$receiver['className'],
                             'name'=>$part->name->toString(),'nameRange'=>$range,'kind'=>'reads',
                             'evidenceSource'=>$receiver['source']];
@@ -1067,9 +1231,11 @@ foreach ($paths as $relative) {
                     $type=$arrayElementReceiver($part->var,$types,$arrays) ?? $infer($part->var,$types);
                     $range=$this->range($part->name);
                     if ($range!==null) {
-                        if ($type!==null) $calls[]=['className'=>$type['className'],'name'=>$part->name->toString(),
-                            'nameRange'=>$range,'evidenceSource'=>$type['source'],'callStyle'=>'object'];
-                        else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
+                        if ($type!==null) {
+                            $classes=explode('|',$type['className']);
+                            foreach ($classes as $class) $calls[]=['className'=>$class,'name'=>$part->name->toString(),
+                                'nameRange'=>$range,'evidenceSource'=>count($classes)>1 ? 'native-union' : $type['source'],'callStyle'=>'object'];
+                        } else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
                     }
                 }
                 $mutations = $arrayMutationTargets($part,$types);

@@ -37,7 +37,7 @@ export interface ScipPhpTypedMethodCall {
   className: string;
   name: string;
   nameRange: readonly [number, number, number, number];
-  evidenceSource?: "native" | "docblock";
+  evidenceSource?: "native" | "docblock" | "native-union";
   /** AST-proven dispatch style; absent in legacy fixtures. */
   callStyle?: "object" | "static";
 }
@@ -1282,10 +1282,17 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   // never manufacture child method symbols or collapse receivers into a label.
   const phpReceiverBySite = new Map<string, { className: string; target: string }>();
   const ambiguousPhpReceiverSites = new Set<string>();
-  for (const { document, call } of phpTypedCalls) {
+  const phpUnionTargetsBySite = new Map<string, Set<string>>();
+  for (const { document, ownerId, call } of phpTypedCalls) {
     const target = verifiedPhpCallTarget(call);
     if (!target) continue;
     const key = siteKey(document, tupleRange(call.nameRange), call.name);
+    if (call.evidenceSource === "native-union") {
+      const unionKey = ownerId + ":" + key;
+      const targets = phpUnionTargetsBySite.get(unionKey) ?? new Set<string>();
+      targets.add(target);
+      phpUnionTargetsBySite.set(unionKey, targets);
+    }
     const existing = phpReceiverBySite.get(key);
     if (existing && (existing.target !== target || existing.className !== call.className)) {
       ambiguousPhpReceiverSites.add(key);
@@ -1397,29 +1404,44 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
   }
 
   function verifiedPhpMethodTarget(className: string, methodName: string): string | undefined {
-    let frontier = [className.toLowerCase()];
+    type AncestorPath = "class" | "interface" | "trait";
+    let frontier: Array<{ name: string; via: AncestorPath }> = [{ name: className.toLowerCase(), via: "class" }];
     const visited = new Set<string>();
     for (let depth = 0; depth < 24 && frontier.length; depth += 1) {
-      const next: string[] = [];
+      const next: typeof frontier = [];
       const candidates = new Set<string>();
-      for (const current of frontier) {
-        if (visited.has(current)) continue;
-        visited.add(current);
+      const classCandidates = new Set<string>();
+      const traitCandidates = new Set<string>();
+      for (const { name: current, via } of frontier) {
+        const visit = current + ":" + via;
+        if (visited.has(visit)) continue;
+        visited.add(visit);
         const direct = phpMethodsByQualifiedName.get(qualifiedMethodKey(current, methodName));
-        if (direct) candidates.add(direct);
+        if (direct) {
+          candidates.add(direct);
+          if (via === "class") classCandidates.add(direct);
+          if (via === "trait") traitCandidates.add(direct);
+        }
         // Ambiguous SCIP definitions cannot be recovered through their parents.
         else if (direct === null && phpMethodsByQualifiedName.has(qualifiedMethodKey(current, methodName))) return undefined;
-        else next.push(...(phpClassAncestors.get(current) ?? []).map((entry) => entry.className.toLowerCase()));
+        else for (const entry of phpClassAncestors.get(current) ?? []) {
+          next.push({ name: entry.className.toLowerCase(),
+            via: via !== "class" ? via : entry.relation === "implements" ? "interface" : entry.relation === "trait" ? "trait" : "class" });
+        }
       }
-      if (candidates.size > 1) return undefined;
+      // An inherited class declaration implements the same-depth interface
+      // contract. A competing trait or multiple class declarations remains ambiguous.
+      if (candidates.size > 1) return classCandidates.size === 1 && traitCandidates.size === 0
+        ? [...classCandidates][0] : undefined;
       if (candidates.size === 1) return [...candidates][0];
       frontier = next;
     }
     return undefined;
   }
 
-  // Recover only AST-proven receiver calls whose exact target is a single
-  // native SCIP method definition. Do not manufacture target nodes or treat
+  // Recover only AST-proven receiver calls whose individual target is a single
+  // native SCIP method definition. A declared class union can prove multiple
+  // possible targets at the same site, not a unique runtime dispatch. Do not manufacture target nodes or treat
   // an unresolved/dynamic receiver as a semantic call.
   for (const { document, ownerId, call } of phpTypedCalls) {
     const target = verifiedPhpCallTarget(call);
@@ -1432,6 +1454,9 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     // the SCIP and AST observations by exact source position.
     const innermost = phpOwnersByDocument.get(document)?.find((entry) => rangeContains(entry.range, location));
     if (!innermost || innermost.ownerId !== ownerId) continue;
+    const unionTargets = call.evidenceSource === "native-union"
+      ? phpUnionTargetsBySite.get(ownerId + ":" + siteKey(document, location, call.name))
+      : undefined;
     const competingNative = document.occurrences.some((occurrence) =>
       (occurrence.symbolRoles & SCIP_ROLE_DEFINITION) === 0 && occurrence.range
       && occurrence.range.startLine === location.startLine
@@ -1439,7 +1464,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       && (() => {
         const native = nodeBySymbol.get(scopedSymbolKey(document, occurrence.symbol))?.id
           ?? externalNodeBySymbol.get(occurrence.symbol)?.id;
-        return (native ? phpDocImplementationById.get(native) ?? native : undefined) !== target;
+        const resolvedNative = native ? phpDocImplementationById.get(native) ?? native : undefined;
+        return resolvedNative !== target && !(resolvedNative && unionTargets?.has(resolvedNative));
       })());
     if (competingNative) continue;
     resolvedPhpSites.add(siteKey(document, location, call.name));
@@ -1448,6 +1474,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       receiverClass: call.className,
       label: call.evidenceSource === "docblock"
         ? "PHP AST docblock-derived array element; SCIP-verified method definition; receiverClass: " + call.className
+        : call.evidenceSource === "native-union"
+        ? "PHP AST declared union receiver; possible dispatch; SCIP-verified method definition; receiverClass: " + call.className
         : "PHP AST statically typed receiver; SCIP-verified method definition; receiverClass: " + call.className,
     }], [{ providerId: "questboard-php-ast", fidelity: "syntax", freshness: "fresh" }]);
   }

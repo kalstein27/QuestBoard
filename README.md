@@ -104,11 +104,18 @@ The Web UI exposes Quest, Flow, and Code workspaces plus Agent Follow presence c
 | `QUESTBOARD_CODE_MAP_PROVIDER` | Optional single-provider override: `scip-typescript`, `scip-php`, or `sourcekit-lsp` | unset |
 | `QUESTBOARD_CODE_MAP_PROVIDERS` | Ordered semantic provider set | `scip-typescript,scip-php` |
 | `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
+| `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH` | Set to `0` to disable isolated background indexing | enabled |
+| `QUESTBOARD_CODE_MAP_ISOLATED_READ` | Set to `0` to disable isolated bounded reads | enabled |
+| `QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB` | Shared Node worker old-space limit (64–4096 MiB) | `512` |
+| `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_HEAP_MIB` | Index worker-specific old-space override (64–4096 MiB) | shared limit |
+| `QUESTBOARD_CODE_MAP_ISOLATED_READ_HEAP_MIB` | Read worker-specific old-space override (64–4096 MiB) | shared limit |
 | `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | Optional override for the bundled `scip-typescript` indexer executable | local `node_modules/.bin/scip-typescript` |
 | `QUESTBOARD_SCIP_PHP_EXECUTABLE` | Optional SCIP PHP executable override | target project's `vendor/bin/scip-php` |
 | `QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE` | Optional Swift SourceKit-LSP launcher override | `/usr/bin/xcrun` |
 
 ### Code Map provider setup
+
+For large graphs, set the isolated refresh and read heap limits independently in the daemon's environment (for example, refresh `2048`, read `1024`) and restart the daemon. Worker-specific values take precedence over the shared limit; an explicit executor option takes precedence over both. Invalid limits are rejected rather than silently falling back. These values set Node's `--max-old-space-size` per worker, not a total RSS or PHP memory limit. Up to two read workers can run concurrently by default.
 
 Code Map is opt-in for ordinary daemon launches, while ChatGPT2Codex managed-service mode enables it by default unless `QUESTBOARD_CODE_MAP` is explicitly set to a disabling value. The default semantic set is **SCIP TypeScript + SCIP PHP**. QuestBoard declares `@sourcegraph/scip-typescript` as a pinned runtime dependency, while PHP indexing intentionally uses the target Composer project's own `vendor/bin/scip-php`. QuestBoard reads both providers' `.scip` output through the same provider-neutral decoder/normalizer path.
 

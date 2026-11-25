@@ -35,7 +35,11 @@ test("A2: PHP AST branch joins, arrays, clone and object properties preserve onl
     assert.equal(count("annotated"),1);
     assert.equal(count("differentBranches"),0);
     assert.equal(unresolved("differentBranches"),1,"different branch class cannot be guessed");
-    assert.equal(count("incompatibleUnion"),0);
-    assert.equal(unresolved("incompatibleUnion"),1);
+    // F2: an explicitly declared class union proves possible dispatches,
+    // unlike an incompatible flow join above. Both alternatives stay labelled.
+    const unionCalls=(find("incompatibleUnion").calls ?? []).filter(c=>c.name==="touch");
+    assert.deepEqual(unionCalls.map(c=>c.className).sort(),["Domain\\Order","Domain\\Refund"]);
+    assert.ok(unionCalls.every(c=>c.evidenceSource==="native-union"));
+    assert.equal(unresolved("incompatibleUnion"),0);
   } finally { rmSync(root,{recursive:true,force:true}); }
 });

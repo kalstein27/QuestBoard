@@ -1,5 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { resolveIsolatedCodeMapHeapMiB } from "./code-map-isolated-heap.js";
 import type { CodeIndexRequest } from "../application/code-intelligence.js";
 import type {
   CodeMapIsolatedRefreshExecutor,
@@ -19,9 +20,6 @@ export interface IsolatedCodeMapRefreshOptions {
 
 const MAX_IPC_BYTES = 4096;
 const DEFAULT_TIMEOUT_MS = 240_000;
-const configuredHeapMiB = Number(process.env.QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB ?? "512");
-const DEFAULT_HEAP_MIB = Number.isSafeInteger(configuredHeapMiB)
-  && configuredHeapMiB >= 64 && configuredHeapMiB <= 4096 ? configuredHeapMiB : 512;
 const activeChildren = new Set<ChildProcess>();
 let exitHandlerInstalled = false;
 const CODE_MAP_ENV_KEYS = [
@@ -66,9 +64,8 @@ async function runOne(
     throw new Error("Isolated Code Map requires a canonical full-index project request");
   }
   const limitMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const heapMiB = options.maxOldSpaceMiB ?? DEFAULT_HEAP_MIB;
-  if (!Number.isInteger(limitMs) || limitMs < 100 || limitMs > 900_000
-    || !Number.isInteger(heapMiB) || heapMiB < 64 || heapMiB > 4096) {
+  const heapMiB = resolveIsolatedCodeMapHeapMiB(env, "refresh", options.maxOldSpaceMiB);
+  if (!Number.isInteger(limitMs) || limitMs < 100 || limitMs > 900_000) {
     throw new RangeError("Invalid isolated Code Map resource limits");
   }
   const childEnv: NodeJS.ProcessEnv = {};

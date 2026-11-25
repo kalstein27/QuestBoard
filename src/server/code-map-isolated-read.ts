@@ -1,5 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { resolveIsolatedCodeMapHeapMiB } from "./code-map-isolated-heap.js";
 import { CodeMapQueryError } from "../application/code-map-query.js";
 import { SourceStructureSelectionError } from "../application/source-structure-sync-graph.js";
 import type {
@@ -22,9 +23,6 @@ export interface IsolatedCodeMapReadOptions {
   onWorkerStarted?: (worker: { pid: number; operation: CodeMapIsolatedReadOperation }) => void;
 }
 const DEFAULT_TIMEOUT_MS = 20_000;
-const configuredHeapMiB = Number(process.env.QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB ?? "512");
-const DEFAULT_HEAP_MIB = Number.isSafeInteger(configuredHeapMiB)
-  && configuredHeapMiB >= 64 && configuredHeapMiB <= 4096 ? configuredHeapMiB : 512;
 const MAX_IPC_BYTES = 1024 * 1024;
 const activeChildren = new Set<ChildProcess>();
 function cancelled(): Error {
@@ -59,9 +57,8 @@ async function runOne(
 ): Promise<unknown> {
   if (signal?.aborted) throw cancelled();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const heapMiB = options.maxOldSpaceMiB ?? DEFAULT_HEAP_MIB;
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000
-    || !Number.isInteger(heapMiB) || heapMiB < 64 || heapMiB > 4096) {
+  const heapMiB = resolveIsolatedCodeMapHeapMiB(env, "read", options.maxOldSpaceMiB);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
     throw new RangeError("Invalid isolated Code Map read resource limits");
   }
   if (!request.projectId || !isAbsolute(request.rootPath))

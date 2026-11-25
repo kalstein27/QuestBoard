@@ -197,6 +197,122 @@ final class TicketHandler {
     $job = function () use ($wallet) { $wallet->reset(); }; // e1 mutated break capture
   }
 }
+abstract class Model { public function getModifiedAttributes(): array { return []; } }
+interface InventoryContract { public function getModifiedAttributes(): array; }
+final class Inventory extends Model implements InventoryContract {
+  public function setIncreaseTime(int $time): void {}
+}
+final class InventoryDAO {
+  /** @param Inventory $object */
+  public static function set(Model $object): void {
+    $object->getModifiedAttributes(); // f1 parent
+    $object->setIncreaseTime(1); // f1 child
+  }
+  /** @param Inventory $object */
+  public static function contract(InventoryContract $object): void {
+    $object->setIncreaseTime(2); // f1 interface
+  }
+  /** @param Inventory $other */
+  public static function wrong(Model $object): void {
+    $object->setIncreaseTime(1); // f1 wrong name
+  }
+  /** @param Inventory $object */
+  public static function unrelated(Wallet $object): void {
+    $object->setIncreaseTime(1); // f1 unrelated
+  }
+}
+final class NormalSchedule {
+  public function getScoutId(): int { return 1; }
+  public function onlyNormal(): void {}
+}
+final class EventSchedule { public function getScoutId(): int { return 2; } }
+final class ScoutHandler {
+  public function validate(NormalSchedule|EventSchedule $schedule): void {
+    $schedule->getScoutId(); // f2 both
+    $schedule->onlyNormal(); // f2 one
+  }
+  public function nullable(NormalSchedule|EventSchedule|null $schedule): void {
+    $job = function () use ($schedule) { $schedule->getScoutId(); }; // f2 nullable capture
+  }
+  public function assigned(NormalSchedule|EventSchedule $schedule): void {
+    $schedule = new Wallet();
+    $schedule->getScoutId(); // f2 reassigned
+  }
+}
+final class ShopEntry { public function setPackageType(int $n): void {} }
+final class ShopHandler {
+  private function groupByDay(array $rows): array { return []; }
+  public function process(array $rows): void {
+    $targets = [];
+    foreach ($rows as $row) { $targets[] = $row; }
+    /** @var ShopEntry $target */
+    foreach ($targets as $target) {
+      $target->setPackageType(1); // f3 value
+    }
+    $target->setPackageType(1); // f3 outside
+    /** @var ShopEntry[] $group */
+    foreach ($this->groupByDay($rows) as $group) {
+      foreach ($group as $entry) {
+        $entry->setPackageType(2); // f3 nested
+      }
+    }
+    /** @var ShopEntry $other */
+    foreach ($rows as $target) {
+      $target->setPackageType(3); // f3 wrong name
+    }
+  }
+}
+final class MissionState { public function setCount(int $n): void {} }
+final class MissionHandler {
+  /** @var MissionState[] */
+  private array $states = [];
+  /** @var list<MissionState> */
+  private array $list = [];
+  public function adjust(int $id): void {
+    foreach ($this->states as $state) {
+      $state->setCount(1); // f4 foreach
+    }
+    $one = $this->states[$id];
+    $one->setCount(2); // f4 assignment
+    $this->list[0]->setCount(3); // f4 index
+  }
+  public function conflict(): void {
+    $this->states[0] = new Wallet();
+    $one = $this->states[0];
+    $one->setCount(2); // f4 conflict
+  }
+}
+final class UserRole { public function setRole(int $n): void {} }
+final class Schedule {
+  public static function create(int $id): self { return new self(); }
+  public function setType(int $n): void {}
+}
+final class RoleService {
+  public static function demote(array $all, int $aceId): void {
+    /** @var UserRole[] $roles */
+    $roles = [];
+    foreach ($all as $role) {
+      if ($role->user_id !== $aceId) { $roles[] = $role; }
+    }
+    foreach ($roles as $role) {
+      $role->setRole(0); // f5 foreach
+    }
+    /** @var Schedule[] $list */
+    $list = [];
+    for ($i = 1; $i <= 3; $i++) { $list[$i] = Schedule::create($i); }
+    $list[1]->setType(9); // f5 index
+  }
+  public static function conflict(bool $flag): void {
+    /** @var Schedule[] $list */
+    $list = [];
+    if ($flag) { $list[] = new Wallet(); }
+    $list[0]->setType(1); // f5 conflict
+    /** @var Schedule[] $list */
+    $list = [];
+    $list[] = 42;
+    $list[0]->setType(1); // f5 scalar
+  }
+}
 try {
   Clock::getCurrentTimeStamp(); // file static
   Clock::getInstance()->getTimeStamp(); // file object
@@ -281,6 +397,30 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     check("Wallet", "lock", "calls", "// e1 exit", "exiting");
     check("Wallet", "reset", "calls", "// e1 conditional capture", "", false);
     check("Wallet", "reset", "calls", "// e1 mutated break capture", "", false);
+    check("Model", "getModifiedAttributes", "calls", "// f1 parent", "set");
+    check("Inventory", "setIncreaseTime", "calls", "// f1 child", "set");
+    check("Inventory", "setIncreaseTime", "calls", "// f1 interface", "contract");
+    check("Inventory", "setIncreaseTime", "calls", "// f1 wrong name", "", false);
+    check("Inventory", "setIncreaseTime", "calls", "// f1 unrelated", "", false);
+    check("NormalSchedule", "getScoutId", "calls", "// f2 both", "validate");
+    check("EventSchedule", "getScoutId", "calls", "// f2 both", "validate");
+    check("NormalSchedule", "onlyNormal", "calls", "// f2 one", "validate");
+    check("NormalSchedule", "getScoutId", "calls", "// f2 nullable capture", "", false);
+    check("EventSchedule", "getScoutId", "calls", "// f2 nullable capture", "", false);
+    check("NormalSchedule", "getScoutId", "calls", "// f2 reassigned", "", false);
+    check("EventSchedule", "getScoutId", "calls", "// f2 reassigned", "", false);
+    check("ShopEntry", "setPackageType", "calls", "// f3 value", "process");
+    check("ShopEntry", "setPackageType", "calls", "// f3 nested", "process");
+    check("ShopEntry", "setPackageType", "calls", "// f3 outside", "", false);
+    check("ShopEntry", "setPackageType", "calls", "// f3 wrong name", "", false);
+    check("MissionState", "setCount", "calls", "// f4 foreach", "adjust");
+    check("MissionState", "setCount", "calls", "// f4 assignment", "adjust");
+    check("MissionState", "setCount", "calls", "// f4 index", "adjust");
+    check("MissionState", "setCount", "calls", "// f4 conflict", "", false);
+    check("UserRole", "setRole", "calls", "// f5 foreach", "demote");
+    check("Schedule", "setType", "calls", "// f5 index", "demote");
+    check("Schedule", "setType", "calls", "// f5 conflict", "", false);
+    check("Schedule", "setType", "calls", "// f5 scalar", "", false);
     assert.deepEqual(failures, []);
     const file = graph.nodes.find(node => node.canonicalIdentity === "file:" + path)!;
     const timestamp = graph.nodes.find(node => node.name === "getTimeStamp" && node.canonicalIdentity.includes("/Clock#"))!;

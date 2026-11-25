@@ -62,6 +62,7 @@ const state = {
   codeMapSubsystemEvidence: null,
   codeMapSubsystemError: null,
   codeMapLoading: false,
+  codeMapRequestVersion: 0,
   codeMapIndexError: null,
   selectedCodeMapDetail: null,
   codeMapInspectorData: null,
@@ -765,18 +766,29 @@ function renderViewSwitch() {
 
 async function loadCodeMap() {
   if (!state.projectId) return;
+  const projectId = state.projectId;
+  const requestVersion = ++state.codeMapRequestVersion;
+  const isCurrent = () => state.projectId === projectId && state.codeMapRequestVersion === requestVersion;
   state.codeMapLoading = true;
   resetSourceStructure();
   renderCodeMapBoard();
   const subsystemRead = loadCodeMapSubsystems();
   try {
-    state.codeMap = await api(`/projects/${encodeURIComponent(state.projectId)}/code-map`);
+    const map = await api(`/projects/${encodeURIComponent(projectId)}/code-map`);
+    // Concurrent navigation or a post-mutation reload may already have
+    // installed newer CodeScope bindings. Never publish an older response.
+    if (!isCurrent()) return;
+    state.codeMap = map;
     if (state.codeMap.boundedSourceTree) await loadCodeMapSourceTreePage("", 0);
     await subsystemRead;
-    state.codeMapIndexError = null;
+    if (isCurrent()) state.codeMapIndexError = null;
+  } catch (error) {
+    if (isCurrent()) throw error;
   } finally {
-    state.codeMapLoading = false;
-    renderCodeMapBoard();
+    if (isCurrent()) {
+      state.codeMapLoading = false;
+      renderCodeMapBoard();
+    }
   }
 }
 

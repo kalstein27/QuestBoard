@@ -93,7 +93,7 @@ test("Web separates compatibility roles from the bounded Source subsystems / Cal
   assert.match(app, /quality\?\.reason === "overcompressed"/);
   assert.match(app, /code-map\/subsystems/);
   assert.match(app, /state\.codeMapSubsystems/);
-  assert.match(app, /const subsystemRead = loadCodeMapSubsystems\(\);\s*try \{\s*state\.codeMap = await api/);
+  assert.match(app, /const subsystemRead = loadCodeMapSubsystems\(\);\s*try \{\s*const map = await api/);
   assert.match(app, /Source subsystems \/ Calls/);
   assert.match(app, /Compatibility roles · six-role Investigation sync lens/);
   assert.doesNotMatch(app, /projection\.subsystems\?\.nodes/);
@@ -234,6 +234,36 @@ test("Phase 4 exposes durable CodeScope Task context from both Code and Quest su
   assert.match(css, /\.code-scope-task-row/);
   assert.match(css, /\.code-scope-task-group/);
   assert.match(css, /\.task-code-scope-row\.stale/);
+});
+
+test("a late Code Map response cannot overwrite the newer relinked binding", async () => {
+  const sandbox: any = {
+    window: { addEventListener() {} },
+    location: { search: "" },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    URLSearchParams,
+  };
+  await runInNewContext(`${app}
+    ;(async () => {
+      const pending = [];
+      state.projectId = "project-a";
+      renderCodeMapBoard = () => {};
+      resetSourceStructure = () => {};
+      loadCodeMapSubsystems = async () => null;
+      api = () => new Promise(resolve => pending.push(resolve));
+      const older = loadCodeMap();
+      const newer = loadCodeMap();
+      pending[1]({codeScopeBindings:[{id:"binding",revision:3,state:"active",codeNodeId:"new-node"}]});
+      await newer;
+      pending[0]({codeScopeBindings:[{id:"binding",revision:2,state:"relinkable",codeNodeId:"old-node"}]});
+      await older;
+      globalThis.__binding = state.codeMap.codeScopeBindings[0];
+      globalThis.__loading = state.codeMapLoading;
+    })()
+  `, sandbox);
+  assert.equal(sandbox.__binding.codeNodeId, "new-node");
+  assert.equal(sandbox.__binding.state, "active");
+  assert.equal(sandbox.__loading, false);
 });
 
 test("Phase 5 Flow Code lens is derived from canonical bindings and stays hard bounded for large groups", () => {
