@@ -42,6 +42,47 @@ function isolatedFixture() {
     dispose: () => { rmSync(root, { recursive: true, force: true }); rmSync(storage, { recursive: true, force: true }); } };
 }
 
+test("G4 warm isolated reads reuse one worker and replace it when snapshot revision changes", { timeout: 30_000 }, async () => {
+  const f = isolatedFixture();
+  try {
+    const seed = createConfiguredCodeMapRuntime(f.env, f.reader).service!;
+    await seed.refresh({ projectId: f.projectId, rootPath: f.canonicalRoot });
+    const parent = createConfiguredCodeMapRuntime(f.env, f.reader).service!;
+    parent.getCached = () => { throw new Error("Warm reads must not hydrate the parent"); };
+    const pids: number[] = [];
+    parent.setIsolatedReadExecutor(createIsolatedCodeMapReadExecutor(f.env, {
+      maxConcurrent: 1, idleTimeoutMs: 1500, onWorkerStarted: ({pid}) => pids.push(pid),
+    }));
+    const input = { operation: "find_nodes" as const, query: "Handler.php" };
+    const first = await parent.queryAsync(f.projectId, input);
+    const start = performance.now();
+    assert.deepEqual(await parent.queryAsync(f.projectId, input), first);
+    const repeatMs = performance.now() - start;
+    assert.ok(repeatMs < 1000, "Warm query took " + repeatMs + "ms");
+    const statusStart = performance.now();
+    const before = await parent.snapshotReadSummary(f.projectId);
+    assert.equal(before.indexed, true);
+    const statusMs = performance.now() - statusStart;
+    assert.ok(statusMs < 1000, "Warm status took " + statusMs + "ms");
+    assert.equal(pids.length, 1, "No second graph hydration for the same snapshot");
+    const availabilityStart = performance.now();
+    assert.equal(await parent.lastGoodSnapshotAvailableAsync(f.projectId), true);
+    assert.ok(performance.now() - availabilityStart < 1000);
+    assert.equal(pids.length, 1);
+    writeFileSync(join(f.root, "src", "New.php"), "<?php class NewClass {}\n");
+    await seed.refresh({ projectId: f.projectId, rootPath: f.canonicalRoot });
+    const after = await parent.snapshotReadSummary(f.projectId);
+    assert.notEqual(after.snapshotIdentity?.snapshotId, before.snapshotIdentity?.snapshotId);
+    assert.equal(pids.length, 2, "New persisted revision requires a different worker");
+    const fresh = await parent.queryAsync(f.projectId, { operation: "find_nodes", query: "New.php" });
+    assert.equal(fresh.operation, "find_nodes");
+    assert.ok(fresh.nodes.length > 0);
+    assert.equal(pids.length, 2);
+    assert.equal(await parent.lastGoodSnapshotAvailableAsync(f.projectId), true);
+    console.log("G4 warm query ms:", repeatMs.toFixed(1), "warm status ms:", statusMs.toFixed(1));
+  } finally { f.dispose(); }
+});
+
 test("P2 async queries match local reads and never hydrate the parent raw graph", { timeout: 40_000 }, async () => {
   const f = isolatedFixture();
   try {

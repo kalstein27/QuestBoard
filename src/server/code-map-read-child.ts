@@ -26,7 +26,13 @@ const OPERATIONS = new Set<CodeMapIsolatedReadOperation>([
   "source_structure_preview", "web_bootstrap", "source_tree",
   "investigation_preview", "source_structure_apply", "code_scope_relink",
 ]);
-let started = false;
+const keepAlive = process.argv.includes("--keep-alive");
+let busy = false;
+let resident: {
+  projectId: string; rootPath: string; revision: string;
+  runtime: ReturnType<typeof createConfiguredCodeMapRuntime>;
+  manualRelations: CodeMapIsolatedReadRequest["manualRelations"];
+} | undefined;
 
 function finish(message: Reply): void {
   if (!process.send) {
@@ -46,15 +52,20 @@ function finish(message: Reply): void {
     });
     return;
   }
+  if (keepAlive && message.type === "complete") {
+    busy = false;
+    process.send(message);
+    return;
+  }
   process.send(message, () => {
     process.disconnect();
     if (message.type === "failed") process.exitCode = 1;
   });
 }
 
-process.once("message", (data: unknown) => {
-  if (started) return;
-  started = true;
+process.on("message", (data: unknown) => {
+  if (busy) { process.exitCode = 1; process.disconnect(); return; }
+  busy = true;
   void (async () => {
     if (!data || typeof data !== "object" || (data as Start).type !== "read")
       throw new TypeError("Invalid isolated Code Map read request");
@@ -72,13 +83,25 @@ process.once("message", (data: unknown) => {
     const trustedRoot = request.rootPath;
     const projectId = request.projectId;
     const manualRelations = request.manualRelations;
-    const projectReader = {
-      getProject: (id: string) => id === projectId ? { id, rootPath: trustedRoot } : undefined,
-      listCodeMapManualRelations: (id: string) => id === projectId ? manualRelations : [],
-    } as unknown as CodeMapManualRelationReader & Pick<QuestBoardRepository, "getProject">;
-    const runtime = createConfiguredCodeMapRuntime(process.env, projectReader);
+    const revision = request.snapshotRevision;
+    if (keepAlive && !revision) throw new TypeError("Warm reads require an exact snapshot revision");
+    if (resident && (resident.projectId !== projectId || resident.rootPath !== trustedRoot || resident.revision !== revision))
+      throw new CodeMapQueryError("code_map_snapshot_changed", "Resident Code Map snapshot changed");
+    if (!resident) {
+      const next = { projectId, rootPath: trustedRoot, revision: revision ?? "", manualRelations,
+        runtime: undefined as unknown as ReturnType<typeof createConfiguredCodeMapRuntime> };
+      const projectReader = {
+        getProject: (id: string) => id === projectId ? { id, rootPath: trustedRoot } : undefined,
+        listCodeMapManualRelations: (id: string) => id === projectId ? next.manualRelations : [],
+      } as unknown as CodeMapManualRelationReader & Pick<QuestBoardRepository, "getProject">;
+      next.runtime = createConfiguredCodeMapRuntime(process.env, projectReader);
+      resident = next;
+    }
+    resident.manualRelations = manualRelations;
+    const runtime = resident.runtime;
     const service = runtime.service;
     if (!service) throw new CodeMapQueryError("code_map_not_indexed", "Code Map runtime is disabled");
+    if (revision) service.assertSnapshotRevision(projectId, revision);
     let value: unknown;
     switch (request.operation) {
       case "query":
@@ -156,6 +179,7 @@ process.once("message", (data: unknown) => {
         break;
       }
     }
+    if (revision) service.assertSnapshotRevision(projectId, revision);
     finish({
       type: "complete", operation: request.operation, value,
       childMaxRssMiB: +(process.resourceUsage().maxRSS / 1024).toFixed(1),

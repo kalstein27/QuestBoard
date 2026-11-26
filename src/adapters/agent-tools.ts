@@ -1721,7 +1721,7 @@ export function executeQuestBoardAgentTool(
           : {}),
       });
       return codeMap.isolatedReadsEnabled
-        ? codeMap.snapshotReadSummary(projectId).then((snapshot) => format(snapshot.indexed))
+        ? codeMap.lastGoodSnapshotAvailableAsync(projectId).then(format)
         : format(Boolean(codeMap.getCached(projectId)));
     }
     case "questboard_get_code_map_provider_capabilities": {
@@ -2175,7 +2175,7 @@ function refreshCodeMapForAgent(
   // Older in-memory service integrations retain a synchronous agent contract.
   // Only the daemon's configured isolated read mode returns a Promise.
   return codeMap.isolatedReadsEnabled
-    ? codeMap.snapshotReadSummary(projectId).then((snapshot) => result(snapshot.indexed))
+    ? codeMap.lastGoodSnapshotAvailableAsync(projectId).then(result)
     : result(Boolean(codeMap.getCached(projectId)));
 }
 

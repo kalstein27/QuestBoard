@@ -15,6 +15,16 @@ const DAEMON_CLIENT_HEADER = "x-questboard-daemon-client";
 const LONG_RUNNING_AGENT_TOOLS = new Set([
   "questboard_refresh_code_map",
 ]);
+// A cold isolated snapshot load may exceed the ordinary 5s RPC deadline.
+// Keep that budget for unrelated work; only graph-heavy reads get headroom.
+const CODE_MAP_READ_AGENT_TOOLS = new Set([
+  "questboard_get_code_map_status",
+  "questboard_get_code_map_refresh_status",
+  "questboard_query_code_map",
+  "questboard_query_code_map_continuations",
+  "questboard_query_code_map_subsystems",
+  "questboard_get_code_map_subsystems",
+]);
 
 export interface QuestBoardDaemonClientOptions {
   requestTimeoutMs?: number;
@@ -105,6 +115,9 @@ export class QuestBoardDaemonClient {
   }
 
   private requestTimeoutMs(toolName: string | undefined): number {
+    if (toolName && CODE_MAP_READ_AGENT_TOOLS.has(toolName)) {
+      return this.options.requestTimeoutMs ?? Math.max(DEFAULT_REQUEST_TIMEOUT_MS, 30_000);
+    }
     return toolName && LONG_RUNNING_AGENT_TOOLS.has(toolName)
       ? (this.options.longRunningRequestTimeoutMs ?? LONG_RUNNING_REQUEST_TIMEOUT_MS)
       : (this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);

@@ -15,6 +15,7 @@ import { pinQuestBoardDaemonIdentity, QUESTBOARD_DAEMON_PROTOCOL } from "./daemo
 import { createIsolatedCodeMapReadExecutor } from "./code-map-isolated-read.js";
 import { createIsolatedCodeMapRefreshExecutor } from "./code-map-isolated-refresh.js";
 import { startQuestBoardHttpRuntime } from "./runtime.js";
+import { stopIsolatedCodeMapReadWorkers } from "./code-map-isolated-read.js";
 import {
   parseManagedServiceHealthPort,
   resolveQuestBoardRuntimePaths,
@@ -48,11 +49,11 @@ if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_REFRESH !=
   );
 }
 if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_READ !== "0") {
-  // Bounded reads and server-owned P2 mutation preflights use disposable
-  // workers. Flow Apply still commits synchronously in SQLite, with an exact
+  // Bounded reads and server-owned P2 mutation preflights reuse one pinned
+  // idle worker briefly. Flow Apply still commits synchronously in SQLite, with an exact
   // persisted-snapshot revision fence before and after transactional writes.
   codeMapRuntime.service.setIsolatedReadExecutor(
-    createIsolatedCodeMapReadExecutor(codeMapEnv),
+    createIsolatedCodeMapReadExecutor(codeMapEnv, { idleTimeoutMs: 30_000 }),
   );
 }
 const codeMapInvestigationSyncService = codeMapRuntime.service
@@ -124,6 +125,7 @@ function shutdown(): void {
       if (managedHealthRuntime) await managedHealthRuntime.close();
     } finally {
       await httpRuntime.close();
+      stopIsolatedCodeMapReadWorkers();
       repository.close();
     }
   })();

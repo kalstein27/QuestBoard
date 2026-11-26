@@ -1,16 +1,79 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, copyFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createConfiguredCodeMapRuntime } from "../src/server/code-map-config.js";
+import { isolatedCodeMapEnv, isolatedWorkerExit } from "../src/server/code-map-isolated-env.js";
+import { resolveIsolatedRefreshTimeoutMs } from "../src/server/code-map-isolated-refresh.js";
 import { createIsolatedCodeMapRefreshExecutor } from "../src/server/code-map-isolated-refresh.js";
 import type { CodeMapManualRelationReader } from "../src/application/code-map-augmentation.js";
 import type { QuestBoardRepository } from "../src/application/quest-board-repository.js";
 import type { CodeMapService } from "../src/application/code-map-service.js";
 
 const TEST_TIMEOUT_MS = 40_000;
+
+test("G1/G5 worker environment and timeout use explicit bounded settings", () => {
+  const env = isolatedCodeMapEnv({
+    PATH: "/empty", QUESTBOARD_PHP_EXECUTABLE: "/tools/php",
+    QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE: "/tools/sourcekit-lsp",
+    UNRELATED_SECRET: "must not be inherited",
+  });
+  assert.equal(env.QUESTBOARD_PHP_EXECUTABLE, "/tools/php");
+  assert.equal(env.QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE, "/tools/sourcekit-lsp");
+  assert.equal(env.UNRELATED_SECRET, undefined);
+  assert.equal(resolveIsolatedRefreshTimeoutMs({}), 240_000);
+  assert.equal(resolveIsolatedRefreshTimeoutMs({ QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS: "600000" }), 600_000);
+  assert.equal(resolveIsolatedRefreshTimeoutMs({ QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS: "600000" }, 200), 200);
+  for (const raw of ["99", "900001", "1e4", "invalid"]) {
+    assert.throws(() => resolveIsolatedRefreshTimeoutMs({ QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS: raw }), /REFRESH_TIMEOUT_MS/);
+  }
+  const oom = isolatedWorkerExit("refresh", null, "SIGABRT", "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory");
+  assert.match(oom.message, /heap out of memory/);
+  assert.match(oom.message, /QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_HEAP_MIB/);
+  assert.match(oom.message, /SIGABRT/);
+  assert.doesNotMatch(isolatedWorkerExit("refresh", 1, null, "other failure").message, /heap out of memory/);
+});
+
+test("G1/G2 actual isolated PHP refresh uses the explicit executable without PHP on PATH", { timeout: TEST_TIMEOUT_MS }, async t => {
+  const autoload = process.env.QUESTBOARD_TEST_PHP_PARSER_AUTOLOAD;
+  if (!autoload || process.platform === "win32") { t.skip("POSIX native SCIP fixture unavailable"); return; }
+  const vendor = dirname(realpathSync.native(autoload));
+  if (!existsSync(join(vendor, "bin/scip-php")) || !existsSync(join(dirname(vendor), "composer.lock"))) {
+    t.skip("Native SCIP fixture unavailable"); return;
+  }
+  const temp = mkdtempSync(join(tmpdir(), "qb-g1-php-"));
+  try {
+    const root = join(temp, "project");
+    const storage = join(temp, "storage");
+    const emptyPath = join(temp, "empty-path");
+    mkdirSync(root); mkdirSync(emptyPath); mkdirSync(join(root, "src"));
+    symlinkSync(vendor, join(root, "vendor"), "dir");
+    copyFileSync(join(dirname(vendor), "composer.lock"), join(root, "composer.lock"));
+    writeFileSync(join(root, "composer.json"), JSON.stringify({ name: "questboard/g1-fixture", autoload: { classmap: ["src/"] } }));
+    writeFileSync(join(root, "src", "Sample.php"), "<?php final class Sample { public function go(): void {} }");
+    const php = execFileSync("php", ["-r", "echo PHP_BINARY;"], { encoding: "utf8" }).trim();
+    const indexer = join(temp, "scip-explicit");
+    // The native indexer has its own explicit launcher; the separate AST
+    // extraction must get QUESTBOARD_PHP_EXECUTABLE through the worker env.
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+    writeFileSync(indexer, "#!/bin/sh\nexec " + quote(php) + " " + quote(join(vendor, "bin/scip-php")) + ' "$@"\n', { mode: 0o700 });
+    const env = { HOME: process.env.HOME, PATH: emptyPath, QUESTBOARD_CODE_MAP: "1",
+      QUESTBOARD_CODE_MAP_PROVIDERS: "scip-php", QUESTBOARD_CODE_MAP_STORAGE_ROOT: storage,
+      QUESTBOARD_SCIP_PHP_EXECUTABLE: indexer, QUESTBOARD_PHP_EXECUTABLE: php };
+    const request = { projectId: "explicit-php", rootPath: realpathSync.native(root) };
+    const good = await createIsolatedCodeMapRefreshExecutor(env)(request);
+    assert.ok(good.nodeCount > 2);
+    await assert.rejects(createIsolatedCodeMapRefreshExecutor({
+      ...env, QUESTBOARD_PHP_EXECUTABLE: join(emptyPath, "missing-php"),
+    })(request), /Executable spawn failed \(ENOENT\): missing-php/);
+    await assert.rejects(createIsolatedCodeMapRefreshExecutor({
+      ...env, QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS: "100",
+    })({ ...request, projectId: "timeout-php" }), /timed out after 100 ms/);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
 
 async function terminal(service: CodeMapService, projectId: string) {
   for (let attempt = 0; attempt < 400; attempt += 1) {

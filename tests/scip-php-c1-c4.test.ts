@@ -197,7 +197,13 @@ final class TicketHandler {
     $job = function () use ($wallet) { $wallet->reset(); }; // e1 mutated break capture
   }
 }
-abstract class Model { public function getModifiedAttributes(): array { return []; } }
+abstract class Model {
+  public function getModifiedAttributes(): array { return []; }
+  public function setInsertTime(int $time): Model { return $this; }
+  public function setUpdateTime(int $time): Model { return $this; }
+  public function fluent(): static { return $this; }
+  public function selfReturn(): self { return $this; }
+}
 interface InventoryContract { public function getModifiedAttributes(): array; }
 final class Inventory extends Model implements InventoryContract {
   public function setIncreaseTime(int $time): void {}
@@ -219,6 +225,28 @@ final class InventoryDAO {
   /** @param Inventory $object */
   public static function unrelated(Wallet $object): void {
     $object->setIncreaseTime(1); // f1 unrelated
+  }
+  /** @param Inventory $object */
+  public static function add(Model $object): void {
+    $object->setInsertTime(1)
+      ->setUpdateTime(1); // g3 narrowed parent
+  }
+  public static function create(): Inventory {
+    $item = new Inventory();
+    $item->setInsertTime(1)
+      ->setUpdateTime(1); // g3 new parent
+    $item->fluent()->setIncreaseTime(1); // g3 inherited static
+    $item->selfReturn()->setIncreaseTime(1); // g3 self not child
+    return $item;
+  }
+  /** @param Inventory|null $object */
+  public static function checkInit(?Model $object): void {
+    $object->setIncreaseTime(1); // g6 nullable doc
+    $job = function () use ($object) { $object->setIncreaseTime(1); }; // g6 nullable capture
+  }
+  /** @param Inventory|null $object */
+  public static function wrongNullable(?Wallet $object): void {
+    $object->setIncreaseTime(1); // g6 unrelated
   }
 }
 final class NormalSchedule {
@@ -260,6 +288,33 @@ final class ShopHandler {
     foreach ($rows as $target) {
       $target->setPackageType(3); // f3 wrong name
     }
+  }
+  public function extra(array $rows): void {
+    foreach ($rows as $row) {
+      /** @var ShopEntry $row */
+      $row->setPackageType(1); // g7 body
+    }
+    /**
+     * @var string $name
+     * @var ShopEntry $store
+     */
+    foreach ($rows as $name => $store) {
+      $store->setPackageType(2); // g7 multi
+    }
+    /** @var NormalSchedule|EventSchedule $deck */
+    foreach ($rows as $deck) {
+      $deck->getScoutId(); // g7 union
+      $deck = new Wallet();
+      $deck->getScoutId(); // g7 reassigned
+    }
+    $deck->getScoutId(); // g7 outside
+    /** @var ShopEntry $row */
+    foreach ($rows as &$row) { $row->setPackageType(1); } // g7 byref
+    /**
+     * @var Wallet $conflict
+     * @var ShopEntry $conflict
+     */
+    foreach ($rows as $conflict) { $conflict->setPackageType(1); } // g7 duplicate
   }
 }
 final class MissionState { public function setCount(int $n): void {} }
@@ -402,6 +457,21 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     check("Inventory", "setIncreaseTime", "calls", "// f1 interface", "contract");
     check("Inventory", "setIncreaseTime", "calls", "// f1 wrong name", "", false);
     check("Inventory", "setIncreaseTime", "calls", "// f1 unrelated", "", false);
+    check("Model", "setUpdateTime", "calls", "// g3 narrowed parent", "add");
+    check("Model", "setUpdateTime", "calls", "// g3 new parent", "create");
+    check("Inventory", "setIncreaseTime", "calls", "// g3 inherited static", "create");
+    check("Inventory", "setIncreaseTime", "calls", "// g3 self not child", "", false);
+    check("Inventory", "setIncreaseTime", "calls", "// g6 nullable doc", "checkInit");
+    check("Inventory", "setIncreaseTime", "calls", "// g6 nullable capture", "", false);
+    check("Inventory", "setIncreaseTime", "calls", "// g6 unrelated", "", false);
+    check("ShopEntry", "setPackageType", "calls", "// g7 body", "extra");
+    check("ShopEntry", "setPackageType", "calls", "// g7 multi", "extra");
+    check("NormalSchedule", "getScoutId", "calls", "// g7 union", "extra");
+    check("EventSchedule", "getScoutId", "calls", "// g7 union", "extra");
+    check("NormalSchedule", "getScoutId", "calls", "// g7 reassigned", "", false);
+    check("EventSchedule", "getScoutId", "calls", "// g7 outside", "", false);
+    check("ShopEntry", "setPackageType", "calls", "// g7 byref", "", false);
+    check("ShopEntry", "setPackageType", "calls", "// g7 duplicate", "", false);
     check("NormalSchedule", "getScoutId", "calls", "// f2 both", "validate");
     check("EventSchedule", "getScoutId", "calls", "// f2 both", "validate");
     check("NormalSchedule", "onlyNormal", "calls", "// f2 one", "validate");

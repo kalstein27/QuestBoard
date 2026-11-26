@@ -91,8 +91,20 @@ function qbPhpDocClass(string $type, string $namespace, array $aliases): ?string
 }
 function qbPhpNamedVar(?string $doc, string $name): ?string {
     if (!$doc || preg_match_all('/@var\s+([^\r\n$]{1,160}?)\s+\$([A-Za-z_][A-Za-z0-9_]*)\b/i',
-        $doc,$matches,PREG_SET_ORDER) !== 1 || $matches[0][2] !== $name) return null;
-    return trim($matches[0][1]);
+        $doc,$matches,PREG_SET_ORDER) < 1) return null;
+    $matching=array_values(array_filter($matches,static fn($m)=>$m[2]===$name));
+    return count($matching)===1 ? trim($matching[0][1]) : null;
+}
+function qbPhpDocUnion(string $type, string $namespace, array $aliases): ?string {
+    $classes=[];
+    foreach (explode('|',$type) as $arm) {
+        $class=qbPhpDocClass($arm,$namespace,$aliases);
+        if ($class===null) return null;
+        $classes[strtolower($class)]=$class;
+    }
+    if (count($classes)<1 || count($classes)>8) return null;
+    ksort($classes);
+    return implode('|',$classes);
 }
 function qbPhpIsSubtype(string $child, string $base, array $ancestors): bool {
     $base=strtolower($base);
@@ -123,6 +135,8 @@ function qbPhpAliases(array $statements): array {
     return $aliases;
 }
 $methodReturns = [];
+$methodReturnKinds = [];
+$classTraitBarriers = [];
 $methodNullableReturns = [];
 $methodArrayElements = [];
 $propertyTypes = [];
@@ -174,6 +188,10 @@ foreach ($paths as $relative) {
                 foreach ($declaration->implements as $iface) $parents[]=$iface->toString();
             }
             $classKey=strtolower($class);
+            // Unknown/duplicate declarations and trait composition can hide an
+            // inherited method. Do not guess its return type.
+            $classTraitBarriers[$classKey]=array_key_exists($classKey,$classTraitBarriers)
+                || count(array_filter($declaration->stmts,static fn($m)=>$m instanceof PhpParser\Node\Stmt\TraitUse))>0;
             $classAncestors[$classKey]=array_key_exists($classKey,$classAncestors) ? [] : $parents;
             foreach ($declaration->stmts as $member) {
                 if (!$member instanceof PhpParser\Node\Stmt\Property) continue;
@@ -206,6 +224,12 @@ foreach ($paths as $relative) {
                 }
                 $methodByRefArgs[$key] = array_key_exists($key,$methodByRefArgs) ? null : $byRef;
                 $return = qbPhpName($method->returnType, $class);
+                $returnNode=$method->returnType instanceof PhpParser\Node\NullableType
+                    ? $method->returnType->type : $method->returnType;
+                $methodReturnKinds[$key]=array_key_exists($key,$methodReturnKinds)
+                    || $method->isPrivate() ? 'blocked'
+                    : ($returnNode instanceof PhpParser\Node\Name && strtolower($returnNode->toString())==='static'
+                        ? 'static' : 'declared');
                 // Keep the existing A2 method-return narrowing, but remember
                 // nullability separately so a closure cannot treat ?T as T.
                 $methodNullableReturns[$key] = array_key_exists($key, $methodReturns)
@@ -267,7 +291,7 @@ foreach ($paths as $relative) {
     while (($offset = strpos($source, "\n", $offset + 1)) !== false) {
         $lineStarts[] = $offset + 1;
     }
-    $visitor = new class($source, $lineStarts, $methodReturns, $methodNullableReturns, $methodArrayElements, $propertyTypes, $propertyNullableTypes, $functionByRefArgs, $methodByRefArgs, $classParents, $fileStaticReturns, $classAncestors, $propertyArrayElements) extends PhpParser\NodeVisitorAbstract {
+    $visitor = new class($source, $lineStarts, $methodReturns, $methodNullableReturns, $methodArrayElements, $propertyTypes, $propertyNullableTypes, $functionByRefArgs, $methodByRefArgs, $classParents, $fileStaticReturns, $classAncestors, $propertyArrayElements, $methodReturnKinds, $classTraitBarriers) extends PhpParser\NodeVisitorAbstract {
         public array $scopes = [];
         public int $callCount = 0;
         public int $unresolvedCount = 0;
@@ -286,7 +310,29 @@ foreach ($paths as $relative) {
             private readonly array $classParents,
             private readonly array $fileStaticReturns,
             private readonly array $classAncestors, private readonly array $propertyArrayElements,
+            private readonly array $methodReturnKinds, private readonly array $classTraitBarriers,
         ) {}
+
+        private function inheritedObjectReturn(string $receiver, string $method): ?array {
+            if (str_contains($receiver,'|')) return null;
+            $class=strtolower(ltrim($receiver,'\\')); $seen=[];
+            for ($depth=0; $depth<24 && !isset($seen[$class]); $depth++) {
+                $seen[$class]=true;
+                $key=$class.'::'.strtolower($method);
+                if (array_key_exists($key,$this->methodReturns)) {
+                    $kind=$this->methodReturnKinds[$key] ?? 'blocked';
+                    $type=$this->methodReturns[$key];
+                    // Preserve existing direct private method inference, but
+                    // never inherit a private or ambiguous declaration.
+                    if ($type===null || ($kind==='blocked' && $depth>0)) return null;
+                    return ['className'=>$kind==='static' ? $receiver : $type,
+                        'nullable'=>$this->methodNullableReturns[$key] ?? false];
+                }
+                if (($this->classTraitBarriers[$class] ?? true) || !isset($this->classParents[$class])) return null;
+                $class=strtolower($this->classParents[$class]);
+            }
+            return null;
+        }
 
         private function range(PhpParser\Node $node): ?array {
             $first = $node->getStartFilePos();
@@ -433,8 +479,10 @@ foreach ($paths as $relative) {
             if ($doc) {
                 preg_match_all('/@param\\s+([^\\r\\n$]{1,160}?)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)/i', $doc, $paramMatches, PREG_SET_ORDER);
                 foreach ($paramMatches as $match) {
-                    $class=qbPhpDocClass($match[1],$this->namespace,$this->aliases);
-                    $paramClasses[$match[2]]=array_key_exists($match[2],$paramClasses) ? null : $class;
+                    $docType=trim($match[1]);
+                    $nullableDoc=preg_match('/^(?:null\s*\|\s*(.+)|(.+?)\s*\|\s*null)$/iD',$docType,$nullableParts)===1;
+                    $class=qbPhpDocClass($nullableDoc ? ($nullableParts[1]!=='' ? $nullableParts[1] : $nullableParts[2]) : $docType,$this->namespace,$this->aliases);
+                    $paramClasses[$match[2]]=array_key_exists($match[2],$paramClasses) || $class===null ? null : ['class'=>$class,'nullable'=>$nullableDoc];
                     $type = qbPhpDocArray('/** @return ' . $match[1] . ' */', 'return', $this->namespace, $this->aliases);
                     // An array-or-null annotation cannot prove that indexing
                     // will yield a single receiver. Element unions/shapes
@@ -453,8 +501,10 @@ foreach ($paths as $relative) {
                     'className'=>$type, 'source'=>'native',
                     'nullable'=>$param->type instanceof PhpParser\Node\NullableType,
                 ];
-                $docClass=is_string($name) ? ($paramClasses[$name] ?? null) : null;
+                $docFact=is_string($name) ? ($paramClasses[$name] ?? null) : null;
+                $docClass=$docFact['class'] ?? null;
                 if ($type!==null && $docClass!==null && !$param->byRef
+                    && (!($docFact['nullable'] ?? false) || $param->type instanceof PhpParser\Node\NullableType)
                     && strcasecmp($type,$docClass)!==0
                     && qbPhpIsSubtype($docClass,$type,$this->classAncestors)) {
                     $known[$name]['className']=$docClass;
@@ -584,11 +634,10 @@ foreach ($paths as $relative) {
                     || $expr instanceof PhpParser\Node\Expr\NullsafeMethodCall)
                     && $expr->name instanceof PhpParser\Node\Identifier) {
                     $receiver = $infer($expr->var,$known);
-                    $methodKey = $receiver === null ? null : $key($receiver['className'],$expr->name->toString());
-                    $type = $methodKey === null ? null : ($this->methodReturns[$methodKey] ?? null);
-                    return $type === null ? null : ['className'=>$type,'source'=>$receiver['source'],
+                    $returned=$receiver===null ? null : $this->inheritedObjectReturn($receiver['className'],$expr->name->toString());
+                    return $returned === null ? null : ['className'=>$returned['className'],'source'=>$receiver['source'],
                         'nullable'=>($receiver['nullable'] ?? false)
-                            || ($this->methodNullableReturns[$methodKey] ?? false)];
+                            || $returned['nullable']];
                 }
                 return null;
             };
@@ -828,6 +877,7 @@ foreach ($paths as $relative) {
                         // provenance in the fact through existing branch joins.
                         $named=qbPhpNamedVar($doc,$name);
                         $explicit=$named!==null && !str_contains($named,'|')
+                            && qbPhpDocArray('/** @var '.$named.' */','var',$this->namespace,$this->aliases)===$hint
                             && $part->expr->expr instanceof PhpParser\Node\Expr\Array_
                             && !$part->expr->expr->items && !isset($referenceTainted[$name]);
                         $arrays[$name]=($explicit ? '@' : '').$hint;
@@ -1039,9 +1089,17 @@ foreach ($paths as $relative) {
                         unset($unknownForeachValues[$name]);
                         if ($element===null && !$part->byRef && !isset($referenceTainted[$name])) {
                             $annotation=qbPhpNamedVar($part->getDocComment()?->getText(),$name);
-                            if ($annotation!==null && !str_contains($annotation,'|')) {
-                                $class=qbPhpDocClass($annotation,$this->namespace,$this->aliases);
-                                $nested=qbPhpDocArray('/** @var '.$annotation.' */','var',$this->namespace,$this->aliases);
+                            // First executable non-assignment expression can
+                            // document the newly bound unknown loop value.
+                            $first=$part->stmts[0] ?? null;
+                            if ($annotation===null && $first instanceof PhpParser\Node\Stmt\Expression
+                                && $first->expr instanceof PhpParser\Node\Expr\MethodCall
+                                && $first->expr->var instanceof PhpParser\Node\Expr\Variable
+                                && $first->expr->var->name===$name)
+                                $annotation=qbPhpNamedVar($first->getDocComment()?->getText(),$name);
+                            if ($annotation!==null) {
+                                $class=qbPhpDocUnion($annotation,$this->namespace,$this->aliases);
+                                $nested=str_contains($annotation,'|') ? null : qbPhpDocArray('/** @var '.$annotation.' */','var',$this->namespace,$this->aliases);
                                 $element=$class ?? ($nested===null ? null : $nested.'[]');
                             }
                         }
@@ -1234,7 +1292,7 @@ foreach ($paths as $relative) {
                         if ($type!==null) {
                             $classes=explode('|',$type['className']);
                             foreach ($classes as $class) $calls[]=['className'=>$class,'name'=>$part->name->toString(),
-                                'nameRange'=>$range,'evidenceSource'=>count($classes)>1 ? 'native-union' : $type['source'],'callStyle'=>'object'];
+                                'nameRange'=>$range,'evidenceSource'=>count($classes)>1 ? ($type['source']==='docblock' ? 'docblock-union' : 'native-union') : $type['source'],'callStyle'=>'object'];
                         } else $unresolved[]=['name'=>$part->name->toString(),'nameRange'=>$range];
                     }
                 }

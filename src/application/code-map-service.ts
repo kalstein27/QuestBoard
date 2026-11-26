@@ -89,6 +89,8 @@ export interface CodeMapIsolatedReadRequest {
   projectId: string;
   rootPath: string;
   operation: CodeMapIsolatedReadOperation;
+  /** Exact on-disk revision, resolved only by the trusted parent. */
+  snapshotRevision?: string;
   input?: unknown;
   manualRelations: readonly ReturnType<CodeMapManualRelationReader["listCodeMapManualRelations"]>[number][];
 }
@@ -348,6 +350,20 @@ export class CodeMapService {
   readonly #refreshTasks = new Map<string, Promise<void>>();
   #isolatedRefreshExecutor: CodeMapIsolatedRefreshExecutor | undefined;
   #isolatedReadExecutor: CodeMapIsolatedReadExecutor | undefined;
+  readonly #verifiedSnapshotAvailability = new Map<string, { rootPath: string; revision: string; indexed: boolean }>();
+
+  /** Refresh polling only needs availability, not the complete graph summary. */
+  async lastGoodSnapshotAvailableAsync(projectId: string): Promise<boolean> {
+    const rootPath = this.#persistence?.rootPathForProject?.(projectId);
+    const store = this.#persistence?.store;
+    if (this.isolatedReadsEnabled && rootPath && store?.revisionToken) {
+      const revision = store.revisionToken(projectId);
+      if (!revision) return false;
+      const verified = this.#verifiedSnapshotAvailability.get(projectId);
+      if (verified?.rootPath === rootPath && verified.revision === revision) return verified.indexed;
+    }
+    return (await this.snapshotReadSummary(projectId)).indexed;
+  }
 
   /** Opt in only for daemon background refresh; direct refresh keeps its tested contract. */
   setIsolatedRefreshExecutor(executor: CodeMapIsolatedRefreshExecutor): void {
@@ -376,11 +392,20 @@ export class CodeMapService {
     const rootPath = this.#persistence?.rootPathForProject?.(projectId);
     if (!rootPath) throw new CodeMapQueryError("code_map_not_indexed",
       "Code Map has no trusted project root for isolated read");
-    return await executor({
+    const snapshotRevision = this.#persistence?.store.revisionToken?.(projectId);
+    const result = await executor({
       projectId, rootPath, operation,
+      ...(snapshotRevision ? { snapshotRevision } : {}),
       ...(input !== undefined ? { input } : {}),
       manualRelations: this.#manualRelations?.listCodeMapManualRelations(projectId) ?? [],
     }, signal) as T;
+    if (operation === "status" && snapshotRevision
+      && this.#persistence?.store.revisionToken?.(projectId) === snapshotRevision
+      && this.#persistence?.rootPathForProject?.(projectId) === rootPath) {
+      const indexed = (result as { indexed?: unknown } | undefined)?.indexed;
+      if (typeof indexed === "boolean") this.#verifiedSnapshotAvailability.set(projectId, { rootPath, revision: snapshotRevision, indexed });
+    }
+    return result;
   }
 
   async queryAsync(projectId: string, input: CodeMapQueryInput, signal?: AbortSignal): Promise<CodeMapQueryResult> {

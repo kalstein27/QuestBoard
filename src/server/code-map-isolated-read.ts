@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { resolveIsolatedCodeMapHeapMiB } from "./code-map-isolated-heap.js";
+import { isolatedCodeMapEnv, isolatedWorkerExit, isIsolatedWorkerHeapOom } from "./code-map-isolated-env.js";
 import { CodeMapQueryError } from "../application/code-map-query.js";
 import { SourceStructureSelectionError } from "../application/source-structure-sync-graph.js";
 import type {
@@ -18,6 +19,8 @@ export interface IsolatedCodeMapReadOptions {
   maxOldSpaceMiB?: number;
   maxConcurrent?: number;
   maxQueued?: number;
+  /** Retain at most one idle worker, pinned to one immutable snapshot. */
+  idleTimeoutMs?: number;
   onProcessMetrics?: (metrics: { childMaxRssMiB: number }) => void;
   /** Optional read-worker lifecycle observer for isolated diagnostics/tests. */
   onWorkerStarted?: (worker: { pid: number; operation: CodeMapIsolatedReadOperation }) => void;
@@ -25,19 +28,37 @@ export interface IsolatedCodeMapReadOptions {
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_IPC_BYTES = 1024 * 1024;
 const activeChildren = new Set<ChildProcess>();
+export function stopIsolatedCodeMapReadWorkers(): void {
+  for (const child of activeChildren) killOwned(child);
+}
 function cancelled(): Error {
   return Object.assign(new Error("Isolated Code Map read cancelled"), { name: "AbortError" });
 }
 let exitHandlerInstalled = false;
-const ENV_KEYS = [
-  "HOME", "PATH", "TMPDIR", "XDG_DATA_HOME",
-  "QUESTBOARD_CODE_MAP", "QUESTBOARD_CODE_MAP_PROVIDER", "QUESTBOARD_CODE_MAP_PROVIDERS",
-  "QUESTBOARD_CODE_MAP_EXCLUDE_PREFIXES",
-  "QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH",
-  "QUESTBOARD_CODE_MAP_STORAGE_ROOT", "QUESTBOARD_SCIP_PHP_EXECUTABLE",
-  "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
-  "QUESTBOARD_CODE_MAP_MAX_SNAPSHOT_MIB", "QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB",
-] as const;
+type Worker = { child: ChildProcess; key: string; stderr: string; detectedOom: boolean; timer?: ReturnType<typeof setTimeout> };
+type IdleWorker = { worker?: Worker | undefined };
+
+function retire(worker: Worker): void {
+  clearTimeout(worker.timer);
+  killOwned(worker.child);
+}
+function takeIdle(idle: IdleWorker, key: string): Worker | undefined {
+  const worker = idle.worker;
+  idle.worker = undefined;
+  if (!worker) return undefined;
+  clearTimeout(worker.timer);
+  if (worker.key === key && worker.child.connected && worker.child.exitCode === null && !worker.child.killed) return worker;
+  retire(worker);
+  return undefined;
+}
+function retainIdle(idle: IdleWorker, worker: Worker, timeoutMs: number): void {
+  if (idle.worker) retire(idle.worker);
+  idle.worker = worker;
+  worker.timer = setTimeout(() => {
+    if (idle.worker === worker) idle.worker = undefined;
+    retire(worker);
+  }, timeoutMs);
+}
 
 function killOwned(child: ChildProcess): void {
   if (!child.pid || child.exitCode !== null) return;
@@ -53,6 +74,7 @@ async function runOne(
   request: CodeMapIsolatedReadRequest,
   env: NodeJS.ProcessEnv,
   options: IsolatedCodeMapReadOptions,
+  idle: IdleWorker,
   signal?: AbortSignal,
 ): Promise<unknown> {
   if (signal?.aborted) throw cancelled();
@@ -70,24 +92,40 @@ async function runOne(
   const bytes = Buffer.byteLength(JSON.stringify(payload));
   if (bytes > MAX_IPC_BYTES)
     throw new CodeMapQueryError("code_map_query_invalid", "Isolated Code Map input exceeds the IPC cap");
-  const childEnv: NodeJS.ProcessEnv = {};
-  for (const key of ENV_KEYS) if (env[key]) childEnv[key] = env[key];
-  childEnv.QUESTBOARD_CODE_MAP = "1";
+  const childEnv = isolatedCodeMapEnv(env);
+  const idleTimeoutMs = options.idleTimeoutMs ?? 0;
+  const warm = idleTimeoutMs > 0 && Boolean(request.snapshotRevision);
+  const key = JSON.stringify([request.projectId, request.rootPath, request.snapshotRevision ?? ""]);
 
   return await new Promise<unknown>((resolve, reject) => {
-    const child = fork(new URL("./code-map-read-child.js", import.meta.url), [], {
-      cwd: process.cwd(),
-      env: childEnv,
-      detached: process.platform !== "win32",
-      execArgv: [`--max-old-space-size=${heapMiB}`],
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
-    });
-    activeChildren.add(child);
-    try {
-      if (child.pid) options.onWorkerStarted?.({ pid: child.pid, operation: request.operation });
-    } catch {
-      // Observability callbacks must never break worker execution.
+    let worker = warm ? takeIdle(idle, key) : undefined;
+    if (!warm && idle.worker) { retire(idle.worker); idle.worker = undefined; }
+    if (!worker) {
+      const child = fork(new URL("./code-map-read-child.js", import.meta.url), warm ? ["--keep-alive"] : [], {
+        cwd: process.cwd(),
+        env: childEnv,
+        detached: process.platform !== "win32",
+        execArgv: [`--max-old-space-size=${heapMiB}`],
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
+      const created: Worker = { child, key, stderr: "", detectedOom: false };
+      worker = created;
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const observed = created.stderr + chunk.toString("utf8");
+        created.detectedOom ||= isIsolatedWorkerHeapOom(observed);
+        created.stderr = observed.slice(-4096);
+      });
+      activeChildren.add(child);
+      child.on("error", () => { if (idle.worker === created) { idle.worker = undefined; retire(created); } });
+      child.once("close", () => {
+        activeChildren.delete(child);
+        clearTimeout(created.timer);
+        if (idle.worker === created) idle.worker = undefined;
+      });
+      try { if (child.pid) options.onWorkerStarted?.({ pid: child.pid, operation: request.operation }); } catch { /* diagnostic only */ }
     }
+    const current = worker;
+    const child = current.child;
     if (!exitHandlerInstalled) {
       exitHandlerInstalled = true;
       process.once("exit", () => {
@@ -98,11 +136,9 @@ async function runOne(
     let reply: Reply | undefined;
     const onAbort = (): void => {
       finish(cancelled());
-      killOwned(child);
     };
     const timeout = setTimeout(() => {
       finish(new Error("Isolated Code Map read timed out"));
-      killOwned(child);
     }, timeoutMs);
     timeout.unref();
 
@@ -111,22 +147,25 @@ async function runOne(
       settled = true;
       clearTimeout(timeout);
       signal?.removeEventListener("abort", onAbort);
+      child.removeListener("message", onMessage);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+      if (error) retire(current);
+      else if (warm) retainIdle(idle, current, idleTimeoutMs);
       if (error) reject(error);
       else resolve(value);
     }
     signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("message", (message: unknown) => {
+    function onMessage(message: unknown): void {
       let serialized: string;
       try { serialized = JSON.stringify(message); } catch { serialized = ""; }
       if (!serialized || Buffer.byteLength(serialized) > MAX_IPC_BYTES) {
         finish(new CodeMapQueryError("code_map_query_invalid", "Isolated Code Map result exceeds the IPC cap"));
-        killOwned(child);
         return;
       }
       const value = message as Partial<Reply> | null;
       if (!value || (value.type !== "complete" && value.type !== "failed") || reply) {
         finish(new Error("Isolated Code Map returned an invalid reply"));
-        killOwned(child);
         return;
       }
       if (value.type === "complete"
@@ -134,14 +173,18 @@ async function runOne(
           || !Number.isFinite(value.childMaxRssMiB)
           || (value.childMaxRssMiB as number) < 0)) {
         finish(new Error("Isolated Code Map read identity or metrics mismatch"));
-        killOwned(child);
         return;
       }
       reply = value as Reply;
-    });
-    child.once("error", (error) => finish(error));
-    child.once("exit", (code) => {
-      activeChildren.delete(child);
+      if (warm && reply.type === "complete") complete();
+    }
+    function onError(error: Error): void { finish(error); }
+    function complete(): void {
+      if (reply?.type !== "complete") return;
+      try { options.onProcessMetrics?.({ childMaxRssMiB: reply.childMaxRssMiB }); } catch { /* diagnostic only */ }
+      finish(undefined, reply.value);
+    }
+    function onClose(code: number | null, signal: NodeJS.Signals | null): void {
       if (settled) return;
       if (reply?.type === "failed") {
         if (reply.code.startsWith("source_structure_") || reply.code === "invalid_pinned_page"
@@ -163,14 +206,14 @@ async function runOne(
           finish(new Error(reply.message));
         }
       } else if (code !== 0 || reply?.type !== "complete") {
-        finish(new Error("Isolated Code Map read process exited without a complete result"));
+        finish(isolatedWorkerExit("read", code, signal, current.stderr, undefined, current.detectedOom));
       } else {
-        try { options.onProcessMetrics?.({ childMaxRssMiB: reply.childMaxRssMiB }); } catch {
-          // Metrics must not break a successful read.
-        }
-        finish(undefined, reply.value);
+        complete();
       }
-    });
+    }
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("close", onClose);
     child.send(payload, (error) => {
       if (error) {
         finish(error);
@@ -188,9 +231,12 @@ export function createIsolatedCodeMapReadExecutor(
 ): CodeMapIsolatedReadExecutor {
   const concurrent = options.maxConcurrent ?? 2;
   const maxQueued = options.maxQueued ?? 16;
+  const idleTimeoutMs = options.idleTimeoutMs ?? 0;
   if (!Number.isInteger(concurrent) || concurrent < 1 || concurrent > 4
-    || !Number.isInteger(maxQueued) || maxQueued < 0 || maxQueued > 128)
+    || !Number.isInteger(maxQueued) || maxQueued < 0 || maxQueued > 128
+    || !Number.isInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 120_000)
     throw new RangeError("Invalid isolated Code Map read queue limits");
+  const idle: IdleWorker = {};
   let running = 0;
   const queue: Array<() => void> = [];
   const pump = (): void => {
@@ -205,7 +251,7 @@ export function createIsolatedCodeMapReadExecutor(
         signal?.removeEventListener("abort", cancelQueued);
         if (signal?.aborted) { reject(cancelled()); return; }
         running += 1;
-        void runOne(request, env, options, signal).then(resolve, reject).finally(() => {
+        void runOne(request, env, options, idle, signal).then(resolve, reject).finally(() => {
           running -= 1;
           pump();
         });

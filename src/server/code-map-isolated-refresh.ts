@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { resolveIsolatedCodeMapHeapMiB } from "./code-map-isolated-heap.js";
+import { isolatedCodeMapEnv, isolatedWorkerExit, isIsolatedWorkerHeapOom } from "./code-map-isolated-env.js";
 import type { CodeIndexRequest } from "../application/code-intelligence.js";
 import type {
   CodeMapIsolatedRefreshExecutor,
@@ -9,7 +10,7 @@ import type {
 
 type ChildReply =
   | { type: "complete"; receipt: CodeMapIsolatedRefreshReceipt; childMaxRssMiB: number }
-  | { type: "failed"; code: "index_failed" };
+  | { type: "failed"; code: "index_failed"; message: string };
 
 export interface IsolatedCodeMapRefreshOptions {
   timeoutMs?: number;
@@ -22,15 +23,13 @@ const MAX_IPC_BYTES = 4096;
 const DEFAULT_TIMEOUT_MS = 240_000;
 const activeChildren = new Set<ChildProcess>();
 let exitHandlerInstalled = false;
-const CODE_MAP_ENV_KEYS = [
-  "HOME", "PATH", "TMPDIR", "XDG_DATA_HOME",
-  "QUESTBOARD_CODE_MAP", "QUESTBOARD_CODE_MAP_PROVIDER",
-  "QUESTBOARD_CODE_MAP_PROVIDERS", "QUESTBOARD_CODE_MAP_STORAGE_ROOT",
-  "QUESTBOARD_CODE_MAP_EXCLUDE_PREFIXES",
-  "QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH",
-  "QUESTBOARD_SCIP_PHP_EXECUTABLE", "QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE",
-  "QUESTBOARD_CODE_MAP_MAX_SNAPSHOT_MIB", "QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB",
-] as const;
+export function resolveIsolatedRefreshTimeoutMs(env: NodeJS.ProcessEnv, override?: number): number {
+  const raw = env.QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS?.trim();
+  const value = override ?? (raw ? Number(raw) : DEFAULT_TIMEOUT_MS);
+  if (!Number.isSafeInteger(value) || value < 100 || value > 900_000 || (override === undefined && raw && !/^\d+$/.test(raw)))
+    throw new RangeError("QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS must be an integer from 100 to 900000");
+  return value;
+}
 
 function isReceipt(value: unknown, request: CodeIndexRequest): value is CodeMapIsolatedRefreshReceipt {
   if (!value || typeof value !== "object") return false;
@@ -63,14 +62,9 @@ async function runOne(
   if (!isAbsolute(request.rootPath) || !request.projectId || request.changes?.length) {
     throw new Error("Isolated Code Map requires a canonical full-index project request");
   }
-  const limitMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const limitMs = resolveIsolatedRefreshTimeoutMs(env, options.timeoutMs);
   const heapMiB = resolveIsolatedCodeMapHeapMiB(env, "refresh", options.maxOldSpaceMiB);
-  if (!Number.isInteger(limitMs) || limitMs < 100 || limitMs > 900_000) {
-    throw new RangeError("Invalid isolated Code Map resource limits");
-  }
-  const childEnv: NodeJS.ProcessEnv = {};
-  for (const key of CODE_MAP_ENV_KEYS) if (env[key]) childEnv[key] = env[key];
-  childEnv.QUESTBOARD_CODE_MAP = "1";
+  const childEnv = isolatedCodeMapEnv(env);
   // An isolated process may decode/normalize directly without a nested worker
   // copying the entire SCIP graph across another thread boundary.
   childEnv.QUESTBOARD_CODE_MAP_ISOLATED_CHILD = "1";
@@ -81,7 +75,14 @@ async function runOne(
       env: childEnv,
       execArgv: [`--max-old-space-size=${heapMiB}`],
       detached: process.platform !== "win32",
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    let stderr = "";
+    let detectedOom = false;
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const observed = stderr + chunk.toString("utf8");
+      detectedOom ||= isIsolatedWorkerHeapOom(observed);
+      stderr = observed.slice(-4096);
     });
     activeChildren.add(child);
     if (!exitHandlerInstalled) {
@@ -93,7 +94,7 @@ async function runOne(
     let settled = false;
     let reply: ChildReply | undefined;
     const timeout = setTimeout(() => {
-      finish(new Error("Isolated Code Map refresh timed out"));
+      finish(new Error(`Isolated Code Map refresh timed out after ${limitMs} ms (QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS)`));
       killOwnedProcessGroup(child);
     }, limitMs);
     timeout.unref();
@@ -130,11 +131,11 @@ async function runOne(
       reply = result as ChildReply;
     });
     child.once("error", (error) => finish(error));
-    child.once("exit", (exitCode, signal) => {
+    child.once("close", (exitCode, signal) => {
       activeChildren.delete(child);
       if (settled) return;
       if (exitCode !== 0 || reply?.type !== "complete") {
-        finish(new Error(`Isolated Code Map indexing failed (${signal ? "signal" : "exit"})`));
+        finish(isolatedWorkerExit("refresh", exitCode, signal, stderr, reply?.type === "failed" ? reply.message : undefined, detectedOom));
         return;
       }
       try { options.onProcessMetrics?.({ childMaxRssMiB: reply.childMaxRssMiB }); } catch {

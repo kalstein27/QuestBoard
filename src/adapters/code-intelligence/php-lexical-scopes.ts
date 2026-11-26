@@ -92,7 +92,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (!raw || typeof raw !== "object") throw new Error("Invalid anonymous typed call");
           const call = raw as Record<string, unknown>;
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)
-            || (call.evidenceSource !== undefined && !["native", "docblock", "native-union"].includes(String(call.evidenceSource)))
+            || (call.evidenceSource !== undefined && !["native", "docblock", "native-union", "docblock-union"].includes(String(call.evidenceSource)))
             || (call.callStyle !== undefined && !["object", "static"].includes(String(call.callStyle)))) {
             throw new Error("Invalid anonymous call identity or range");
           }
@@ -237,7 +237,7 @@ function parseResponse(value: unknown, paths: ReadonlySet<string>): ReadonlyMap<
           if (!validName(call.className, 1024) || !validName(call.name, 255) || !isRange(call.nameRange)) {
             throw new Error("Invalid PHP typed call identity or range");
           }
-          if (call.evidenceSource !== undefined && !["native", "docblock", "native-union"].includes(String(call.evidenceSource))) {
+          if (call.evidenceSource !== undefined && !["native", "docblock", "native-union", "docblock-union"].includes(String(call.evidenceSource))) {
             throw new Error("Invalid PHP typed call evidence source");
           }
           if (call.callStyle !== undefined && !["object", "static"].includes(String(call.callStyle))) throw new Error("Invalid PHP call style");

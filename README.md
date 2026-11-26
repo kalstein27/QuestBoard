@@ -109,6 +109,8 @@ The Web UI exposes Quest, Flow, and Code workspaces plus Agent Follow presence c
 | `QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB` | Shared Node worker old-space limit (64–4096 MiB) | `512` |
 | `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_HEAP_MIB` | Index worker-specific old-space override (64–4096 MiB) | shared limit |
 | `QUESTBOARD_CODE_MAP_ISOLATED_READ_HEAP_MIB` | Read worker-specific old-space override (64–4096 MiB) | shared limit |
+| `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS` | Isolated refresh deadline (100–900000 ms) | `240000` |
+| `QUESTBOARD_PHP_EXECUTABLE` | PHP executable for lexical AST extraction, including isolated workers | `php` |
 | `QUESTBOARD_SCIP_TYPESCRIPT_EXECUTABLE` | Optional override for the bundled `scip-typescript` indexer executable | local `node_modules/.bin/scip-typescript` |
 | `QUESTBOARD_SCIP_PHP_EXECUTABLE` | Optional SCIP PHP executable override | target project's `vendor/bin/scip-php` |
 | `QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE` | Optional Swift SourceKit-LSP launcher override | `/usr/bin/xcrun` |

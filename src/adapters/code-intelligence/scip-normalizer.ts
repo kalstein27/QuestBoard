@@ -37,7 +37,7 @@ export interface ScipPhpTypedMethodCall {
   className: string;
   name: string;
   nameRange: readonly [number, number, number, number];
-  evidenceSource?: "native" | "docblock" | "native-union";
+  evidenceSource?: "native" | "docblock" | "native-union" | "docblock-union";
   /** AST-proven dispatch style; absent in legacy fixtures. */
   callStyle?: "object" | "static";
 }
@@ -1287,7 +1287,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     const target = verifiedPhpCallTarget(call);
     if (!target) continue;
     const key = siteKey(document, tupleRange(call.nameRange), call.name);
-    if (call.evidenceSource === "native-union") {
+    if (call.evidenceSource === "native-union" || call.evidenceSource === "docblock-union") {
       const unionKey = ownerId + ":" + key;
       const targets = phpUnionTargetsBySite.get(unionKey) ?? new Set<string>();
       targets.add(target);
@@ -1454,7 +1454,7 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
     // the SCIP and AST observations by exact source position.
     const innermost = phpOwnersByDocument.get(document)?.find((entry) => rangeContains(entry.range, location));
     if (!innermost || innermost.ownerId !== ownerId) continue;
-    const unionTargets = call.evidenceSource === "native-union"
+    const unionTargets = call.evidenceSource === "native-union" || call.evidenceSource === "docblock-union"
       ? phpUnionTargetsBySite.get(ownerId + ":" + siteKey(document, location, call.name))
       : undefined;
     const competingNative = document.occurrences.some((occurrence) =>
@@ -1474,6 +1474,8 @@ export function normalizeScipGraph(input: NormalizeScipGraphInput): CodeGraphSna
       receiverClass: call.className,
       label: call.evidenceSource === "docblock"
         ? "PHP AST docblock-derived array element; SCIP-verified method definition; receiverClass: " + call.className
+        : call.evidenceSource === "docblock-union"
+        ? "PHP AST docblock union receiver; possible dispatch; SCIP-verified method definition; receiverClass: " + call.className
         : call.evidenceSource === "native-union"
         ? "PHP AST declared union receiver; possible dispatch; SCIP-verified method definition; receiverClass: " + call.className
         : "PHP AST statically typed receiver; SCIP-verified method definition; receiverClass: " + call.className,

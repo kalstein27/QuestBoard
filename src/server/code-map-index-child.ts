@@ -5,6 +5,7 @@ import type { CodeMapIsolatedRefreshReceipt } from "../application/code-map-serv
 import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import type { QuestBoardRepository } from "../application/quest-board-repository.js";
 import { createConfiguredCodeMapRuntime } from "./code-map-config.js";
+import { isolatedWorkerDiagnostic } from "./code-map-isolated-env.js";
 
 /**
  * Dedicated, single-use Code Map index process.
@@ -15,7 +16,7 @@ import { createConfiguredCodeMapRuntime } from "./code-map-config.js";
 type Start = { type: "start"; request: CodeIndexRequest };
 type Finish =
   | { type: "complete"; receipt: CodeMapIsolatedRefreshReceipt; childMaxRssMiB: number }
-  | { type: "failed"; code: "index_failed" };
+  | { type: "failed"; code: "index_failed"; message: string };
 
 let started = false;
 function finish(message: Finish): void {
@@ -75,5 +76,5 @@ process.once("message", (data: unknown) => {
       receipt,
       childMaxRssMiB: +(process.resourceUsage().maxRSS / 1024).toFixed(1),
     });
-  })().catch(() => finish({ type: "failed", code: "index_failed" }));
+  })().catch(error => finish({ type: "failed", code: "index_failed", message: isolatedWorkerDiagnostic(error) }));
 });
