@@ -1,10 +1,12 @@
 /** SourceKit-LSP semantic Swift calls. Never infer edges from matching names. */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   type CodeGraphSnapshot,
@@ -205,12 +207,16 @@ function identity(kind: "node" | "relation", value: string): string {
   return "code:" + kind + ":" + createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
-function localSwiftPath(rootPath: string, uri: string): string | null {
+function localSwiftPath(rootPath: string, uri: string, sourceRootAlias?: string): string | null {
   if (!uri.startsWith("file://")) return null;
   let absolute: string;
   try { absolute = resolve(fileURLToPath(uri)); } catch { return null; }
-  const root = resolve(rootPath);
-  if (!absolute.startsWith(root + sep)) return null;
+  // SourceKit can use the physical original URI for callees discovered in its
+  // compiler index, even when the queried workspace uses temporary symlinks.
+  const root = [rootPath, sourceRootAlias].filter((entry): entry is string => Boolean(entry))
+    .map(entry => resolve(entry))
+    .find(entry => absolute.startsWith(entry + sep));
+  if (!root) return null;
   const local = relative(root, absolute);
   return local && !isAbsolute(local) && !local.split(sep).includes("..") && local.endsWith(".swift")
     ? local.split(sep).join("/") : null;
@@ -219,8 +225,9 @@ function localSwiftPath(rootPath: string, uri: string): string | null {
 async function nodeForItem(
   rootPath: string, item: HierarchyItem,
   loadSource: (path: string) => Promise<SwiftSource | null>,
+  sourceRootAlias?: string,
 ): Promise<CodeNode | null> {
-  const path = localSwiftPath(rootPath, item.uri);
+  const path = localSwiftPath(rootPath, item.uri, sourceRootAlias);
   if (!path || !item.selectionRange?.start) return null;
   const name = functionName(item.name);
   if (!name) return null;
@@ -437,6 +444,16 @@ export interface SourceKitLspProviderOptions {
   inventory?: CodeFileInventory;
   maxFiles?: number;
   maxFunctions?: number;
+  /** Additional Xcode build contexts, isolated from the source repository. */
+  supplementalBuilds?: readonly {
+    sourcePrefixes: readonly string[];
+    /** An existing .xcactivitylog file or a directory containing such logs. */
+    logsPath: string;
+  }[];
+  /** Trusted host executable, never a command read from the indexed repository. */
+  buildServerExecutable?: string;
+  /** Only used for verified source symlinks in an isolated build context. */
+  sourceRootAlias?: string;
   onFileResult?: (result: {
     path: string; indexed: boolean; reason?: string;
     discoveredFunctions?: number; preparedFunctions?: number; resolvedFunctions?: number;
@@ -452,7 +469,179 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
 
   constructor(options: SourceKitLspProviderOptions = {}) { this.#options = options; }
 
+  async #indexWithSupplementalBuilds(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
+    const root = await realpath(resolve(request.rootPath));
+    const files = (await (this.#options.inventory ?? new FileSystemCodeFileInventory())
+      .listFiles(root)).filter(file => file.path.endsWith(".swift"))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const contexts = this.#options.supplementalBuilds ?? [];
+    const groups = contexts.map(() => [] as typeof files);
+    const primary: typeof files = [];
+    for (const context of contexts) {
+      if (!context.sourcePrefixes.length || context.sourcePrefixes.some(prefix =>
+        !prefix.endsWith("/") || prefix.startsWith("/") || prefix.includes("\\")
+        || prefix.split("/").includes(".."))) {
+        throw semanticIndexFailure(new Error("Invalid supplemental Swift source prefix"));
+      }
+    }
+    for (const file of files) {
+      const matching = contexts.flatMap((context, i) =>
+        context.sourcePrefixes.some(prefix => file.path.startsWith(prefix)) ? [i] : []);
+      if (matching.length > 1) throw semanticIndexFailure(new Error(
+        "Overlapping supplemental Swift build contexts for " + file.path));
+      if (matching.length) groups[matching[0]!]!.push(file);
+      else primary.push(file);
+    }
+    if (files.length > (this.#options.maxFiles ?? 150))
+      throw semanticIndexFailure(new Error("Supplemental Swift contexts exceed the file budget"));
+    const childOptions: SourceKitLspProviderOptions = { ...this.#options };
+    delete childOptions.supplementalBuilds;
+    const graphs: CodeGraphSnapshot[] = [];
+    if (primary.length) {
+      graphs.push(await new SourceKitLspProvider({
+        ...childOptions, inventory: { listFiles: async () => primary },
+      }).indexProject(request));
+    }
+    for (let i = 0; i < contexts.length; i++) {
+      const assigned = groups[i]!;
+      if (!assigned.length) continue;
+      const workspace = await mkdtemp(join(tmpdir(), "questboard-swift-context-"));
+      try {
+        // The Xcode build server is scheme-scoped. Never replace the primary
+        // project's buildServer.json or compiler-index cache.
+        const originalBsp = JSON.parse(await readFile(join(root, "buildServer.json"), "utf8")) as {
+          build_root?: string; indexStorePath?: string;
+        };
+        const indexStorePath = originalBsp.build_root
+          ? join(originalBsp.build_root, "Index.noindex", "DataStore")
+          : originalBsp.indexStorePath;
+        if (!indexStorePath || !isAbsolute(indexStorePath))
+          throw new Error("Supplemental Swift context requires an absolute Xcode index store");
+        await writeFile(join(workspace, "buildServer.json"), JSON.stringify({
+          name: "xcode build server", version: "1.3.0", bspVersion: "2.2.0",
+          languages: ["swift"], argv: [this.#options.buildServerExecutable ?? "xcode-build-server"],
+          kind: "manual", indexStorePath,
+        }));
+        const allTopLevel = new Set(files.map(file => file.path.split("/")[0]!));
+        for (const part of allTopLevel) {
+          if (!part || part === "." || part === "..") throw new Error("Invalid Swift source path");
+          await symlink(join(root, part), join(workspace, part));
+        }
+        // Parsing is read-only with respect to the source project. A disposable
+        // compiler database is generated inside the isolated LSP workspace.
+        const logRoot = isAbsolute(contexts[i]!.logsPath)
+          ? resolve(contexts[i]!.logsPath) : resolve(root, contexts[i]!.logsPath);
+        const logFiles = (await stat(logRoot)).isDirectory()
+          ? (await readdir(logRoot)).filter(name => name.endsWith(".xcactivitylog"))
+            .map(name => join(logRoot, name))
+          : [logRoot];
+        const byNewest = await Promise.all(logFiles.map(async path => ({
+          path, time: (await stat(path)).mtimeMs,
+        })));
+        byNewest.sort((a, b) => b.time - a.time);
+        let found = false;
+        for (const { path } of byNewest.slice(0, 8)) {
+          try {
+            await promisify(execFile)(this.#options.buildServerExecutable ?? "xcode-build-server",
+              ["parse", "-l", path, "-o", join(workspace, ".compile")],
+              { timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+            const entries = JSON.parse(await readFile(join(workspace, ".compile"), "utf8")) as unknown;
+            if (Array.isArray(entries) && entries.length > 0) { found = true; break; }
+          } catch { /* Try an earlier completed Xcode build log. */ }
+        }
+        if (!found) throw new Error("No usable supplemental Swift compiler commands");
+        for (const file of assigned) {
+          const original = await realpath(join(root, file.path));
+          const alias = await realpath(join(workspace, file.path));
+          if (original !== alias) throw new Error("Supplemental Swift source is not an exact alias");
+        }
+        const used = graphs.reduce((sum, graph) =>
+          sum + (graph.coverage?.languages.find(l => l.language === "swift")
+            ?.semanticFunctionDiagnostics?.attemptedCount ?? 0), 0);
+        const remaining = (this.#options.maxFunctions ?? 5000) - used;
+        if (remaining <= 0) throw new Error("Supplemental Swift contexts exceed the function budget");
+        graphs.push(await new SourceKitLspProvider({
+          ...childOptions, maxFunctions: remaining,
+          sourceRootAlias: root,
+          inventory: { listFiles: async () => assigned },
+        }).indexProject({ ...request, rootPath: workspace }));
+      } catch (error) {
+        throw semanticIndexFailure(error);
+      } finally {
+        await rm(workspace, { recursive: true, force: true });
+      }
+    }
+    const nodes = new Map<string, CodeNode>();
+    const relations = new Map<string, CodeRelation>();
+    for (const graph of graphs) {
+      for (const node of graph.nodes) nodes.set(node.id, nodes.get(node.id) ?? node);
+      for (const relation of graph.relations) {
+        const prior = relations.get(relation.id);
+        if (!prior) { relations.set(relation.id, relation); continue; }
+        relations.set(relation.id, {
+          ...prior,
+          evidence: [...new Map([...(prior.evidence ?? []), ...(relation.evidence ?? [])]
+            .map(evidence => [JSON.stringify(evidence.location), evidence])).values()].slice(0, 24),
+        });
+      }
+    }
+    const swift = graphs.map(graph => graph.coverage?.languages.find(l => l.language === "swift"));
+    const count = (key: "attemptedCount" | "preparedCount" | "resolvedCount"
+      | "partiallyIndexedFileCount" | "missingDeclarationPositionCount"
+      | "rejectedEvidenceRangeCount" | "deduplicatedEvidenceRangeCount") =>
+      swift.reduce((sum, lang) => sum + (lang?.semanticFunctionDiagnostics?.[key] ?? 0), 0);
+    const reasons = new Map<string, number>();
+    const failures = new Map<string, number>();
+    const gaps = new Map<string, number>();
+    for (const lang of swift) {
+      for (const item of lang?.semanticFunctionDiagnostics?.rejectedEvidenceReasons ?? [])
+        reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + item.rangeCount);
+      for (const item of lang?.semanticFunctionDiagnostics?.failureReasons ?? [])
+        failures.set(item.reason, (failures.get(item.reason) ?? 0) + item.functionCount);
+      for (const item of lang?.semanticFileGapReasons ?? [])
+        gaps.set(item.reason, (gaps.get(item.reason) ?? 0) + item.fileCount);
+    }
+    const indexed = swift.reduce((sum, lang) => sum + (lang?.semanticIndexedFileCount ?? 0), 0);
+    const degraded = indexed < files.length;
+    return {
+      schemaVersion: CODE_GRAPH_SCHEMA_VERSION, projectId: request.projectId,
+      rootPath: request.rootPath, indexedAt: new Date().toISOString(),
+      nodes: [...nodes.values()], relations: [...relations.values()],
+      coverage: {
+        degraded,
+        providers: [{
+          providerId: PROVIDER_ID, status: "fresh", fidelity: "semantic-call",
+          languages: ["swift"], nodeCount: nodes.size, relationCount: relations.size,
+        }],
+        languages: [{
+          language: "swift", fileCount: files.length,
+          semanticEligibleFileCount: files.length, semanticIndexedFileCount: indexed,
+          semanticFunctionDiagnostics: {
+            attemptedCount: count("attemptedCount"), preparedCount: count("preparedCount"),
+            resolvedCount: count("resolvedCount"),
+            partiallyIndexedFileCount: count("partiallyIndexedFileCount"),
+            missingDeclarationPositionCount: count("missingDeclarationPositionCount"),
+            rejectedEvidenceRangeCount: count("rejectedEvidenceRangeCount"),
+            deduplicatedEvidenceRangeCount: count("deduplicatedEvidenceRangeCount"),
+            rejectedEvidenceReasons: [...reasons].sort(([a], [b]) => a.localeCompare(b))
+              .map(([reason, rangeCount]) => ({ reason, rangeCount })),
+            failureReasons: [...failures].sort(([a], [b]) => a.localeCompare(b))
+              .map(([reason, functionCount]) => ({ reason, functionCount })),
+            failureExamples: swift.flatMap(lang =>
+              lang?.semanticFunctionDiagnostics?.failureExamples ?? []).slice(0, 16),
+          },
+          ...(gaps.size ? { semanticFileGapReasons: [...gaps]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([reason, fileCount]) => ({ reason, fileCount })) } : {}),
+          fidelity: "semantic-call", providerIds: [PROVIDER_ID], degraded,
+        }],
+      },
+    };
+  }
+
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
+    if (this.#options.supplementalBuilds?.length)
+      return this.#indexWithSupplementalBuilds(request);
     let rootPath = resolve(request.rootPath);
     const swiftFiles = (await (this.#options.inventory ?? new FileSystemCodeFileInventory())
       .listFiles(rootPath)).filter((entry) => entry.path.endsWith(".swift"))
@@ -581,7 +770,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               const correctedItem = exactOwner && method.currentPosition && !method.ambiguousSignature
                 ? { ...item, selectionRange: { ...item.selectionRange, start: method.currentPosition } }
                 : item;
-              const caller = await nodeForItem(rootPath, correctedItem, loadSource);
+              const caller = await nodeForItem(rootPath, correctedItem, loadSource, this.#options.sourceRootAlias);
               const lspSelection = item.selectionRange.start;
               const sameLspPosition = lspSelection.line === position.line
                 && lspSelection.character === position.character;
@@ -615,7 +804,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 }) : [];
               const sourceLineShift = callerStartLine - 1 - lspSelection.line;
               for (const call of outgoing ?? []) {
-                const callee = await nodeForItem(rootPath, call.to, loadSource);
+                const callee = await nodeForItem(rootPath, call.to, loadSource, this.#options.sourceRootAlias);
                 if (!callee || !call.fromRanges?.length) continue;
                 const suppliedRanges = call.fromRanges.slice(0, 24);
                 const matchedPositions = new Set<string>();

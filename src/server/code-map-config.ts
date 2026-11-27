@@ -8,7 +8,7 @@ import { CodeMapService } from "../application/code-map-service.js";
 import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import { FileSystemCodeFileInventory } from "../adapters/code-intelligence/file-inventory.js";
 import { ScipPhpProvider } from "../adapters/code-intelligence/scip-php-provider.js";
-import { SourceKitLspProvider } from "../adapters/code-intelligence/sourcekit-lsp-provider.js";
+import { SourceKitLspProvider, type SourceKitLspProviderOptions } from "../adapters/code-intelligence/sourcekit-lsp-provider.js";
 import {
   ExecFileScipProcessRunner,
   loadScipGraphInProcess,
@@ -357,8 +357,27 @@ export function createConfiguredCodeMapService(
   }
 
   if (config.provider === "sourcekit-lsp") {
+    const extraValue = env.QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS?.trim();
+    let supplementalBuilds: SourceKitLspProviderOptions["supplementalBuilds"];
+    if (extraValue) {
+      const parsed: unknown = JSON.parse(extraValue);
+      if (!Array.isArray(parsed) || parsed.length > 4 || parsed.some(value =>
+        !value || typeof value !== "object"
+        || !Array.isArray(value.sourcePrefixes)
+        || !value.sourcePrefixes.length || value.sourcePrefixes.length > 8
+        || value.sourcePrefixes.some((prefix: unknown) => typeof prefix !== "string" || !prefix.length)
+        || typeof value.logsPath !== "string" || !value.logsPath.length)) {
+        throw new Error("Invalid QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS");
+      }
+      supplementalBuilds = parsed as NonNullable<SourceKitLspProviderOptions["supplementalBuilds"]>;
+    }
     return createCompositeService([
-      withProviderMetadata(new SourceKitLspProvider({ executable: config.executable }),
+      withProviderMetadata(new SourceKitLspProvider({
+        executable: config.executable,
+        ...(supplementalBuilds ? { supplementalBuilds } : {}),
+        ...(env.QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE?.trim()
+          ? { buildServerExecutable: env.QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE.trim() } : {}),
+      }),
         { languages: ["swift"], fidelity: "semantic-call" }, config.storageRoot),
     ], providerRegistry, manualRelations, persistence);
   }

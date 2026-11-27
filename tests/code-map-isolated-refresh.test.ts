@@ -19,10 +19,15 @@ test("G1/G5 worker environment and timeout use explicit bounded settings", () =>
   const env = isolatedCodeMapEnv({
     PATH: "/empty", QUESTBOARD_PHP_EXECUTABLE: "/tools/php",
     QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE: "/tools/sourcekit-lsp",
+    QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS: '[{"sourcePrefixes":["MacHost/"],"logsPath":"MacLogs"}]',
+    QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE: "/tools/xcode-build-server",
     UNRELATED_SECRET: "must not be inherited",
   });
   assert.equal(env.QUESTBOARD_PHP_EXECUTABLE, "/tools/php");
   assert.equal(env.QUESTBOARD_SOURCEKIT_LSP_EXECUTABLE, "/tools/sourcekit-lsp");
+  assert.equal(env.QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS,
+    '[{"sourcePrefixes":["MacHost/"],"logsPath":"MacLogs"}]');
+  assert.equal(env.QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE, "/tools/xcode-build-server");
   assert.equal(env.UNRELATED_SECRET, undefined);
   assert.equal(resolveIsolatedRefreshTimeoutMs({}), 240_000);
   assert.equal(resolveIsolatedRefreshTimeoutMs({ QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_TIMEOUT_MS: "600000" }), 600_000);

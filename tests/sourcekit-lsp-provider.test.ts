@@ -183,8 +183,13 @@ function answer(method, p) {
     if (file === 'V.swift') return [{ to: item('target()', uriFor('B.swift')),
       fromRanges: [range(2, 4), range(4, 2)] }];
     if (file !== 'A.swift') return [];
+    // Compiler-index callees may carry the physical source URI rather than
+    // the isolated workspace symlink URI. Both must normalize to the same node.
+    const targetUri = p.item.uri.includes('/MacHost/')
+      ? pathToFileURL(join(require('node:fs').realpathSync(join(process.cwd(), 'MacHost')),
+        '..', 'B.swift')).href : uriFor('B.swift');
     return [
-      { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26), range(1, 16)] },
+      { to: item('target()', targetUri), fromRanges: [range(1, 16), range(1, 26), range(1, 16)] },
       { to: item('unknown()', uriFor('C.swift')), fromRanges: [] },
       { to: item('external()', 'file:///outside/External.swift'), fromRanges: [range(1, 40)] },
     ];
@@ -547,6 +552,83 @@ test("Swift persistent empty preparation stops after one deferred retry without 
       [{ reason: "prepare_empty", functionCount: 1 }]);
     assert.equal(graph.nodes.some(node => node.name === "absent"), false);
     assert.equal(graph.relations.length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift supplemental Xcode context preserves original paths and source-proven calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-multiple-builds-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "buildServer.json"), JSON.stringify({ build_root: root }));
+    await mkdir(join(root, "MacHost"));
+    await mkdir(join(root, "MacLogs"));
+    await writeFile(join(root, "MacLogs", "mac.xcactivitylog"), "mock log");
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "MacHost", "A.swift"),
+      "struct Controller {\nfunc caller() { target(); target() }\n}\n");
+    const parser = join(root, "xcode-build-server");
+    await writeFile(parser, `#!${process.execPath}\n` + String.raw`
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] !== "parse") process.exit(3);
+fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify([{ module_name: "MacHost" }]));
+`, { mode: 0o700 });
+    const observed: string[] = [];
+    const graph = await new SourceKitLspProvider({
+      executable, buildServerExecutable: parser,
+      inventory: { listFiles: async () => [
+        { path: "B.swift" }, { path: "MacHost/A.swift" },
+      ] },
+      supplementalBuilds: [{ sourcePrefixes: ["MacHost/"], logsPath: "MacLogs" }],
+      onFileResult: result => observed.push(result.path),
+    }).indexProject({ projectId: "multi-context", rootPath: root });
+    assert.equal(graph.rootPath, root);
+    assert.deepEqual(observed.sort(), ["B.swift", "MacHost/A.swift"]);
+    assert.equal(graph.coverage?.languages[0]?.semanticEligibleFileCount, 2);
+    assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 2);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.failureReasons, []);
+    const caller = graph.nodes.find(node => node.name === "caller");
+    const target = graph.nodes.find(node => node.name === "target");
+    assert.equal(caller?.location?.path, "MacHost/A.swift");
+    assert.equal(target?.location?.path, "B.swift");
+    assert.equal(graph.relations.length, 1);
+    const call = graph.relations[0]!;
+    assert.equal(call.from, caller?.id);
+    assert.equal(call.to, target?.id);
+    assert.deepEqual(call.evidence?.map(evidence => [
+      evidence.location.path, evidence.location.startLine, evidence.location.startColumn,
+    ]), [["MacHost/A.swift", 2, 17], ["MacHost/A.swift", 2, 27]]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift supplemental build without compiler records fails closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-missing-mac-flags-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "buildServer.json"), JSON.stringify({ build_root: root }));
+    await mkdir(join(root, "MacHost"));
+    await mkdir(join(root, "MacLogs"));
+    await writeFile(join(root, "MacLogs", "empty.xcactivitylog"), "empty");
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "MacHost", "A.swift"), "struct Controller {\nfunc caller() {}\n}\n");
+    const parser = join(root, "xcode-build-server");
+    await writeFile(parser, `#!${process.execPath}\n` + String.raw`
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.writeFileSync(args[args.indexOf("-o") + 1], "[]");
+`, { mode: 0o700 });
+    await assert.rejects(new SourceKitLspProvider({
+      executable, buildServerExecutable: parser,
+      inventory: { listFiles: async () => [
+        { path: "B.swift" }, { path: "MacHost/A.swift" },
+      ] },
+      supplementalBuilds: [{ sourcePrefixes: ["MacHost/"], logsPath: "MacLogs" }],
+    }).indexProject({ projectId: "no-mac-flags", rootPath: root }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, "code_map_semantic_index_failed");
+      assert.match(String(error.cause), /No usable supplemental Swift compiler commands/);
+      return true;
+    });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

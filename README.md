@@ -130,6 +130,8 @@ For a repository with auxiliary sources that deliberately do not require semanti
 
 Swift semantic calls are an explicit `sourcekit-lsp` opt-in (add it to `QUESTBOARD_CODE_MAP_PROVIDERS` or select it alone). On macOS, install `xcode-build-server`, generate a project-local `buildServer.json` with `xcode-build-server config -project <project>.xcodeproj -scheme <scheme>`, and build the Xcode scheme once to populate its compiler index before refreshing Code Map. Only SourceKit-resolved project-local function calls with exact source locations become `calls` edges. Unindexed Swift files remain visible as partial semantic coverage; the legacy architecture compatibility projection may still be overcompressed despite a populated raw call graph.
 
+For a second Xcode scheme, preserve the primary `buildServer.json` and set `QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS='[{"sourcePrefixes":["TouchPilotMacHost/"],"logsPath":".derivedData-c2ct-mac-host/Logs/Build"}]'` (replace paths for the target repository). Optionally set `QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE=/opt/homebrew/bin/xcode-build-server`. The extra context parses an existing Xcode build log into a disposable workspace with symlinks to the original source, then merges only verified SourceKit calls under their original source identities. No build, source mutation, inferred call or replacement of the primary iOS context occurs. Missing compiler records fail the refresh and preserve the last-good snapshot.
+
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
 ```bash
