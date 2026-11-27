@@ -143,16 +143,22 @@ async function nodeForItem(
 }
 
 function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource): {
-  positions: Position[]; missingPositions: number;
+  positions: { name: string; position: Position }[]; missingPositions: number;
 } {
-  const positions: Position[] = [];
+  const positions: { name: string; position: Position }[] = [];
   let missingPositions = 0;
+  const currentPositions = new Set<string>();
   const visit = (symbol: DocumentSymbol) => {
     if (symbol.kind === 6 || symbol.kind === 12) {
       const name = functionName(symbol.name);
       const current = name && symbol.selectionRange?.start
         ? sourcePosition(source, name, symbol.selectionRange.start) : null;
-      if (current) positions.push(current);
+      if (current && name) {
+        // Query SourceKit at its own documentSymbol coordinates. The current
+        // source anchor is for identity/evidence only, not for LSP requests.
+        positions.push({ name, position: symbol.selectionRange.start });
+        currentPositions.add(`${current.line}:${current.character}`);
+      }
       else missingPositions++;
     }
     for (const child of symbol.children ?? []) visit(child);
@@ -161,15 +167,16 @@ function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource
   if (symbols.length > 0 && missingPositions === 0) {
     // Probe current lexical function tokens not exposed by a partial documentSymbol
     // response. Only SourceKit prepare/outgoing confirmation can create call facts.
-    const seen = new Set(positions.map((pos) => `${pos.line}:${pos.character}`));
     for (const decl of source.declarations) {
       const position = { line: decl.line - 1, character: decl.column - 1 };
       const key = `${position.line}:${position.character}`;
-      if (seen.has(key)) continue;
-      positions.push(position);
-      seen.add(key);
+      if (currentPositions.has(key)) continue;
+      // Extra probes are still SourceKit requests, never inferred call edges.
+      positions.push({ name: decl.name, position });
+      currentPositions.add(key);
     }
-    positions.sort((a, b) => a.line - b.line || a.character - b.character);
+    positions.sort((a, b) => a.position.line - b.position.line
+      || a.position.character - b.position.character);
   }
   return { positions, missingPositions };
 }
@@ -390,7 +397,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           let filePrepared = 0;
           let fileResolved = 0;
           let rejectedEvidence = 0;
-          for (const position of positions.slice(0, count)) {
+          for (const { name: queriedName, position } of positions.slice(0, count)) {
             visitedFunctions++;
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
@@ -402,9 +409,13 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             let outgoingResolved = true;
             for (const item of prepared) {
               const caller = await nodeForItem(rootPath, item, loadSource);
-              if (!caller || caller.location?.path !== file.path
-                || caller.location.startLine !== position.line + 1
-                || caller.location.startColumn !== position.character + 1) continue;
+              const lspSelection = item.selectionRange.start;
+              const sameLspPosition = lspSelection.line === position.line
+                && lspSelection.character === position.character;
+              const sameCurrentPosition = caller?.location?.startLine === position.line + 1
+                && caller.location.startColumn === position.character + 1;
+              if (!caller || caller.name !== queriedName || caller.location?.path !== file.path
+                || (!sameLspPosition && !sameCurrentPosition)) continue;
               ownerFound = true;
               nodes.set(caller.id, caller);
               const outgoing = await client.request<OutgoingCall[] | null>(
@@ -416,9 +427,21 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 const callerSource = await loadSource(caller.location!.path);
                 if (!callerSource) continue;
                 const suppliedRanges = call.fromRanges.slice(0, 24);
+                const sourceLineShift = caller.location!.startLine! - 1 - lspSelection.line;
                 const evidence = suppliedRanges
-                  .filter((range) => range.start.line + 1 >= caller.location!.startLine!
-                    && verifiedCallRange(callerSource, range, callee))
+                  .map((range) => {
+                    // Prefer the verified caller's shift when SourceKit's
+                    // declaration is stale. A matching name at the old line
+                    // could otherwise be an unrelated call in current source.
+                    const shifted = {
+                      start: { ...range.start, line: range.start.line + sourceLineShift },
+                      end: { ...range.end, line: range.end.line + sourceLineShift },
+                    };
+                    if (sourceLineShift && verifiedCallRange(callerSource, shifted, callee)) return shifted;
+                    return verifiedCallRange(callerSource, range, callee) ? range : null;
+                  })
+                  .filter((range): range is Range => range !== null)
+                  .filter((range) => range.start.line + 1 >= caller.location!.startLine!)
                   .map((range) => ({
                     location: {
                       path: caller.location!.path,

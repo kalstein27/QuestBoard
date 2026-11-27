@@ -81,8 +81,10 @@ function answer(method, p) {
   }
   if (method === 'textDocument/prepareCallHierarchy') {
     if (file === 'C.swift') return null;
-    if (file === 'H.swift') return p.position.line === 2 ? [item('caller()', uri, 0)] : null;
-    if (file === 'J.swift') return p.position.line === 2 ? [item('target()', uri, 0)] : null;
+    // The compiler index only understands its own stale line 0, while the
+    // current source declares both functions on line 2.
+    if (file === 'H.swift') return p.position.line === 0 ? [item('caller()', uri, 0)] : null;
+    if (file === 'J.swift') return p.position.line === 0 ? [item('target()', uri, 0)] : null;
     if (file === 'K.swift') return p.position.line === 0 ? [item('first()', uri, 0)]
       : p.position.line === 1 ? [item('second()', uri, 0)] : null;
     if (file === 'L.swift') return [item('maker()', uri, 0)];
@@ -94,7 +96,7 @@ function answer(method, p) {
     if (file === 'D.swift') return null;
     if (file === 'H.swift') return [{
       to: item('target()', uriFor('J.swift'), 0),
-      fromRanges: [range(0, 16), range(2, 16), range(2, 26)],
+      fromRanges: [range(0, 16), range(0, 26), range(1, 16)],
     }];
     if (file === 'K.swift') return p.item.name === 'second()'
       ? [{ to: item('target()', uriFor('J.swift'), 0), fromRanges: [range(1, 16)] }] : [];
@@ -178,11 +180,13 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
   } finally { await rm(parent, { recursive: true, force: true }); }
 });
 
-test("Swift stale LSP coordinates use unambiguous current declarations and discard old call sites", async () => {
+test("Swift queries stale SourceKit coordinates but normalizes verified current-source declarations and calls", async () => {
   const root = await mkdtemp(join(tmpdir(), "questboard-swift-stale-"));
   try {
     const executable = await swiftLspFixture(root);
-    await writeFile(join(root, "H.swift"), "// old\n// old\nfunc caller() { target(); target() }\n");
+    // The old position also contains a same-name call in unrelated current
+    // source. It must not steal the caller's shifted evidence.
+    await writeFile(join(root, "H.swift"), "let ghost = target()\n// old\nfunc caller() { target(); target() }\n");
     await writeFile(join(root, "J.swift"), "// old\n// old\nfunc target() {}\n");
     await writeFile(join(root, "K.swift"), "func first() {}\nfunc second() { target() }\n");
     const observations: Array<{ path: string; indexed: boolean; reason?: string }> = [];
