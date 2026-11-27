@@ -45,6 +45,24 @@ Managed-MCP installation provisions the bundled SCIP TypeScript indexer through 
 
 The Tailnet Web/API remains on the normal QuestBoard port (`4317` by default). Managed lifecycle health uses a separate loopback-only endpoint at `http://127.0.0.1:4318/health`, so a host can verify the persistent process without needing to know the machine's current Tailscale IPv4 address. MCP remains a stdio proxy to this daemon and never becomes the authoritative state owner.
 
+### Swift semantic indexing: activate, then verify
+
+Swift's `sourcekit-lsp` adapter is opt-in. The default providers are `scip-typescript,scip-php`; having Xcode or `xcrun` installed does not activate Swift semantics. Before source changes or repeated refreshes, query `questboard_get_code_map_status` and `questboard_get_code_map_provider_capabilities` with the target project's ID. If Swift is required and SourceKit-LSP is available but `configured: false`, fix configuration first.
+
+1. Preserve the existing provider set and append `sourcekit-lsp`. For the default mixed-language deployment the effective daemon environment is:
+
+   ```bash
+   export QUESTBOARD_CODE_MAP=1
+   export QUESTBOARD_CODE_MAP_PROVIDERS=scip-typescript,scip-php,sourcekit-lsp
+   ```
+
+   The plural variable takes precedence over `QUESTBOARD_CODE_MAP_PROVIDER`. For a directly launched daemon, set these values in its launch environment before starting `npm run daemon`. For a managed service, configure the persistent environment of the actual managing host process through its supported operator/launcher configuration, then restart/reload that host as required and restart the existing managed service. `package.json` already lists both variables in `chatgpt2codex.managedService.launch.inheritEnvKeys`: the host must have the values when it spawns the daemon. Exporting them in an unrelated terminal, MCP proxy, or agent command does not configure an already-running service. Do not start a second daemon or change the pinned database/identity. If host configuration is not exposed or permission is denied, ask the authorized operator to apply these exact values; do not bypass the boundary or patch analyzer code to simulate activation.
+2. Re-read provider capabilities on the running daemon. Require `sourcekit-lsp.configured: true` and `available: true` before refreshing. Check the real toolchain with `xcrun --find sourcekit-lsp` and verify `xcode-build-server` is installed. For the target Xcode project, verify its existing `buildServer.json` points to the correct scheme/build root; if missing, generate it with `xcode-build-server config -project <project>.xcodeproj -scheme <scheme>` and build that scheme to populate the compiler index. Preserve existing project configuration and use the approved build path. A launcher executable alone is not proof of a working compiler index.
+3. Call `questboard_refresh_code_map` for the target project and follow the returned job through `questboard_get_code_map_refresh_status` to terminal. Do not repeat an active refresh. Check the resulting snapshot timestamp/identity and provider/language coverage: Swift must actually include `sourcekit-lsp` with `semantic-call` fidelity, not only `questboard:lexical-declarations` with `syntax` fidelity. Report partial coverage honestly, including other languages' independent gaps.
+4. Query a known real Swift function with `questboard_query_code_map` (`find_nodes`, then `callers`/`callees` for the exact node). Compare raw `calls`, SourceKit provenance, source locations and current Swift source. For TouchPilot, `connectToSavedDevice` is a useful existing probe; confirm at least one expected real call against the current source instead of assuming that any node or relation count proves success. Then inspect `questboard_get_code_map_subsystems` separately for cross-subsystem evidence. Only investigate analyzer implementation or projection omissions once activation and compiler-index prerequisites are confirmed. Preserve Flow, manual relations and last-good snapshots; do not fabricate edges or treat zero projected edges as proof of zero raw calls.
+
+Acceptance is an active provider plus verified real call evidence on a fresh snapshot, not merely installation, HTTP health, build success, or a successful refresh receipt. A failure at any prerequisite is a distinct actionable blocker.
+
 ## 2. Choose an adapter
 
 ### MCP stdio proxy

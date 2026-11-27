@@ -105,6 +105,14 @@ SQLite adapter → repository port + core domain
 
 ## Verification expectations
 
+### Code Map semantic indexing: configuration before diagnosis
+
+- Before diagnosing missing calls or changing an indexer, read `questboard_get_code_map_status` and `questboard_get_code_map_provider_capabilities` for the actual target project on the running daemon. Check `required`, `configured`, `installed`, `available`, language fidelity, provider IDs, and observed relation kinds separately. An installed/available provider is not necessarily enabled; a successful refresh or `contains` relations alone do not prove semantic indexing.
+- If Swift needs semantic calls and `sourcekit-lsp` is not configured, follow the activation procedure in `docs/AGENT-ONBOARDING.md` (Swift semantic indexing). Preserve existing providers and set `QUESTBOARD_CODE_MAP_PROVIDERS=scip-typescript,scip-php,sourcekit-lsp` for the default mixed-language deployment, in the daemon's effective launch environment, not merely an agent shell. Use the authorized host configuration/restart path.
+- Verify `configured: true` after restart, the target project's BSP/build index, and a fresh completed refresh before diagnosing the analyzer. Require provider-backed raw `calls` with exact source evidence for a known real call and inspect subsystem projection separately. If any prerequisite is blocked, report that specific blocker; do not claim an analyzer defect, full coverage, or successful semantic indexing without evidence. Never fabricate calls from lexical names or modify Flow to compensate.
+
+### Source verification
+
 For ordinary source changes, run the closest targeted check and then the full verification suite before handoff when practical:
 
 ```bash
