@@ -92,6 +92,10 @@ function answer(method, p) {
         { ...symbol('reduce(value:nextValue:)', 2, 6), selectionRange: range(2, 7) },
       ] },
     ];
+    if (file === 'T.swift') return [{ ...symbol('Worker', 0, 23), children: [
+      symbol('outer()', 1, 6), symbol('sibling()', 8, 6),
+    ] }];
+    if (file === 'U.swift') return [symbol('caller()', 0)];
     if (file === 'A.swift') return [{ ...symbol('Controller', 0, 23), children: [symbol('caller()', 1, 6)] }];
     return [symbol(file === 'B.swift' ? 'target()' : 'unknown()')];
   }
@@ -121,6 +125,10 @@ function answer(method, p) {
       if (p.position.line === 2) return [item('Alpha.reduce(value:nextValue:)', uri, 1, 7)];
       return null;
     }
+    if (file === 'T.swift') return p.position.line === 1
+      ? [item('Worker.outer()', uri, 1, 5)]
+      : p.position.line === 8 ? [item('Worker.sibling()', uri, 8, 5)] : null;
+    if (file === 'U.swift') return [item('caller()', uri, 0)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
@@ -142,6 +150,11 @@ function answer(method, p) {
       to: item('target()', uriFor('B.swift')),
       fromRanges: [range(p.item.name.startsWith('Alpha.') ? 7 : 2, 4)],
     }];
+    if (file === 'T.swift') return p.item.name === 'Worker.outer()'
+      ? [{ to: item('target()', uriFor('B.swift')),
+        fromRanges: [range(6, 8), range(9, 8)] }] : [];
+    if (file === 'U.swift') return [{ to: item('target()', uriFor('B.swift')),
+      fromRanges: [range(0, 16), range(0, 45)] }];
     if (file !== 'A.swift') return [];
     return [
       { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26), range(1, 16)] },
@@ -394,6 +407,52 @@ test("Swift multiline nearby source evidence is recovered but ambiguous evidence
       graph.nodes.find(node => node.id === rel.from)?.location?.path === "P.swift"), false);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
       [{ reason: "ambiguous_nearby_site", rangeCount: 1 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift local functions cannot truncate their parent caller or admit a sibling's call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-nested-caller-span-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "T.swift"), [
+      "struct Worker {",
+      "    private func outer() {",
+      "        let gate: Bool = {",
+      "            func isReady() -> Bool { return true }",
+      "            return isReady()",
+      "        }()",
+      "        target()",
+      "    }",
+      "    private func sibling() {",
+      "        target()",
+      "    }",
+      "}",
+    ].join("\n") + "\n");
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () => ["B.swift", "T.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "nested-caller-span", rootPath: root });
+    const outer = graph.nodes.find(node => node.name === "outer" && node.location?.path === "T.swift");
+    const relation = graph.relations.find(rel => rel.from === outer?.id && rel.kind === "calls");
+    assert.ok(relation, "outgoing call after the nested function must be recovered");
+    assert.deepEqual(relation.evidence?.map(e => [e.location.startLine, e.location.startColumn]),
+      [[7, 9]], "the sibling function's call must not be attributed to outer");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift same-line calls after a caller's closing brace cannot become its evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-inline-body-end-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "U.swift"),
+      "func caller() { target() }; func sibling() { target() }\n");
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () => ["B.swift", "U.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "inline-body-end", rootPath: root });
+    const caller = graph.nodes.find(node => node.name === "caller" && node.location?.path === "U.swift");
+    const relation = graph.relations.find(rel => rel.from === caller?.id && rel.kind === "calls");
+    assert.deepEqual(relation?.evidence?.map(e => e.location.startColumn), [17]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

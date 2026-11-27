@@ -70,10 +70,60 @@ function sourcePosition(source: SwiftSource, name: string, start: Position): Pos
   return null;
 }
 
+/** Current-source body boundary, never a source of semantic call edges. */
+function swiftFunctionBodyEnd(source: SwiftSource, startLine: number, startColumn: number): Position | null {
+  let parameterDepth = 0;
+  let sawParameters = false;
+  let inBody = false;
+  let braceDepth = 0;
+  let commentDepth = 0;
+  let quoted: { delimiter: string; hashes: string } | null = null;
+  for (let row = startLine - 1; row < source.lines.length; row++) {
+    const line = source.lines[row]!;
+    // Conditional compilation can contain mutually exclusive brace structures.
+    if (/^\s*#(?:if|elseif|else|endif)\b/.test(line)) return null;
+    for (let col = row === startLine - 1 ? startColumn - 1 : 0; col < line.length; col++) {
+      if (quoted) {
+        const close = quoted.delimiter + quoted.hashes;
+        if (line.startsWith(close, col)) { col += close.length - 1; quoted = null; }
+        else if (!quoted.hashes && line[col] === "\\") col++;
+        continue;
+      }
+      if (commentDepth > 0) {
+        if (line.startsWith("/*", col)) { commentDepth++; col++; }
+        else if (line.startsWith("*/", col)) { commentDepth--; col++; }
+        continue;
+      }
+      if (line.startsWith("//", col)) break;
+      if (line.startsWith("/*", col)) { commentDepth++; col++; continue; }
+      const stringStart = /^(#+)?("""|")/.exec(line.slice(col));
+      if (stringStart) {
+        quoted = { hashes: stringStart[1] ?? "", delimiter: stringStart[2]! };
+        col += stringStart[0].length - 1;
+        continue;
+      }
+      if (!inBody) {
+        if (line[col] === "(") parameterDepth++;
+        else if (line[col] === ")" && parameterDepth > 0) {
+          parameterDepth--;
+          if (parameterDepth === 0) sawParameters = true;
+        } else if (line[col] === "{" && sawParameters && parameterDepth === 0) {
+          inBody = true;
+          braceDepth = 1;
+        } else if (line[col] === ";" || line[col] === "}") return null;
+      } else if (line[col] === "{") braceDepth++;
+      else if (line[col] === "}" && --braceDepth === 0)
+        return { line: row + 1, character: col };
+    }
+  }
+  return null;
+}
+
 function verifiedCallRange(
   source: SwiftSource, range: Range, callee: CodeNode,
   callerStartLine: number, callerEndLine: number, sourceLineShift: number,
   onReject?: (reason: EvidenceRejectionReason) => void,
+  callerEndCharacter?: number,
 ): Range | null {
   const start = range?.start;
   if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
@@ -103,6 +153,8 @@ function verifiedCallRange(
     if (allMatches.length > 0 && matches.length === 0) columnMismatch = true;
     if (matches.length !== 1) return null;
     const column = matches[0]!.index!;
+    if (callerEndCharacter !== undefined
+      && lineIndex === callerEndLine - 2 && column >= callerEndCharacter) return null;
     return { start: { line: lineIndex, character: column },
       end: { line: lineIndex, character: column + matches[0]![0].length } };
   };
@@ -533,9 +585,12 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               const callerSource = await loadSource(caller.location!.path);
               if (!callerSource) continue;
               const callerStartLine = caller.location!.startLine!;
-              const callerEndLine = callerSource.declarations.find((decl) =>
+              const fallbackEndLine = callerSource.declarations.find((decl) =>
                 decl.line > callerStartLine && decl.column <= caller.location!.startColumn!)?.line
                 ?? callerSource.lines.length + 1;
+              const bodyEnd = swiftFunctionBodyEnd(callerSource, callerStartLine,
+                caller.location!.startColumn!);
+              const callerEndLine = bodyEnd ? bodyEnd.line + 1 : fallbackEndLine;
               const sourceLineShift = callerStartLine - 1 - lspSelection.line;
               for (const call of outgoing ?? []) {
                 const callee = await nodeForItem(rootPath, call.to, loadSource);
@@ -548,7 +603,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                       callerStartLine, callerEndLine, sourceLineShift, (reason) => {
                         rejectedEvidence++;
                         rejectedEvidenceReasons.set(reason, (rejectedEvidenceReasons.get(reason) ?? 0) + 1);
-                      });
+                      }, bodyEnd?.character);
                     if (!verified) return null;
                     const key = verified.start.line + ":" + verified.start.character;
                     if (matchedPositions.has(key)) {
