@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { projectCodeMapExclusionPrefixes, isConfiguredCodeMapExcluded } from "./code-map-exclusions.js";
+import { scopedCodeMapFiles, scopedCodeMapGraph } from "./code-map-path-scope.js";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   CODE_FIDELITY_LEVELS,
@@ -363,8 +364,9 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
   }
 
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
-    const inventory = await this.#fileInventory.listFiles(request.rootPath);
-    const prefixes = inventory.truncated ? [] : projectCodeMapExclusionPrefixes(request.rootPath);
+    const allFiles = await this.#fileInventory.listFiles(request.rootPath);
+    const inventory = scopedCodeMapFiles(allFiles, request);
+    const prefixes = allFiles.truncated ? [] : projectCodeMapExclusionPrefixes(request.rootPath);
     const excludedLanguages = new Set<string>();
     const includedLanguages = new Set<string>();
     for (const file of inventory) {
@@ -382,7 +384,7 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
         includedLanguages.has(language) || excludedLanguages.has(language));
       if (matching?.length && matching.every((language) => excludedLanguages.has(language))) continue;
       try {
-        const graph = await provider.indexProject(request);
+        const graph = scopedCodeMapGraph(await provider.indexProject(request), request);
         if (graph.projectId !== request.projectId) {
           throw new Error(`Code intelligence provider ${providerId} returned project ${graph.projectId} for ${request.projectId}`);
         }
@@ -408,7 +410,8 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
         // Other language providers retain their existing degraded fallback.
         if (error instanceof CodeMapSemanticIndexFailureError) throw error;
         if ((error as { code?: string } | null)?.code === "code_map_semantic_index_failed") throw error;
-        const stale = this.#lastGood.get(providerId)?.get(request.projectId);
+        const previous = this.#lastGood.get(providerId)?.get(request.projectId);
+        const stale = previous ? scopedCodeMapGraph(previous, request) : undefined;
         if (stale) {
           contributions.push({ provider, providerId, status: "stale", graph: stale });
           providerCoverage.push({

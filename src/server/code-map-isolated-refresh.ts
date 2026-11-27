@@ -143,7 +143,10 @@ async function runOne(
       }
       finish(undefined, reply.receipt);
     });
-    child.send({ type: "start", request: { projectId: request.projectId, rootPath: request.rootPath } }, (error) => {
+    child.send({ type: "start", request: {
+      projectId: request.projectId, rootPath: request.rootPath,
+      excludedPaths: request.excludedPaths ?? [],
+    } }, (error) => {
       if (error) {
         finish(error);
         killOwnedProcessGroup(child);

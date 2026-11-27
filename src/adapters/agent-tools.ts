@@ -251,6 +251,22 @@ export const QUESTBOARD_AGENT_TOOLS = [
     },
   },
   {
+    name: "questboard_set_code_map_excluded_paths",
+    description: "Replace a project's Code Map excluded directory/file prefixes. Saved for future indexes; does not reindex or change source/Git.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        excludedPaths: { type: "array", maxItems: 64, uniqueItems: true,
+          items: { type: "string", minLength: 1, maxLength: 259 } },
+        requestId: { type: "string", minLength: 8, maxLength: 128 },
+        actor: actorSchema,
+      },
+      required: ["projectId", "excludedPaths", "actor"],
+    },
+  },
+  {
     name: "questboard_list_tasks",
     description: "List tasks filtered by project and status. Prefer view=summary (IDs, titles, status, priority and revision only) for discovery, then questboard_get_task_resume for one task. Large results are paged; follow page.nextOffset until null. Explicit limit (1-100) and offset enable paging.",
     inputSchema: {
@@ -1360,6 +1376,14 @@ export function executeQuestBoardAgentTool(
       };
       return { project: service.createProject(inputValue, requireActor(args), mutationOptions(args)) };
     }
+    case "questboard_set_code_map_excluded_paths": {
+      const excludedPaths = args.excludedPaths;
+      if (!Array.isArray(excludedPaths) || !excludedPaths.every(value => typeof value === "string")) {
+        throw new TypeError("excludedPaths must be an array of strings");
+      }
+      return { project: service.updateProject(requireString(args, "projectId"),
+        { codeMapExcludedPaths: excludedPaths as string[] }, requireActor(args), mutationOptions(args)) };
+    }
     case "questboard_list_tasks": {
       const projectId = optionalString(args, "projectId");
       const status = optionalEnum(args, "status", TASK_STATUSES);
@@ -2102,7 +2126,7 @@ async function codeMapAgentStatus(
   const hydrationDiagnostic = 'hydrationDiagnostic' in summary ? summary.hydrationDiagnostic : undefined;
   const snapshotIdentity = 'snapshotIdentity' in summary ? summary.snapshotIdentity : undefined;
   const providerCapabilities = codeMap && !summary.indexed
-    ? await codeMap.unindexedProviderCapabilities(projectId, project.rootPath)
+    ? await codeMap.unindexedProviderCapabilities(projectId, project.rootPath, project.codeMapExcludedPaths)
     : ('providerCapabilities' in summary ? summary.providerCapabilities : undefined);
   const refresh = codeMap?.refreshJob(projectId);
   const recommendedNextAction = recommendCodeMapNextAction({
@@ -2151,7 +2175,10 @@ function refreshCodeMapForAgent(
       "Project rootPath is required before indexing Code Map",
     );
   }
-  const refresh = codeMap.startRefresh({ projectId, rootPath: project.rootPath });
+  const refresh = codeMap.startRefresh({
+    projectId, rootPath: project.rootPath,
+    excludedPaths: project.codeMapExcludedPaths ?? [],
+  });
   const result = (indexed: boolean): { refresh: Record<string, unknown> } => ({
     refresh: {
       projectId,

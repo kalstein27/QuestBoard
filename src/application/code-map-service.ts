@@ -27,6 +27,7 @@ import {
   materializeCodeFileHierarchy,
   type CodeFileInventory,
 } from "./code-map-hierarchy.js";
+import { scopedCodeMapFiles, scopedCodeMapGraph } from "./code-map-path-scope.js";
 import {
   inspectCodeMapPreflight,
   type CodeMapPreflightReport,
@@ -633,10 +634,11 @@ export class CodeMapService {
   /** Pre-index provider discovery does not hydrate any giant cached raw graph. */
   async unindexedProviderCapabilities(
     projectId: string, canonicalRootPath?: string,
+    excludedPaths: readonly string[] = [],
   ): Promise<CodeMapProviderCapabilityReport | undefined> {
     const rootPath = canonicalRootPath ?? this.#persistence?.rootPathForProject?.(projectId);
     if (!this.#providerRegistry) return undefined;
-    const preflight = await inspectCodeMapPreflight(rootPath, this.#preflightInventory);
+    const preflight = await inspectCodeMapPreflight(rootPath, this.#preflightInventory, excludedPaths);
     return this.#providerRegistry.report(undefined, rootPath, preflight);
   }
 
@@ -852,7 +854,7 @@ export class CodeMapService {
       };
     }
 
-    const providerGraph = await this.#provider.indexProject(request);
+    const providerGraph = scopedCodeMapGraph(await this.#provider.indexProject(request), request);
     if (providerGraph.projectId !== request.projectId) {
       throw new Error(
         `Code intelligence provider returned project ${providerGraph.projectId} for ${request.projectId}`,
@@ -868,7 +870,7 @@ export class CodeMapService {
     const graph = this.#fileInventory
       ? materializeCodeFileHierarchy(
           providerGraph,
-          await this.#fileInventory.listFiles(request.rootPath),
+          scopedCodeMapFiles(await this.#fileInventory.listFiles(request.rootPath), request),
         )
       : providerGraph;
 

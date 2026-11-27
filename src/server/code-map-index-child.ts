@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import type { CodeIndexRequest } from "../application/code-intelligence.js";
+import { normalizeCodeMapExcludedPaths } from "../application/code-map-path-scope.js";
 import type { CodeMapIsolatedRefreshReceipt } from "../application/code-map-service.js";
 import type { CodeMapManualRelationReader } from "../application/code-map-augmentation.js";
 import type { QuestBoardRepository } from "../application/quest-board-repository.js";
@@ -48,6 +49,7 @@ process.once("message", (data: unknown) => {
       throw new Error("Isolated Code Map root must be canonical");
     }
     if (request.changes?.length) throw new Error("Isolated Code Map supports full refresh only");
+    const excludedPaths = normalizeCodeMapExcludedPaths(request.excludedPaths ?? []);
 
     // Preserve previous change-count semantics without opening SQLite:
     // a repository-shaped readonly root lookup is solely used for hydration.
@@ -58,7 +60,7 @@ process.once("message", (data: unknown) => {
     } as unknown as CodeMapManualRelationReader & Pick<QuestBoardRepository, "getProject">;
     const runtime = createConfiguredCodeMapRuntime(process.env, rootReader);
     if (!runtime.service) throw new Error("Isolated Code Map runtime is not configured");
-    const result = await runtime.service.refresh(request);
+    const result = await runtime.service.refresh({ ...request, excludedPaths });
     const snapshotId = runtime.service.snapshotIdentity(request.projectId)?.snapshotId;
     if (!snapshotId) throw new Error("Isolated Code Map snapshot was not persisted and pinned");
     const receipt: CodeMapIsolatedRefreshReceipt = {

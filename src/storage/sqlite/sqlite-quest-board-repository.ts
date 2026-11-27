@@ -60,6 +60,7 @@ type ProjectRow = {
   name: string;
   description: string;
   root_path: string | null;
+  code_map_excluded_paths_json: string;
   status: ProjectStatus;
   created_at: string;
   updated_at: string;
@@ -339,14 +340,15 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
   createProject(project: Project): void {
     this.db
       .prepare(`
-        INSERT INTO projects (id, name, description, root_path, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO projects (id, name, description, root_path, code_map_excluded_paths_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         project.id,
         project.name,
         project.description,
         project.rootPath ?? null,
+        JSON.stringify(project.codeMapExcludedPaths ?? []),
         project.status,
         project.createdAt,
         project.updatedAt,
@@ -369,13 +371,14 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
     this.db
       .prepare(`
         UPDATE projects
-        SET name = ?, description = ?, root_path = ?, status = ?, updated_at = ?
+        SET name = ?, description = ?, root_path = ?, code_map_excluded_paths_json = ?, status = ?, updated_at = ?
         WHERE id = ?
       `)
       .run(
         project.name,
         project.description,
         project.rootPath ?? null,
+        JSON.stringify(project.codeMapExcludedPaths ?? []),
         project.status,
         project.updatedAt,
         project.id,
@@ -1148,6 +1151,7 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
         name TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         root_path TEXT,
+        code_map_excluded_paths_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -1457,6 +1461,11 @@ export class SqliteQuestBoardRepository implements QuestBoardRepository {
       END;
     `);
 
+    const projectColumns = this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
+    if (!projectColumns.some((column) => column.name === "code_map_excluded_paths_json")) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN code_map_excluded_paths_json TEXT NOT NULL DEFAULT '[]'");
+    }
+
     const claimColumns = this.db.prepare("PRAGMA table_info(claims)").all() as Array<{ name: string }>;
     if (!claimColumns.some((column) => column.name === "claim_id")) {
       this.db.exec("ALTER TABLE claims ADD COLUMN claim_id TEXT");
@@ -1569,6 +1578,7 @@ function mapProject(row: ProjectRow): Project {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    codeMapExcludedPaths: JSON.parse(row.code_map_excluded_paths_json) as string[],
     ...(row.root_path ? { rootPath: row.root_path } : {}),
   };
 }

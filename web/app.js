@@ -110,7 +110,7 @@ function collectElements() {
     "investigation-controls", "investigation-undo", "investigation-redo", "investigation-zoom-out", "investigation-code-lens",
     "investigation-zoom-reset", "investigation-zoom-in", "investigation-fit", "investigation-add-node", "investigation-add-group",
     "investigation-inspector", "investigation-inspector-title", "investigation-inspector-body", "investigation-inspector-close",
-    "code-map-board", "code-map-status", "code-map-refresh", "code-map-sync", "source-structure-open", "code-map-content",
+    "code-map-board", "code-map-status", "code-map-refresh", "code-map-scope", "code-map-scope-dialog", "code-map-scope-form", "code-map-excluded-paths", "code-map-sync", "source-structure-open", "code-map-content",
     "code-map-search", "code-map-kind-filter", "code-map-language-filter", "code-map-back",
     "code-map-inspector", "code-map-inspector-kicker", "code-map-inspector-title", "code-map-inspector-body", "code-map-inspector-close",
     "code-map-sync-dialog", "code-map-sync-close", "code-map-sync-body", "code-map-sync-recreate-row",
@@ -159,6 +159,8 @@ function bindEvents() {
   });
   el["board-error-retry"].addEventListener("click", () => void refreshAll());
   el["code-map-refresh"].addEventListener("click", () => void refreshCodeMap());
+  el["code-map-scope"].addEventListener("click", openCodeMapScope);
+  el["code-map-scope-form"].addEventListener("submit", (event) => void saveCodeMapScope(event));
   el["code-map-sync"].addEventListener("click", () => { pauseAgentFollow("code-sync"); void openCodeMapSyncPreview(); });
   el["source-structure-open"].addEventListener("click", () => { pauseAgentFollow("source-structure"); void openSourceStructure(); });
   el["source-structure-close"].addEventListener("click", () => el["source-structure-dialog"].close());
@@ -315,12 +317,12 @@ function resumeAgentFollow() {
 }
 
 function hasActiveUserNavigationContext() {
-  if (el["task-dialog"]?.open || el["project-dialog"]?.open || el["code-map-sync-dialog"]?.open || el["source-structure-dialog"]?.open) return true;
+  if (el["task-dialog"]?.open || el["project-dialog"]?.open || el["code-map-scope-dialog"]?.open || el["code-map-sync-dialog"]?.open || el["source-structure-dialog"]?.open) return true;
   return Boolean(el["task-drawer"]?.classList.contains("open") && state.taskDrawerOwner === "user");
 }
 
 function installAgentFollowManualOverride() {
-  const manualRootSelector = "#board-shell, #task-drawer, #task-dialog, #project-dialog, #code-map-sync-dialog, #source-structure-dialog";
+  const manualRootSelector = "#board-shell, #task-drawer, #task-dialog, #project-dialog, #code-map-scope-dialog, #code-map-sync-dialog, #source-structure-dialog";
   const manualTarget = (target) => target instanceof Element && Boolean(target.closest(manualRootSelector)) && !target.closest("#agent-focus-control");
   const markDrawerUserOwned = (target) => {
     if (target instanceof Element && target.closest("#task-drawer")) state.taskDrawerOwner = "user";
@@ -753,6 +755,7 @@ function renderViewSwitch() {
   el["investigation-add-node"].classList.toggle("hidden", !investigation);
   el["investigation-add-group"].classList.toggle("hidden", !investigation);
   el["code-map-refresh"].classList.toggle("hidden", !codeMap);
+  el["code-map-scope"].classList.toggle("hidden", !codeMap || !state.projectId);
   if (!codeMap) el["code-map-sync"].classList.add("hidden");
   if (!codeMap) el["source-structure-open"].classList.add("hidden");
   const title = codeMap ? "Code" : investigation ? "Flow" : "Quest";
@@ -5299,6 +5302,33 @@ async function saveTask(event) {
   } catch (error) {
     fail(error);
   }
+}
+
+function openCodeMapScope() {
+  const project = state.projects.find((entry) => entry.id === state.projectId);
+  if (!project) return;
+  pauseAgentFollow("code-scope");
+  el["code-map-excluded-paths"].value = (project.codeMapExcludedPaths ?? []).join("\n");
+  el["code-map-scope-dialog"].showModal();
+}
+
+async function saveCodeMapScope(event) {
+  event.preventDefault();
+  const projectId = state.projectId;
+  if (!projectId) return;
+  const codeMapExcludedPaths = el["code-map-excluded-paths"].value
+    .split(/\r?\n/).map(path => path.trim()).filter(Boolean);
+  try {
+    const { project } = await api(`/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH", actor: true, body: { codeMapExcludedPaths },
+    });
+    if (state.projectId === projectId) {
+      const index = state.projects.findIndex(entry => entry.id === projectId);
+      if (index !== -1) state.projects[index] = project;
+      el["code-map-scope-dialog"].close();
+      toast("Index scope saved. Run Index code to apply.");
+    }
+  } catch (error) { fail(error); }
 }
 
 function openProjectDialog() {

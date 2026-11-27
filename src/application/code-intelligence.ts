@@ -206,6 +206,8 @@ export interface CodeFileChange {
 export interface CodeIndexRequest {
   projectId: string;
   rootPath: string;
+  /** Trusted project-owned relative prefixes, never a caller-supplied root override. */
+  excludedPaths?: readonly string[];
   /** Omit for a full index. Providers may use this hint for incremental refresh. */
   changes?: readonly CodeFileChange[];
 }

@@ -64,6 +64,8 @@ export interface Project {
   name: string;
   description: string;
   rootPath?: string;
+  /** Repository-relative Code Map paths excluded from future full indexes. */
+  codeMapExcludedPaths?: string[];
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;

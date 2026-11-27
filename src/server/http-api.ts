@@ -331,6 +331,7 @@ async function handleRequest(
         name: requireString(body, "name"),
         ...optionalStringProperty(body, "description"),
         ...optionalStringProperty(body, "rootPath"),
+        ...optionalStringArrayProperty(body, "codeMapExcludedPaths"),
       };
       sendJson(response, 201, { project: service.createProject(input, actor, mutationOptions(request)) });
       return;
@@ -351,6 +352,7 @@ async function handleRequest(
         ...optionalStringProperty(body, "name"),
         ...optionalStringProperty(body, "description"),
         ...optionalStringProperty(body, "rootPath"),
+        ...optionalStringArrayProperty(body, "codeMapExcludedPaths"),
         ...optionalEnumProperty(body, "status", PROJECT_STATUSES),
       };
       sendJson(response, 200, { project: service.updateProject(projectId, input, actor, mutationOptions(request)) });

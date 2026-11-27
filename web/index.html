@@ -87,6 +87,7 @@
             <button id="investigation-add-group" class="button secondary hidden" type="button" title="Create a visual Flow work group">+ Group</button>
             <button id="code-map-sync" class="button secondary compact hidden" type="button">Sync to Flow</button>
             <button id="source-structure-open" class="button secondary compact hidden" type="button">Source → Flow</button>
+            <button id="code-map-scope" class="button secondary compact hidden" type="button">Index scope</button>
             <button id="code-map-refresh" class="button primary compact hidden" type="button">Index code</button>
             <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh board" title="Refresh">↻</button>
           </div>
@@ -293,6 +294,23 @@
         <div class="dialog-actions">
           <button class="button secondary" type="button" data-close-dialog="project-dialog">Cancel</button>
           <button class="button primary" type="submit">Create project</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="code-map-scope-dialog" class="quest-dialog small">
+      <form id="code-map-scope-form" method="dialog">
+        <div class="dialog-header">
+          <div><div class="dialog-label">Code Map</div><h2>Index scope</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="code-map-scope-dialog" aria-label="Close">×</button>
+        </div>
+        <label class="field wide">Exclude paths (one per line)
+          <textarea id="code-map-excluded-paths" rows="7" placeholder="Labs/**&#10;docs/evidence/**&#10;Tools/VideoPerfAudit/**"></textarea>
+        </label>
+        <p>Project-relative paths only. Each path excludes that file or directory and all descendants. Changes apply after the next Index code; no files or Git settings are changed.</p>
+        <div class="dialog-actions">
+          <button class="button secondary" type="button" data-close-dialog="code-map-scope-dialog">Cancel</button>
+          <button class="button primary" type="submit">Save scope</button>
         </div>
       </form>
     </dialog>

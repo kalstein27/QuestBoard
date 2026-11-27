@@ -17,6 +17,7 @@ import {
   type CodeSourceLocation,
 } from "../../application/code-intelligence.js";
 import { FileSystemCodeFileInventory } from "./file-inventory.js";
+import { scopedCodeMapFiles } from "../../application/code-map-path-scope.js";
 import type { CodeFileInventory } from "../../application/code-map-hierarchy.js";
 import { swiftSourceFunctionDeclarations } from "../../application/code-map-lexical-declarations.js";
 
@@ -471,8 +472,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
 
   async #indexWithSupplementalBuilds(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
     const root = await realpath(resolve(request.rootPath));
-    const files = (await (this.#options.inventory ?? new FileSystemCodeFileInventory())
-      .listFiles(root)).filter(file => file.path.endsWith(".swift"))
+    const files = scopedCodeMapFiles(await (this.#options.inventory ?? new FileSystemCodeFileInventory())
+      .listFiles(root), request).filter(file => file.path.endsWith(".swift"))
       .sort((a, b) => a.path.localeCompare(b.path));
     const contexts = this.#options.supplementalBuilds ?? [];
     const groups = contexts.map(() => [] as typeof files);
@@ -643,8 +644,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
     if (this.#options.supplementalBuilds?.length)
       return this.#indexWithSupplementalBuilds(request);
     let rootPath = resolve(request.rootPath);
-    const swiftFiles = (await (this.#options.inventory ?? new FileSystemCodeFileInventory())
-      .listFiles(rootPath)).filter((entry) => entry.path.endsWith(".swift"))
+    const swiftFiles = scopedCodeMapFiles(await (this.#options.inventory ?? new FileSystemCodeFileInventory())
+      .listFiles(rootPath), request).filter((entry) => entry.path.endsWith(".swift"))
       .sort((a, b) => a.path.localeCompare(b.path));
     const nodes = new Map<string, CodeNode>();
     const relations = new Map<string, CodeRelation>();

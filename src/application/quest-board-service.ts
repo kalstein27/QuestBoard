@@ -24,6 +24,7 @@ import type {
   TaskStatus,
 } from "../core/domain.js";
 import { defaultTaskGoal, defaultTaskNext, defaultTaskNow } from "../core/domain.js";
+import { normalizeCodeMapExcludedPaths } from "./code-map-path-scope.js";
 import {
   ClaimConflictError,
   ClaimGenerationConflictError,
@@ -51,12 +52,14 @@ export interface CreateProjectInput {
   name: string;
   description?: string;
   rootPath?: string;
+  codeMapExcludedPaths?: string[];
 }
 
 export interface UpdateProjectInput {
   name?: string;
   description?: string;
   rootPath?: string;
+  codeMapExcludedPaths?: string[];
   status?: ProjectStatus;
 }
 
@@ -309,6 +312,7 @@ export class QuestBoardService {
         status: "active",
         createdAt: timestamp,
         updatedAt: timestamp,
+        codeMapExcludedPaths: normalizeCodeMapExcludedPaths(input.codeMapExcludedPaths ?? []),
         ...(rootPath ? { rootPath } : {}),
       };
 
@@ -339,6 +343,9 @@ export class QuestBoardService {
         status: patch.status ?? current.status,
         createdAt: current.createdAt,
         updatedAt: timestamp,
+        codeMapExcludedPaths: patch.codeMapExcludedPaths !== undefined
+          ? normalizeCodeMapExcludedPaths(patch.codeMapExcludedPaths)
+          : current.codeMapExcludedPaths ?? [],
         ...(rootPath ? { rootPath } : {}),
       };
 

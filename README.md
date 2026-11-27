@@ -132,6 +132,8 @@ Swift semantic calls are an explicit `sourcekit-lsp` opt-in (add it to `QUESTBOA
 
 For a second Xcode scheme, preserve the primary `buildServer.json` and set `QUESTBOARD_SOURCEKIT_EXTRA_BUILD_CONTEXTS='[{"sourcePrefixes":["TouchPilotMacHost/"],"logsPath":".derivedData-c2ct-mac-host/Logs/Build"}]'` (replace paths for the target repository). Optionally set `QUESTBOARD_SOURCEKIT_BUILD_SERVER_EXECUTABLE=/opt/homebrew/bin/xcode-build-server`. The extra context parses an existing Xcode build log into a disposable workspace with symlinks to the original source, then merges only verified SourceKit calls under their original source identities. No build, source mutation, inferred call or replacement of the primary iOS context occurs. Missing compiler records fail the refresh and preserve the last-good snapshot.
 
+For a per-project Code Map index boundary, open **Code → Index scope** and enter repository-relative files or directory prefixes (one per line; an optional terminal `/**` is accepted). The setting is stored in QuestBoard's Project record, not in Git or the source repository. Equivalent interfaces are `PATCH /projects/:projectId` with `{"codeMapExcludedPaths":["Labs/**","docs/evidence/**"]}` and the `questboard_set_code_map_excluded_paths` agent tool. Saving never starts a refresh; press **Index code** to produce a new scoped snapshot. Excluded files, source nodes and their relationships are omitted from the Code Map result, while SourceKit omits their semantic work before opening documents. External SCIP indexers may still scan the project before QuestBoard filters their results.
+
 For access from another device on the same LAN, bind to the host machine's private LAN address:
 
 ```bash

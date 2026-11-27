@@ -60,6 +60,7 @@ function unavailablePreflight(
 export async function inspectCodeMapPreflight(
   rootPath: string | undefined,
   inventory: CodeFileInventory | undefined,
+  excludedPaths: readonly string[] = [],
 ): Promise<CodeMapPreflightReport> {
   const normalizedRootPath = rootPath?.trim();
   if (!normalizedRootPath) {
@@ -78,7 +79,9 @@ export async function inspectCodeMapPreflight(
 
   const counts = new Map<string, number>();
   const excludedCounts = new Map<string, number>();
-  const prefixes = files.truncated ? [] : projectCodeMapExclusionPrefixes(normalizedRootPath);
+  const prefixes = files.truncated ? [] : [
+    ...projectCodeMapExclusionPrefixes(normalizedRootPath), ...excludedPaths,
+  ];
   let unknownFileCount = 0;
   for (const file of files) {
     const language = normalizeCodeLanguage(file.language ?? inferCodeLanguageFromPath(file.path));
