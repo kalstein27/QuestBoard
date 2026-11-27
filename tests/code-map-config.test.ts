@@ -136,6 +136,22 @@ test("multi-provider semantic wrapper preserves compiler-scope coverage from the
   assert.deepEqual(contribution.coverage, graph.coverage);
   assert.deepEqual(contribution.nodes.map((node) => node.id), ["ts-symbol"]);
   assert.deepEqual(contribution.providerRuns, [providerRun], "native run SHA, fingerprint and reference counts must survive the provider wrapper");
+  for (const status of ["failed", "stale"] as const) {
+    const failedService = {
+      ...service,
+      async refresh() {
+        return { graph: { ...graph, coverage: {
+          ...graph.coverage!,
+          degraded: true,
+          providers: graph.coverage!.providers.map((entry) => ({ ...entry, status })),
+        } } };
+      },
+    } as unknown as Parameters<typeof semanticFactsProvider>[0];
+    await assert.rejects(
+      semanticFactsProvider(failedService, "scip-typescript").indexProject({ projectId: "project", rootPath: "/workspace/project" }),
+      /did not produce a fresh contribution/,
+    );
+  }
 });
 
 test("Code Map runtime keeps healthy semantic providers when another configured provider is missing", () => {

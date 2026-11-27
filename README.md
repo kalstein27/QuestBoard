@@ -126,6 +126,8 @@ If a semantic indexer is unavailable, QuestBoard still starts normally and prese
 
 Use `QUESTBOARD_CODE_MAP_PROVIDER` only when intentionally forcing one provider. Mixed TypeScript/JavaScript/PHP repositories should normally keep the default plural provider set so unsupported or unprepared languages remain explicit coverage gaps instead of disappearing from the file hierarchy.
 
+For a repository with auxiliary sources that deliberately do not require semantic indexing, a root `questboard-code-map.json` can declare `{"excludePrefixes":["tests/fixtures/example"]}`. Only a provider whose detected languages are entirely outside this explicitly declared project scope can be skipped. Files remain discoverable; native evidence from any provider that still runs is preserved. Missing or invalid configuration is conservative, and a provider required by any other detected source remains required. Refresh after changing the declaration.
+
 Swift semantic calls are an explicit `sourcekit-lsp` opt-in (add it to `QUESTBOARD_CODE_MAP_PROVIDERS` or select it alone). On macOS, install `xcode-build-server`, generate a project-local `buildServer.json` with `xcode-build-server config -project <project>.xcodeproj -scheme <scheme>`, and build the Xcode scheme once to populate its compiler index before refreshing Code Map. Only SourceKit-resolved project-local function calls with exact source locations become `calls` edges. Unindexed Swift files remain visible as partial semantic coverage; the legacy architecture compatibility projection may still be overcompressed despite a populated raw call graph.
 
 For access from another device on the same LAN, bind to the host machine's private LAN address:

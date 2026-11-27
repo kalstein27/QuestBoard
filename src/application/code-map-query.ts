@@ -484,7 +484,7 @@ export function queryCodeGraph(
           && coverage.semanticEligibleFileCount === coverage.semanticIndexedFileCount
           // The language aggregate cannot identify excluded paths unless all
           // indexed paths have exact native SCIP evidence and counts reconcile.
-          && nativeCountByLanguage.get(language) === coverage.semanticIndexedFileCount
+          && (nativeCountByLanguage.get(language) ?? 0) === coverage.semanticIndexedFileCount
           && discoveredCountByLanguage.get(language) === coverage.fileCount;
         const providerFailed = analysisLevel !== "semantic" && graph.coverage?.providers.some((provider) =>
           provider.status === "failed" && (provider.languages === undefined || provider.languages.includes(language)));

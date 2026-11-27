@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import type { CodeFileInventory, CodeFileInventoryEntry } from "../../application/code-map-hierarchy.js";
+import type { CodeFileInventory, CodeFileInventoryEntry, CodeFileInventoryResult } from "../../application/code-map-hierarchy.js";
 
 export const DEFAULT_CODE_MAP_IGNORED_DIRECTORIES = new Set([
   ".git",
@@ -82,7 +82,7 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
     this.#includeComposerDependencies = options.includeComposerDependencies ?? false;
   }
 
-  async listFiles(rootPath: string): Promise<readonly CodeFileInventoryEntry[]> {
+  async listFiles(rootPath: string): Promise<CodeFileInventoryResult> {
     const root = resolve(rootPath);
     // A root Composer vendor/ tree is installed third-party code, not the
     // repository's source inventory. Do NOT blindly ignore nested directories
@@ -105,7 +105,7 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
             "Code Map file inventory truncated to " + this.#maxFiles + " files; some files are omitted",
             { code: "QUESTBOARD_CODE_MAP_INVENTORY_TRUNCATED" },
           );
-          break;
+          return Object.assign(files, { truncated: true as const });
         }
         files.push({ path });
       }
@@ -136,7 +136,7 @@ export class FileSystemCodeFileInventory implements CodeFileInventory {
             "Code Map file inventory truncated to " + this.#maxFiles + " files; some files are omitted",
             { code: "QUESTBOARD_CODE_MAP_INVENTORY_TRUNCATED" },
           );
-          return files.sort((left, right) => left.path.localeCompare(right.path));
+          return Object.assign(files.sort((left, right) => left.path.localeCompare(right.path)), { truncated: true as const });
         }
         files.push({ path });
       }

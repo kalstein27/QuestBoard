@@ -1,0 +1,6 @@
+{
+  "excludePrefixes": [
+    "scripts/questboard-php-scip-lexical-scopes.php",
+    "tests/fixtures/source-flow-s1-php"
+  ]
+}

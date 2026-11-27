@@ -24,7 +24,9 @@ test("D5: Git and non-Git file inventories return bounded deterministic subsets 
         writeFileSync(join(root, "src", name + ".php"), "<?php\n");
       }
       const inventory = new FileSystemCodeFileInventory({ maxFiles: 2 });
-      const first = (await inventory.listFiles(root)).map((file) => file.path);
+      const firstResult = await inventory.listFiles(root);
+      assert.equal(firstResult.truncated, true);
+      const first = firstResult.map((file) => file.path);
       const second = (await inventory.listFiles(root)).map((file) => file.path);
       assert.equal(first.length, 2);
       assert.deepEqual(first, second);

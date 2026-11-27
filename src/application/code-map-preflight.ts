@@ -1,4 +1,5 @@
 import { normalizeCodeLanguage } from "./code-intelligence.js";
+import { projectCodeMapExclusionPrefixes, isConfiguredCodeMapExcluded } from "./code-map-exclusions.js";
 import {
   inferCodeLanguageFromPath,
   type CodeFileInventory,
@@ -18,6 +19,8 @@ export type CodeMapPreflightUnavailableReason =
 export interface CodeMapPreflightLanguage {
   language: string;
   discoveredFileCount: number;
+  /** Present only when all detected files of this language are explicitly outside scope. */
+  outsideProjectScope?: true;
 }
 
 export interface CodeMapPreflightReport {
@@ -74,6 +77,8 @@ export async function inspectCodeMapPreflight(
   }
 
   const counts = new Map<string, number>();
+  const excludedCounts = new Map<string, number>();
+  const prefixes = files.truncated ? [] : projectCodeMapExclusionPrefixes(normalizedRootPath);
   let unknownFileCount = 0;
   for (const file of files) {
     const language = normalizeCodeLanguage(file.language ?? inferCodeLanguageFromPath(file.path));
@@ -82,11 +87,16 @@ export async function inspectCodeMapPreflight(
       continue;
     }
     counts.set(language, (counts.get(language) ?? 0) + 1);
+    if (isConfiguredCodeMapExcluded(file.path, prefixes)) {
+      excludedCounts.set(language, (excludedCounts.get(language) ?? 0) + 1);
+    }
   }
 
   const languages = [...counts.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([language, discoveredFileCount]) => ({ language, discoveredFileCount }));
+    .map(([language, discoveredFileCount]) => ({ language, discoveredFileCount,
+      ...(excludedCounts.get(language) === discoveredFileCount ? { outsideProjectScope: true as const } : {}),
+    }));
 
   return {
     status: "ready",

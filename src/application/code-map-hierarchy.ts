@@ -15,8 +15,11 @@ export interface CodeFileInventoryEntry {
 }
 
 export interface CodeFileInventory {
-  listFiles(rootPath: string): Promise<readonly CodeFileInventoryEntry[]>;
+  listFiles(rootPath: string): Promise<CodeFileInventoryResult>;
 }
+
+/** A bounded inventory is usable for discovery, but not proof of total exclusion. */
+export type CodeFileInventoryResult = readonly CodeFileInventoryEntry[] & { readonly truncated?: true };
 
 const FILE_INVENTORY_PROVENANCE: CodeFactProvenance = {
   providerId: "questboard:file-inventory",

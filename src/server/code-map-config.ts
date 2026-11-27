@@ -104,6 +104,11 @@ export function semanticFactsProvider(
       capabilities: service.capabilities,
       async indexProject(request) {
         const graph = (await service.refresh(request)).graph;
+        // The outer composite owns last-good fallback; a child failure must
+        // not become a fresh, empty semantic contribution in that composite.
+        if (graph.coverage && graph.coverage.providers.find((entry) => entry.providerId === providerId)?.status !== "fresh") {
+          throw new Error(`Semantic provider ${providerId} did not produce a fresh contribution`);
+        }
         const nodes = graph.nodes.filter((node) =>
           node.provenance?.some((entry) => entry.providerId === providerId),
         );

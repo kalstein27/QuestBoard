@@ -64,6 +64,7 @@ export type CodeProviderRequirement = (typeof CODE_PROVIDER_REQUIREMENTS)[number
 export const CODE_PROVIDER_REQUIREMENT_REASONS = [
   "detected_supported_language",
   "supported_language_not_detected",
+  "supported_language_outside_project_scope",
   "language_inventory_unavailable",
 ] as const;
 export type CodeProviderRequirementReason = (typeof CODE_PROVIDER_REQUIREMENT_REASONS)[number];
@@ -215,17 +216,23 @@ function gapDegradesHealth(reason: CodeLanguageGapReason | null): boolean {
 function projectLanguages(
   graph: CodeGraphSnapshot | undefined,
   preflight: CodeMapPreflightReport | undefined,
+  eligibleOnly = false,
 ): readonly string[] | undefined {
   if (preflight?.status === "ready") {
     return preflight.languages
-      .filter((entry) => entry.discoveredFileCount > 0)
+      .filter((entry) => entry.discoveredFileCount > 0 && (!eligibleOnly || !entry.outsideProjectScope))
       .map((entry) => normalizeCodeLanguage(entry.language));
   }
   if (graph) {
+    const outsideScope = new Set(graph.coverage?.languages
+      .filter((entry) => entry.semanticEligibleFileCount === 0
+        && entry.semanticExcludedFileCount === entry.fileCount
+        && entry.semanticExclusionReason === "provider_project_scope")
+      .map((entry) => normalizeCodeLanguage(entry.language)) ?? []);
     return [...new Set(graph.nodes
       .filter((node) => node.kind === "file")
       .map((node) => normalizeCodeLanguage(node.language))
-      .filter((language) => language !== "unknown"))].sort();
+      .filter((language) => language !== "unknown" && (!eligibleOnly || !outsideScope.has(language))))].sort();
   }
   return undefined;
 }
@@ -233,6 +240,7 @@ function projectLanguages(
 function providerProjectCapability(
   provider: CodeProviderRegistryEntry,
   languages: readonly string[] | undefined,
+  eligibleLanguages: readonly string[] | undefined,
 ): CodeProviderProjectCapability {
   if (!languages) {
     return {
@@ -244,7 +252,7 @@ function providerProjectCapability(
   }
   const supported = new Set(provider.languages.map((language) => normalizeCodeLanguage(language)));
   const matchingLanguages = languages.filter((language) => supported.has(language)).sort();
-  if (matchingLanguages.length > 0) {
+  if (matchingLanguages.some((language) => eligibleLanguages?.includes(language))) {
     return {
       ...provider,
       requirement: "required",
@@ -255,8 +263,9 @@ function providerProjectCapability(
   return {
     ...provider,
     requirement: "not_needed",
-    requirementReason: "supported_language_not_detected",
-    matchingLanguages: [],
+    requirementReason: matchingLanguages.length > 0
+      ? "supported_language_outside_project_scope" : "supported_language_not_detected",
+    matchingLanguages,
   };
 }
 
@@ -270,23 +279,24 @@ function preflightLanguageReports(
     ...preflight.languages.map((entry) => ({
       language: normalizeCodeLanguage(entry.language),
       discoveredFileCount: entry.discoveredFileCount,
+      outsideProjectScope: Boolean(entry.outsideProjectScope),
     })),
     ...(preflight.unknownFileCount > 0
-      ? [{ language: "unknown", discoveredFileCount: preflight.unknownFileCount }]
+      ? [{ language: "unknown", discoveredFileCount: preflight.unknownFileCount, outsideProjectScope: false }]
       : []),
   ].sort((left, right) => left.language.localeCompare(right.language));
 
-  return discovered.map(({ language, discoveredFileCount }): CodeLanguageCapabilityReport => {
+  return discovered.map(({ language, discoveredFileCount, outsideProjectScope }): CodeLanguageCapabilityReport => {
     const configuredForLanguage = providers.filter((provider) =>
       provider.configured && provider.languages.map(normalizeCodeLanguage).includes(language));
-    const installOptions = providers
+    const installOptions = outsideProjectScope ? [] : providers
       .filter((provider) =>
         provider.languages.map(normalizeCodeLanguage).includes(language)
         && !provider.available
         && provider.installOption)
       .map((provider) => provider.installOption!);
     let gapReason: CodeLanguageGapReason | null = null;
-    if (language === "unknown") {
+    if (language === "unknown" || outsideProjectScope) {
       gapReason = null;
     } else if (configuredForLanguage.some((provider) => !provider.available)) {
       gapReason = "provider_missing";
@@ -297,14 +307,14 @@ function preflightLanguageReports(
       gapReason = "no_trusted_provider_available";
     }
 
-    const eligibleFileCount = language === "unknown" ? 0 : null;
+    const eligibleFileCount = language === "unknown" || outsideProjectScope ? 0 : null;
     return {
       language,
       discoveredFileCount,
       eligibleFileCount,
       indexedFileCount: 0,
-      excludedFileCount: 0,
-      exclusionReason: null,
+      excludedFileCount: outsideProjectScope ? discoveredFileCount : 0,
+      exclusionReason: outsideProjectScope ? "provider_project_scope" : null,
       symbolCount: 0,
       fidelity: "file-only",
       providerIds: [],
@@ -343,8 +353,9 @@ export class CodeMapProviderRegistry {
     preflight?: CodeMapPreflightReport,
   ): CodeMapProviderCapabilityReport {
     const projectLanguageInventory = projectLanguages(graph, preflight);
+    const eligibleLanguages = projectLanguages(graph, preflight, true);
     const providers = this.entries(graph?.rootPath ?? rootPath)
-      .map((provider) => providerProjectCapability(provider, projectLanguageInventory));
+      .map((provider) => providerProjectCapability(provider, projectLanguageInventory, eligibleLanguages));
     if (!graph) {
       const reports = preflightLanguageReports(preflight, providers);
       const degraded = preflight?.status === "ready"
@@ -369,7 +380,8 @@ export class CodeMapProviderRegistry {
       const configuredForLanguage = providers.filter((provider) =>
         provider.configured && provider.languages.includes(language));
       const installOptions = providers
-        .filter((provider) => provider.languages.includes(language) && !provider.available && provider.installOption)
+        .filter((provider) => provider.languages.includes(language) && provider.requirement !== "not_needed"
+          && !provider.available && provider.installOption)
         .map((provider) => provider.installOption!);
       const graphCoverage = graph.coverage?.languages.find((entry) => entry.language === language);
       // A configured prefix is a deliberate indexing exclusion, never a missing

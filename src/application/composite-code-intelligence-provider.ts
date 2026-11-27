@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { projectCodeMapExclusionPrefixes, isConfiguredCodeMapExcluded } from "./code-map-exclusions.js";
 import {
   CODE_GRAPH_SCHEMA_VERSION,
   CODE_FIDELITY_LEVELS,
@@ -254,6 +255,7 @@ function languageCoverage(
   graph: CodeGraphSnapshot,
   providers: readonly CodeProviderCoverage[],
   contributions: readonly ProviderContribution[],
+  excludedLanguages: ReadonlySet<string>,
 ): CodeLanguageCoverage[] {
   const fileNodes = graph.nodes.filter((node) => node.kind === "file" && node.location?.path);
   const filesByLanguage = new Map<string, CodeNode[]>();
@@ -279,10 +281,14 @@ function languageCoverage(
       const semanticScopes = contributions
         .map((contribution) => contribution.graph.coverage?.languages.find((entry) => entry.language === language))
         .filter((entry): entry is CodeLanguageCoverage => Boolean(entry?.semanticEligibleFileCount !== undefined));
-      const semanticEligibleFileCount = semanticScopes.length > 0
+      // No semantic provider was needed for a fully excluded language. Retain its
+      // inventory and explicitly record zero eligible files instead of a failure.
+      const outsideScope = excludedLanguages.has(language)
+        && !providers.some((provider) => !provider.languages || provider.languages.includes(language));
+      const semanticEligibleFileCount = outsideScope ? 0 : semanticScopes.length > 0
         ? Math.max(...semanticScopes.map((entry) => entry.semanticEligibleFileCount ?? 0))
         : undefined;
-      const semanticIndexedFileCount = semanticScopes.length > 0
+      const semanticIndexedFileCount = outsideScope ? 0 : semanticScopes.length > 0
         ? Math.max(...semanticScopes.map((entry) => entry.semanticIndexedFileCount ?? entry.semanticEligibleFileCount ?? 0))
         : undefined;
       const semanticExcludedFileCount = semanticEligibleFileCount === undefined
@@ -306,11 +312,12 @@ function makeCoverage(
   graph: CodeGraphSnapshot,
   providers: readonly CodeProviderCoverage[],
   contributions: readonly ProviderContribution[],
+  excludedLanguages: ReadonlySet<string>,
 ): CodeGraphCoverage {
   return {
     degraded: providers.some((provider) => provider.status !== "fresh"),
     providers,
-    languages: languageCoverage(graph, providers, contributions),
+    languages: languageCoverage(graph, providers, contributions, excludedLanguages),
   };
 }
 
@@ -353,11 +360,23 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
 
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
     const inventory = await this.#fileInventory.listFiles(request.rootPath);
+    const prefixes = inventory.truncated ? [] : projectCodeMapExclusionPrefixes(request.rootPath);
+    const excludedLanguages = new Set<string>();
+    const includedLanguages = new Set<string>();
+    for (const file of inventory) {
+      const language = (file.language ?? inferCodeLanguageFromPath(file.path))?.toLowerCase();
+      if (!language) continue;
+      (isConfiguredCodeMapExcluded(file.path, prefixes) ? excludedLanguages : includedLanguages).add(language);
+    }
+    for (const language of includedLanguages) excludedLanguages.delete(language);
     const contributions: ProviderContribution[] = [];
     const providerCoverage: CodeProviderCoverage[] = [];
 
     for (const [index, provider] of this.#providers.entries()) {
       const providerId = provider.providerId?.trim() || `provider-${index + 1}`;
+      const matching = provider.languages?.filter((language) =>
+        includedLanguages.has(language) || excludedLanguages.has(language));
+      if (matching?.length && matching.every((language) => excludedLanguages.has(language))) continue;
       try {
         const graph = await provider.indexProject(request);
         if (graph.projectId !== request.projectId) {
@@ -415,7 +434,7 @@ export class CompositeCodeIntelligenceProvider implements CodeIntelligenceProvid
       inventory,
     );
     const withStructure = await addConservativeSourceDeclarations(withFiles, inventory, request.rootPath);
-    const coverage = makeCoverage(withStructure, providerCoverage, contributions);
+    const coverage = makeCoverage(withStructure, providerCoverage, contributions, excludedLanguages);
     const snapshot: CodeGraphSnapshot = { ...withStructure, coverage };
     assertValidCodeGraphSnapshot(snapshot);
     return snapshot;
