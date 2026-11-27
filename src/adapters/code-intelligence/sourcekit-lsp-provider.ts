@@ -169,12 +169,19 @@ async function nodeForItem(
 }
 
 function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource): {
-  positions: { name: string; position: Position }[]; missingPositions: number;
+  positions: {
+    name: string; position: Position; currentPosition?: Position;
+    signature?: string; ownerPath?: string; ambiguousSignature?: boolean;
+  }[];
+  missingPositions: number;
 } {
-  const positions: { name: string; position: Position }[] = [];
+  const positions: {
+    name: string; position: Position; currentPosition?: Position;
+    signature?: string; ownerPath?: string; ambiguousSignature?: boolean;
+  }[] = [];
   let missingPositions = 0;
   const currentPositions = new Set<string>();
-  const visit = (symbol: DocumentSymbol) => {
+  const visit = (symbol: DocumentSymbol, owners: readonly string[] = []) => {
     if (symbol.kind === 6 || symbol.kind === 12) {
       const name = functionName(symbol.name);
       const current = name && symbol.selectionRange?.start
@@ -182,14 +189,32 @@ function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource
       if (current && name) {
         // Query SourceKit at its own documentSymbol coordinates. The current
         // source anchor is for identity/evidence only, not for LSP requests.
-        positions.push({ name, position: symbol.selectionRange.start });
+        positions.push({
+          name, position: symbol.selectionRange.start, currentPosition: current,
+          signature: symbol.name, ...(owners.length ? { ownerPath: owners.join(".") } : {}),
+        });
         currentPositions.add(`${current.line}:${current.character}`);
       }
       else missingPositions++;
     }
-    for (const child of symbol.children ?? []) visit(child);
+    // Only declarations of enclosing Swift types identify a method owner.
+    const isType = [5, 10, 11, 23].includes(symbol.kind);
+    const typeName = isType ? symbol.name.match(/^[A-Za-z_][A-Za-z_0-9]*/)?.[0] : undefined;
+    const childrenOwners = typeName ? [...owners, typeName] : owners;
+    for (const child of symbol.children ?? []) visit(child, childrenOwners);
   };
   for (const symbol of symbols) visit(symbol);
+  const signatureCounts = new Map<string, number>();
+  for (const method of positions) {
+    if (!method.ownerPath || !method.signature) continue;
+    const key = method.ownerPath + ":" + method.signature;
+    signatureCounts.set(key, (signatureCounts.get(key) ?? 0) + 1);
+  }
+  for (const method of positions) {
+    if (!method.ownerPath || !method.signature) continue;
+    method.ambiguousSignature =
+      (signatureCounts.get(method.ownerPath + ":" + method.signature) ?? 0) > 1;
+  }
   if (symbols.length > 0 && missingPositions === 0) {
     // Probe current lexical function tokens not exposed by a partial documentSymbol
     // response. Only SourceKit prepare/outgoing confirmation can create call facts.
@@ -205,6 +230,19 @@ function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource
       || a.position.character - b.position.character);
   }
   return { positions, missingPositions };
+}
+
+function matchesQualifiedOwner(
+  item: HierarchyItem,
+  method: { signature?: string; ownerPath?: string },
+): boolean {
+  if (!method.signature || !method.ownerPath) return false;
+  const suffix = "." + method.signature;
+  if (!item.name.endsWith(suffix)) return false;
+  const actualOwner = item.name.slice(0, -suffix.length);
+  // SourceKit can qualify with a module name. The declared type chain must
+  // still match, not merely the common method name.
+  return actualOwner === method.ownerPath || actualOwner.endsWith("." + method.ownerPath);
 }
 
 class LspSession {
@@ -435,7 +473,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           let filePrepared = 0;
           let fileResolved = 0;
           let rejectedEvidence = 0;
-          for (const { name: queriedName, position } of positions.slice(0, count)) {
+          for (const method of positions.slice(0, count)) {
+            const { name: queriedName, position } = method;
             visitedFunctions++;
             let functionFailure: string | null = "prepare_empty";
             for (let attempt = 0; attempt < 2; attempt++) {
@@ -448,7 +487,18 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             let ownerFound = false;
             let outgoingResolved = true;
             for (const item of prepared) {
-              const caller = await nodeForItem(rootPath, item, loadSource);
+              const exactOwner = matchesQualifiedOwner(item, method);
+              const qualifiedButDifferentOwner = method.ownerPath
+                && item.name.slice(0, item.name.indexOf("(")).includes(".")
+                && !exactOwner;
+              if (qualifiedButDifferentOwner) continue;
+              // A stale SourceKit selection can overlap another same-named
+              // method. Bind it to the *current documentSymbol query* only when
+              // the full declared owner and signature both agree.
+              const correctedItem = exactOwner && method.currentPosition && !method.ambiguousSignature
+                ? { ...item, selectionRange: { ...item.selectionRange, start: method.currentPosition } }
+                : item;
+              const caller = await nodeForItem(rootPath, correctedItem, loadSource);
               const lspSelection = item.selectionRange.start;
               const sameLspPosition = lspSelection.line === position.line
                 && lspSelection.character === position.character;

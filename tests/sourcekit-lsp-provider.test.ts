@@ -78,6 +78,20 @@ function answer(method, p) {
     if (file === 'M.swift') return [{ ...symbol('init()', 1), selectionRange: range(1, 2) }];
     if (file === 'N.swift') return [symbol('big()', 0)];
     if (file === 'O.swift' || file === 'P.swift') return [symbol('caller()', 0)];
+    if (file === 'Q.swift' || file === 'R.swift') return [
+      { ...symbol('Alpha', 0, 23), children: [
+        { ...symbol('reduce(value:nextValue:)', 1, 6), selectionRange: range(1, 7) },
+      ] },
+      { ...symbol('Beta', 5, 23), children: [
+        { ...symbol('reduce(value:nextValue:)', 6, 6), selectionRange: range(6, 7) },
+      ] },
+    ];
+    if (file === 'S.swift') return [
+      { ...symbol('Alpha', 0, 23), children: [
+        { ...symbol('reduce(value:nextValue:)', 1, 6), selectionRange: range(1, 7) },
+        { ...symbol('reduce(value:nextValue:)', 2, 6), selectionRange: range(2, 7) },
+      ] },
+    ];
     if (file === 'A.swift') return [{ ...symbol('Controller', 0, 23), children: [symbol('caller()', 1, 6)] }];
     return [symbol(file === 'B.swift' ? 'target()' : 'unknown()')];
   }
@@ -93,6 +107,20 @@ function answer(method, p) {
     if (file === 'M.swift') return [item('Widget.init()', uri, 1, 2)];
     if (file === 'N.swift') return [item('big()', uri, 0)];
     if (file === 'O.swift' || file === 'P.swift') return [item('caller()', uri, 0)];
+    if (file === 'Q.swift' || file === 'R.swift') {
+      if (p.position.line === 1) return [
+        item((file === 'R.swift' ? 'Beta' : 'Alpha') + '.reduce(value:nextValue:)', uri, 6, 7),
+      ];
+      if (p.position.line === 6) return [
+        item((file === 'R.swift' ? 'Alpha' : 'Beta') + '.reduce(value:nextValue:)', uri, 1, 7),
+      ];
+      return null;
+    }
+    if (file === 'S.swift') {
+      if (p.position.line === 1) return [item('Alpha.reduce(value:nextValue:)', uri, 2, 7)];
+      if (p.position.line === 2) return [item('Alpha.reduce(value:nextValue:)', uri, 1, 7)];
+      return null;
+    }
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
@@ -109,6 +137,10 @@ function answer(method, p) {
     }];
     if (file === 'O.swift' || file === 'P.swift') return [{
       to: item('target()', uriFor('B.swift')), fromRanges: [range(0, 2)],
+    }];
+    if (file === 'Q.swift' || file === 'R.swift') return [{
+      to: item('target()', uriFor('B.swift')),
+      fromRanges: [range(p.item.name.startsWith('Alpha.') ? 7 : 2, 4)],
     }];
     if (file !== 'A.swift') return [];
     return [
@@ -231,6 +263,49 @@ test("Swift queries stale SourceKit coordinates but normalizes verified current-
       [{ reason: "source_evidence_mismatch", fileCount: 1 }]);
     assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.partiallyIndexedFileCount, 1);
     assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceRangeCount, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift binds stale duplicate method selections to their verified qualified owners only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-qualified-owner-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    const methods = [
+      "struct Alpha {",
+      "  func reduce(value: Int, nextValue: Int) {",
+      "    target()",
+      "  }",
+      "}",
+      "struct Beta {",
+      "  func reduce(value: Int, nextValue: Int) {",
+      "    target()",
+      "  }",
+      "}",
+    ].join("\n") + "\n";
+    await writeFile(join(root, "Q.swift"), methods);
+    // This fixture deliberately returns the other owner's qualified name.
+    await writeFile(join(root, "R.swift"), methods);
+    await writeFile(join(root, "S.swift"), [
+      "struct Alpha {",
+      "  func reduce(value: Int, nextValue: Int) { target() }",
+      "  func reduce(value: String, nextValue: String) { target() }",
+      "}",
+    ].join("\n") + "\n");
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "Q.swift", "R.swift", "S.swift"].map(path => ({ path })) },
+    });
+    const graph = await provider.indexProject({ projectId: "qualified-owner", rootPath: root });
+    const qCallers = graph.nodes.filter(node => node.name === "reduce" && node.location?.path === "Q.swift");
+    assert.deepEqual(qCallers.map(node => node.location!.startLine).sort((a, b) => a! - b!), [2, 7]);
+    assert.equal(graph.nodes.some(node => node.name === "reduce" && node.location?.path === "R.swift"), false);
+    assert.equal(graph.nodes.some(node => node.name === "reduce" && node.location?.path === "S.swift"), false,
+      "same-owner overloads with identical LSP signatures must remain unresolved");
+    assert.deepEqual(graph.relations.filter(rel => qCallers.some(node => node.id === rel.from))
+      .flatMap(rel => rel.evidence?.map(entry => entry.location.startLine) ?? []).sort((a, b) => a! - b!),
+      [3, 8]);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons,
+      [{ reason: "call_hierarchy_unavailable", fileCount: 2 }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
