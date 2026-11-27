@@ -2,7 +2,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -78,16 +78,18 @@ function nodeForItem(rootPath: string, item: HierarchyItem): CodeNode | null {
   };
 }
 
-function methodPositions(symbols: readonly DocumentSymbol[]): Position[] {
+function methodPositions(symbols: readonly DocumentSymbol[]): { positions: Position[]; missingPositions: number } {
   const positions: Position[] = [];
+  let missingPositions = 0;
   const visit = (symbol: DocumentSymbol) => {
-    if ((symbol.kind === 6 || symbol.kind === 12) && symbol.selectionRange?.start) {
-      positions.push(symbol.selectionRange.start);
+    if (symbol.kind === 6 || symbol.kind === 12) {
+      if (symbol.selectionRange?.start) positions.push(symbol.selectionRange.start);
+      else missingPositions++;
     }
     for (const child of symbol.children ?? []) visit(child);
   };
   for (const symbol of symbols) visit(symbol);
-  return positions;
+  return { positions, missingPositions };
 }
 
 class LspSession {
@@ -183,7 +185,10 @@ class LspSession {
       processId: process.pid,
       rootUri: pathToFileURL(rootPath).href,
       workspaceFolders: [{ uri: pathToFileURL(rootPath).href, name: "QuestBoard Swift" }],
-      capabilities: { textDocument: { callHierarchy: {}, publishDiagnostics: {} } },
+      capabilities: { textDocument: {
+        documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+        callHierarchy: {}, publishDiagnostics: {},
+      } },
       clientInfo: { name: "questboard-sourcekit", version: "1" },
     }, 30000);
     this.notify("initialized", {});
@@ -200,7 +205,10 @@ export interface SourceKitLspProviderOptions {
   inventory?: CodeFileInventory;
   maxFiles?: number;
   maxFunctions?: number;
-  onFileResult?: (result: { path: string; indexed: boolean; reason?: string }) => void;
+  onFileResult?: (result: {
+    path: string; indexed: boolean; reason?: string;
+    discoveredFunctions?: number; preparedFunctions?: number; resolvedFunctions?: number;
+  }) => void;
 }
 
 export class SourceKitLspProvider implements CodeIntelligenceProvider {
@@ -213,7 +221,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
   constructor(options: SourceKitLspProviderOptions = {}) { this.#options = options; }
 
   async indexProject(request: CodeIndexRequest): Promise<CodeGraphSnapshot> {
-    const rootPath = resolve(request.rootPath);
+    let rootPath = resolve(request.rootPath);
     const swiftFiles = (await (this.#options.inventory ?? new FileSystemCodeFileInventory())
       .listFiles(rootPath)).filter((entry) => entry.path.endsWith(".swift"))
       .sort((a, b) => a.path.localeCompare(b.path));
@@ -222,10 +230,15 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
     let indexedFiles = 0;
     let visitedFunctions = 0;
     let preparedFunctions = 0;
+    let resolvedFunctions = 0;
     const maxFiles = this.#options.maxFiles ?? 150;
     const maxFunctions = this.#options.maxFunctions ?? 5000;
 
     if (swiftFiles.length) {
+      // SourceKit and child-process cwd may return the physical workspace path
+      // even when the registered root uses a macOS /var or symlink alias.
+      try { rootPath = await realpath(rootPath); }
+      catch (error) { throw semanticIndexFailure(error); }
       if (!existsSync(join(rootPath, "buildServer.json"))) {
         throw semanticIndexFailure(
           new Error("Swift semantic indexing requires a project-local Xcode BSP buildServer.json"),
@@ -252,8 +265,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           });
           const symbols = await client.request<DocumentSymbol[] | null>(
             "textDocument/documentSymbol", { textDocument: { uri } }, 15000);
-          const positions = methodPositions(symbols ?? []);
+          const { positions, missingPositions } = methodPositions(symbols ?? []);
           const count = Math.min(positions.length, maxFunctions - visitedFunctions);
+          let filePrepared = 0;
+          let fileResolved = 0;
           for (const position of positions.slice(0, count)) {
             visitedFunctions++;
             for (let attempt = 0; attempt < 2; attempt++) {
@@ -262,13 +277,16 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             const prepared = await client.request<HierarchyItem[] | null>(
               "textDocument/prepareCallHierarchy", { textDocument: { uri }, position }, timeoutMs);
             if (!prepared?.length) break;
+            let ownerFound = false;
+            let outgoingResolved = true;
             for (const item of prepared) {
               const caller = nodeForItem(rootPath, item);
               if (!caller) continue;
-              preparedFunctions++;
+              ownerFound = true;
               nodes.set(caller.id, caller);
               const outgoing = await client.request<OutgoingCall[] | null>(
                 "callHierarchy/outgoingCalls", { item }, timeoutMs);
+              if (!Array.isArray(outgoing)) outgoingResolved = false;
               for (const call of outgoing ?? []) {
                 const callee = nodeForItem(rootPath, call.to);
                 if (!callee || !call.fromRanges?.length) continue;
@@ -293,6 +311,14 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 });
               }
             }
+            if (ownerFound) {
+              preparedFunctions++;
+              filePrepared++;
+              if (outgoingResolved) {
+                fileResolved++;
+                resolvedFunctions++;
+              }
+            }
             break;
               } catch (error) {
                 if (!(error instanceof Error) || !error.message.includes("timed out:")) throw error;
@@ -306,12 +332,18 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               }
             }
           }
-          if (count === positions.length) {
-            indexedFiles++;
-            this.#options.onFileResult?.({ path: file.path, indexed: true });
-          } else {
-            this.#options.onFileResult?.({ path: file.path, indexed: false, reason: "function_limit" });
-          }
+          const reason = symbols == null ? "document_symbols_unavailable"
+            : missingPositions > 0 ? "document_symbol_positions_unavailable"
+            : count !== positions.length ? "function_limit"
+            : filePrepared !== count ? "call_hierarchy_unavailable"
+            : fileResolved !== count ? "outgoing_calls_unavailable"
+            : undefined;
+          if (!reason) indexedFiles++;
+          this.#options.onFileResult?.({
+            path: file.path, indexed: !reason, ...(reason ? { reason } : {}),
+            discoveredFunctions: positions.length + missingPositions,
+            preparedFunctions: filePrepared, resolvedFunctions: fileResolved,
+          });
           client.notify("textDocument/didClose", { textDocument: { uri } });
           consecutiveTimeouts = 0;
           } catch (error) {
@@ -330,8 +362,12 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             await client.initialize(rootPath);
           }
         }
-        if (visitedFunctions > 0 && preparedFunctions === 0) {
+        if ((visitedFunctions > 0 && preparedFunctions === 0)
+          || (indexedFiles === 0 && preparedFunctions === 0)) {
           throw new Error("SourceKit-LSP returned no call hierarchy owners; verify Xcode build index");
+        }
+        if (visitedFunctions > 0 && resolvedFunctions === 0) {
+          throw new Error("SourceKit-LSP returned no resolved outgoing call hierarchies; verify Xcode build index");
         }
       } catch (error) {
         // Once semantic indexing has begun, keep the last durable snapshot
