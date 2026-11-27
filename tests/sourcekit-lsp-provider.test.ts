@@ -96,6 +96,7 @@ function answer(method, p) {
       symbol('outer()', 1, 6), symbol('sibling()', 8, 6),
     ] }];
     if (file === 'U.swift') return [symbol('caller()', 0)];
+    if (file === 'V.swift') return [symbol('outer()', 0)];
     if (file === 'A.swift') return [{ ...symbol('Controller', 0, 23), children: [symbol('caller()', 1, 6)] }];
     return [symbol(file === 'B.swift' ? 'target()' : 'unknown()')];
   }
@@ -129,6 +130,7 @@ function answer(method, p) {
       ? [item('Worker.outer()', uri, 1, 5)]
       : p.position.line === 8 ? [item('Worker.sibling()', uri, 8, 5)] : null;
     if (file === 'U.swift') return [item('caller()', uri, 0)];
+    if (file === 'V.swift') return [item('outer()', uri, 0)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
@@ -155,6 +157,8 @@ function answer(method, p) {
         fromRanges: [range(6, 8), range(9, 8)] }] : [];
     if (file === 'U.swift') return [{ to: item('target()', uriFor('B.swift')),
       fromRanges: [range(0, 16), range(0, 45)] }];
+    if (file === 'V.swift') return [{ to: item('target()', uriFor('B.swift')),
+      fromRanges: [range(2, 4), range(4, 2)] }];
     if (file !== 'A.swift') return [];
     return [
       { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26), range(1, 16)] },
@@ -453,6 +457,30 @@ test("Swift same-line calls after a caller's closing brace cannot become its evi
     const caller = graph.nodes.find(node => node.name === "caller" && node.location?.path === "U.swift");
     const relation = graph.relations.find(rel => rel.from === caller?.id && rel.kind === "calls");
     assert.deepEqual(relation?.evidence?.map(e => e.location.startColumn), [17]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift parent call evidence never borrows a nested local function's call site", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-local-call-owner-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "V.swift"), [
+      "func outer() {",
+      "  func inner() {",
+      "    target()",
+      "  }",
+      "  target()",
+      "}",
+    ].join("\n") + "\n");
+    // SourceKit can include nested-local calls in an outer function's outgoing ranges.
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () => ["B.swift", "V.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "local-call-owner", rootPath: root });
+    const outer = graph.nodes.find(node => node.name === "outer" && node.location?.path === "V.swift");
+    const relation = graph.relations.find(rel => rel.from === outer?.id && rel.kind === "calls");
+    assert.deepEqual(relation?.evidence?.map(e => [e.location.startLine, e.location.startColumn]),
+      [[5, 3]], "nested inner() call cannot be attributed to outer()");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

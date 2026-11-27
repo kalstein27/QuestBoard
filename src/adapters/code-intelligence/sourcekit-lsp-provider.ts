@@ -25,7 +25,7 @@ type HierarchyItem = { name: string; kind: number; uri: string; range: Range; se
 type OutgoingCall = { to: HierarchyItem; fromRanges: Range[] };
 type EvidenceRejectionReason =
   | "invalid_lsp_range" | "outside_caller_span" | "column_mismatch"
-  | "ambiguous_nearby_site" | "unverified_call_token";
+  | "ambiguous_nearby_site" | "unverified_call_token" | "nested_local_function";
 type RpcReply = { id: number; result?: unknown; error?: { code?: number; message?: string } };
 
 const PROVIDER_ID = "sourcekit-lsp";
@@ -124,6 +124,7 @@ function verifiedCallRange(
   callerStartLine: number, callerEndLine: number, sourceLineShift: number,
   onReject?: (reason: EvidenceRejectionReason) => void,
   callerEndCharacter?: number,
+  nestedFunctionBodies: readonly Range[] = [],
 ): Range | null {
   const start = range?.start;
   if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
@@ -142,6 +143,7 @@ function verifiedCallRange(
   const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   const invocation = new RegExp("\\b(?:" + escaped + ")\\s*(?:\\(|\\{)", "g");
   let columnMismatch = false;
+  let nestedMatch = false;
   const at = (lineIndex: number): Range | null => {
     if (lineIndex < callerStartLine - 1 || lineIndex >= callerEndLine - 1
       || lineIndex >= source.lines.length) return null;
@@ -153,6 +155,12 @@ function verifiedCallRange(
     if (allMatches.length > 0 && matches.length === 0) columnMismatch = true;
     if (matches.length !== 1) return null;
     const column = matches[0]!.index!;
+    if (nestedFunctionBodies.some((body) =>
+      (lineIndex > body.start.line || (lineIndex === body.start.line && column >= body.start.character))
+      && (lineIndex < body.end.line || (lineIndex === body.end.line && column < body.end.character)))) {
+      nestedMatch = true;
+      return null;
+    }
     if (callerEndCharacter !== undefined
       && lineIndex === callerEndLine - 2 && column >= callerEndCharacter) return null;
     return { start: { line: lineIndex, character: column },
@@ -163,6 +171,7 @@ function verifiedCallRange(
     const exact = at(anchor);
     if (exact) return exact;
   }
+  if (nestedMatch) { onReject?.("nested_local_function"); return null; }
   // Limit drift correction to +/-8 lines. Multiple matches are ambiguous.
   const candidates = new Map<number, Range>();
   for (const anchor of anchors) {
@@ -173,6 +182,7 @@ function verifiedCallRange(
       }
     }
   }
+  if (nestedMatch) { onReject?.("nested_local_function"); return null; }
   if (candidates.size === 1) return candidates.values().next().value!;
   if (candidates.size > 1) onReject?.("ambiguous_nearby_site");
   else if (columnMismatch) onReject?.("column_mismatch");
@@ -591,6 +601,16 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               const bodyEnd = swiftFunctionBodyEnd(callerSource, callerStartLine,
                 caller.location!.startColumn!);
               const callerEndLine = bodyEnd ? bodyEnd.line + 1 : fallbackEndLine;
+              // SourceKit can include calls lexically owned by a nested local
+              // function in the enclosing function's outgoingCall ranges.
+              const nestedFunctionBodies: Range[] = bodyEnd
+                ? callerSource.declarations.flatMap((decl) => {
+                  if (decl.line <= callerStartLine || decl.line >= bodyEnd.line) return [];
+                  const end = swiftFunctionBodyEnd(callerSource, decl.line, decl.column);
+                  if (!end || end.line > bodyEnd.line) return [];
+                  return [{ start: { line: decl.line - 1, character: decl.column - 1 },
+                    end: { line: end.line - 1, character: end.character } }];
+                }) : [];
               const sourceLineShift = callerStartLine - 1 - lspSelection.line;
               for (const call of outgoing ?? []) {
                 const callee = await nodeForItem(rootPath, call.to, loadSource);
@@ -603,7 +623,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                       callerStartLine, callerEndLine, sourceLineShift, (reason) => {
                         rejectedEvidence++;
                         rejectedEvidenceReasons.set(reason, (rejectedEvidenceReasons.get(reason) ?? 0) + 1);
-                      }, bodyEnd?.character);
+                      }, bodyEnd?.character, nestedFunctionBodies);
                     if (!verified) return null;
                     const key = verified.start.line + ":" + verified.start.character;
                     if (matchedPositions.has(key)) {
