@@ -86,6 +86,13 @@ function sourceDeclarations(source: string, language: string): Declaration[] {
   return result;
 }
 
+/** Current-source Swift declaration tokens for validating LSP locations, never semantic call evidence. */
+export function swiftSourceFunctionDeclarations(source: string): readonly { name: string; line: number; column: number }[] {
+  return sourceDeclarations(source, "swift")
+    .filter((decl) => decl.kind === "function")
+    .map(({ name, line, column }) => ({ name, line, column }));
+}
+
 export async function addConservativeSourceDeclarations(
   graph: CodeGraphSnapshot, inventory: readonly CodeFileInventoryEntry[], rootPath: string,
 ): Promise<CodeGraphSnapshot> {

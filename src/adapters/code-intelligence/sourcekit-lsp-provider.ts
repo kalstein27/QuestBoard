@@ -16,6 +16,7 @@ import {
 } from "../../application/code-intelligence.js";
 import { FileSystemCodeFileInventory } from "./file-inventory.js";
 import type { CodeFileInventory } from "../../application/code-map-hierarchy.js";
+import { swiftSourceFunctionDeclarations } from "../../application/code-map-lexical-declarations.js";
 
 type Position = { line: number; character: number };
 type Range = { start: Position; end: Position };
@@ -27,6 +28,65 @@ type RpcReply = { id: number; result?: unknown; error?: { code?: number; message
 const PROVIDER_ID = "sourcekit-lsp";
 const PROVENANCE = [{ providerId: PROVIDER_ID, fidelity: "semantic-call" as const, freshness: "fresh" as const }];
 const MAX_SWIFT_FILE_BYTES = 512 * 1024;
+type SwiftSource = { lines: string[]; declarations: readonly { name: string; line: number; column: number }[] };
+
+function swiftSource(text: string): SwiftSource {
+  return { lines: text.split(/\r?\n/), declarations: swiftSourceFunctionDeclarations(text) };
+}
+
+function functionName(name: string): string | null {
+  // Accessors, operators and SDK declarations are not modeled as function-to-function calls.
+  return name.match(/(?:^|\.)([A-Za-z_][A-Za-z_0-9]*)\s*\(/)?.[1] ?? null;
+}
+
+function sourcePosition(source: SwiftSource, name: string, start: Position): Position | null {
+  if (!Number.isInteger(start.line) || !Number.isInteger(start.character)
+    || start.line < 0 || start.character < 0) return null;
+  const candidates = source.declarations.filter((decl) => decl.name === name);
+  const atLine = candidates.filter((decl) => decl.line === start.line + 1);
+  // Prefer current-source syntax anchors. Never guess between overloads in the same file.
+  const match = atLine.length === 1 ? atLine[0]
+    : candidates.length === 1 ? candidates[0] : undefined;
+  if (match) return { line: match.line - 1, character: match.column - 1 };
+  if (candidates.length > 1) return null;
+  const line = source.lines[start.line];
+  // Some valid Swift declarations have attributes/modifiers unsupported by the
+  // conservative lexical scanner. Accept only the exact source token at this line.
+  if (line && !line.trimStart().startsWith("//") && name !== "init") {
+    const token = new RegExp(`\\bfunc\\s+${name}\\b`).exec(line);
+    if (token) {
+      const column = token.index + token[0].lastIndexOf(name);
+      if (Math.abs(column - start.character) <= 2)
+        return { line: start.line, character: column };
+    }
+  }
+  // Swift initializers are not lexical `func` declarations; require an exact source token.
+  if (name === "init" && /^init[!?]?\s*\(/.test(line?.slice(start.character) ?? "")
+    && /^\s*(?:(?:convenience|required|public|internal|private|fileprivate|override)\s+)*$/.test(line!.slice(0, start.character))) return start;
+  return null;
+}
+
+function verifiedCallRange(source: SwiftSource, range: Range, callee: CodeNode): boolean {
+  const start = range?.start;
+  if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
+    || start.line < 0 || start.character < 0) return false;
+  const line = source.lines[start.line];
+  if (!line || line.trimStart().startsWith("//")) return false;
+  // SourceKit can return ranges from older compiler-index revisions. Keep only
+  // evidence whose named invocation is present close to the returned column.
+  const names = [callee.name];
+  if (callee.name === "init") {
+    // Swift constructor calls are often `Widget()`, not the literal `init()`.
+    const owner = callee.signature?.match(/(?:^|\.)([A-Za-z_][\w]*)\.init\s*\(/)?.[1];
+    if (owner) names.push(owner);
+  }
+  const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const invocation = new RegExp(`\\b(?:${escaped})\\s*(?:\\([^)]*\\)|\\{)`, "g");
+  for (const match of line.matchAll(invocation)) {
+    if (Math.abs((match.index ?? -1000) - start.character) <= 32) return true;
+  }
+  return false;
+}
 
 function semanticIndexFailure(cause: unknown): Error & { code: string } {
   const error = new Error("SourceKit-LSP semantic indexing failed; preserving last-good snapshot", {
@@ -51,15 +111,19 @@ function localSwiftPath(rootPath: string, uri: string): string | null {
     ? local.split(sep).join("/") : null;
 }
 
-function nodeForItem(rootPath: string, item: HierarchyItem): CodeNode | null {
+async function nodeForItem(
+  rootPath: string, item: HierarchyItem,
+  loadSource: (path: string) => Promise<SwiftSource | null>,
+): Promise<CodeNode | null> {
   const path = localSwiftPath(rootPath, item.uri);
   if (!path || !item.selectionRange?.start) return null;
-  // Accessors, operators and SDK declarations are not modeled as function-to-function calls.
-  const name = item.name.match(/(?:^|\.)([A-Za-z_][A-Za-z_0-9]*)\s*\(/)?.[1];
+  const name = functionName(item.name);
   if (!name) return null;
-  const start = item.selectionRange.start;
-  if (!Number.isInteger(start.line) || !Number.isInteger(start.character)
-      || start.line < 0 || start.character < 0) return null;
+  const source = await loadSource(path);
+  if (!source) return null;
+  const start = sourcePosition(source, name, item.selectionRange.start);
+  // Stale/ambiguous LSP coordinates are not trusted semantic declarations.
+  if (!start) return null;
   const location: CodeSourceLocation = {
     path, startLine: start.line + 1, startColumn: start.character + 1,
   };
@@ -78,17 +142,35 @@ function nodeForItem(rootPath: string, item: HierarchyItem): CodeNode | null {
   };
 }
 
-function methodPositions(symbols: readonly DocumentSymbol[]): { positions: Position[]; missingPositions: number } {
+function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource): {
+  positions: Position[]; missingPositions: number;
+} {
   const positions: Position[] = [];
   let missingPositions = 0;
   const visit = (symbol: DocumentSymbol) => {
     if (symbol.kind === 6 || symbol.kind === 12) {
-      if (symbol.selectionRange?.start) positions.push(symbol.selectionRange.start);
+      const name = functionName(symbol.name);
+      const current = name && symbol.selectionRange?.start
+        ? sourcePosition(source, name, symbol.selectionRange.start) : null;
+      if (current) positions.push(current);
       else missingPositions++;
     }
     for (const child of symbol.children ?? []) visit(child);
   };
   for (const symbol of symbols) visit(symbol);
+  if (symbols.length > 0 && missingPositions === 0) {
+    // Probe current lexical function tokens not exposed by a partial documentSymbol
+    // response. Only SourceKit prepare/outgoing confirmation can create call facts.
+    const seen = new Set(positions.map((pos) => `${pos.line}:${pos.character}`));
+    for (const decl of source.declarations) {
+      const position = { line: decl.line - 1, character: decl.column - 1 };
+      const key = `${position.line}:${position.character}`;
+      if (seen.has(key)) continue;
+      positions.push(position);
+      seen.add(key);
+    }
+    positions.sort((a, b) => a.line - b.line || a.character - b.character);
+  }
   return { positions, missingPositions };
 }
 
@@ -233,12 +315,39 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
     let resolvedFunctions = 0;
     const maxFiles = this.#options.maxFiles ?? 150;
     const maxFunctions = this.#options.maxFunctions ?? 5000;
+    const sourceCache = new Map<string, Promise<SwiftSource | null>>();
+    const reported = new Set<string>();
+    const gapCounts = new Map<string, number>();
+    const boundedReasons = new Set([
+      "invalid_project_path", "file_size_or_content_limit", "file_read_unavailable",
+      "document_symbols_unavailable", "document_symbol_positions_unavailable", "function_limit",
+      "call_hierarchy_unavailable", "outgoing_calls_unavailable", "source_evidence_mismatch", "file_limit",
+    ]);
+    const observe = (result: Parameters<NonNullable<SourceKitLspProviderOptions["onFileResult"]>>[0]) => {
+      reported.add(result.path);
+      if (!result.indexed) {
+        const reason = result.reason && boundedReasons.has(result.reason) ? result.reason : "sourcekit_error";
+        gapCounts.set(reason, (gapCounts.get(reason) ?? 0) + 1);
+      }
+      this.#options.onFileResult?.(result);
+    };
 
     if (swiftFiles.length) {
       // SourceKit and child-process cwd may return the physical workspace path
       // even when the registered root uses a macOS /var or symlink alias.
       try { rootPath = await realpath(rootPath); }
       catch (error) { throw semanticIndexFailure(error); }
+      const loadSource = (path: string): Promise<SwiftSource | null> => {
+        const cached = sourceCache.get(path);
+        if (cached) return cached;
+        const abs = resolve(rootPath, path);
+        if (!abs.startsWith(rootPath + sep)) return Promise.resolve(null);
+        const value = readFile(abs, "utf8")
+          .then((text) => text.includes("\0") ? null : swiftSource(text))
+          .catch(() => null);
+        sourceCache.set(path, value);
+        return value;
+      };
       if (!existsSync(join(rootPath, "buildServer.json"))) {
         throw semanticIndexFailure(
           new Error("Swift semantic indexing requires a project-local Xcode BSP buildServer.json"),
@@ -252,12 +361,23 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
         for (const file of swiftFiles.slice(0, maxFiles)) {
           if (visitedFunctions >= maxFunctions) break;
           const abs = resolve(rootPath, file.path);
-          if (!abs.startsWith(rootPath + sep)) continue;
+          if (!abs.startsWith(rootPath + sep)) {
+            observe({ path: file.path, indexed: false, reason: "invalid_project_path" });
+            continue;
+          }
           let source: string;
           try {
             source = await readFile(abs, "utf8");
-            if (Buffer.byteLength(source) > MAX_SWIFT_FILE_BYTES || source.includes("\0")) continue;
-          } catch { continue; }
+            if (Buffer.byteLength(source) > MAX_SWIFT_FILE_BYTES || source.includes("\0")) {
+              observe({ path: file.path, indexed: false, reason: "file_size_or_content_limit" });
+              continue;
+            }
+          } catch {
+            observe({ path: file.path, indexed: false, reason: "file_read_unavailable" });
+            continue;
+          }
+          const currentSource = swiftSource(source);
+          sourceCache.set(file.path, Promise.resolve(currentSource));
           const uri = pathToFileURL(abs).href;
           try {
           client.notify("textDocument/didOpen", {
@@ -265,10 +385,11 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           });
           const symbols = await client.request<DocumentSymbol[] | null>(
             "textDocument/documentSymbol", { textDocument: { uri } }, 15000);
-          const { positions, missingPositions } = methodPositions(symbols ?? []);
+          const { positions, missingPositions } = methodPositions(symbols ?? [], currentSource);
           const count = Math.min(positions.length, maxFunctions - visitedFunctions);
           let filePrepared = 0;
           let fileResolved = 0;
+          let rejectedEvidence = 0;
           for (const position of positions.slice(0, count)) {
             visitedFunctions++;
             for (let attempt = 0; attempt < 2; attempt++) {
@@ -280,31 +401,42 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             let ownerFound = false;
             let outgoingResolved = true;
             for (const item of prepared) {
-              const caller = nodeForItem(rootPath, item);
-              if (!caller) continue;
+              const caller = await nodeForItem(rootPath, item, loadSource);
+              if (!caller || caller.location?.path !== file.path
+                || caller.location.startLine !== position.line + 1
+                || caller.location.startColumn !== position.character + 1) continue;
               ownerFound = true;
               nodes.set(caller.id, caller);
               const outgoing = await client.request<OutgoingCall[] | null>(
                 "callHierarchy/outgoingCalls", { item }, timeoutMs);
               if (!Array.isArray(outgoing)) outgoingResolved = false;
               for (const call of outgoing ?? []) {
-                const callee = nodeForItem(rootPath, call.to);
+                const callee = await nodeForItem(rootPath, call.to, loadSource);
                 if (!callee || !call.fromRanges?.length) continue;
+                const callerSource = await loadSource(caller.location!.path);
+                if (!callerSource) continue;
+                const suppliedRanges = call.fromRanges.slice(0, 24);
+                const evidence = suppliedRanges
+                  .filter((range) => range.start.line + 1 >= caller.location!.startLine!
+                    && verifiedCallRange(callerSource, range, callee))
+                  .map((range) => ({
+                    location: {
+                      path: caller.location!.path,
+                      startLine: range.start.line + 1,
+                      startColumn: range.start.character + 1,
+                      endLine: range.end.line + 1,
+                      endColumn: range.end.character + 1,
+                    },
+                    label: "SourceKit-LSP outgoingCall",
+                  }));
+                rejectedEvidence += suppliedRanges.length - evidence.length;
+                if (!evidence.length) continue;
                 nodes.set(callee.id, callee);
                 const key = caller.id + ":calls:" + callee.id;
                 const id = identity("relation", key);
                 const existing = relations.get(id);
-                const evidence = call.fromRanges.slice(0, 24).map((range) => ({
-                  location: {
-                    path: caller.location!.path,
-                    startLine: range.start.line + 1,
-                    startColumn: range.start.character + 1,
-                    endLine: range.end.line + 1,
-                    endColumn: range.end.character + 1,
-                  },
-                  label: "SourceKit-LSP outgoingCall",
-                }));
-                const merged = [...(existing?.evidence ?? []), ...evidence];
+                const merged = [...new Map([...(existing?.evidence ?? []), ...evidence]
+                  .map((entry) => [JSON.stringify(entry.location), entry])).values()];
                 relations.set(id, {
                   id, from: caller.id, to: callee.id, kind: "calls", confidence: 1,
                   evidence: merged.slice(0, 24), provenance: PROVENANCE,
@@ -337,9 +469,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             : count !== positions.length ? "function_limit"
             : filePrepared !== count ? "call_hierarchy_unavailable"
             : fileResolved !== count ? "outgoing_calls_unavailable"
+            : rejectedEvidence > 0 ? "source_evidence_mismatch"
             : undefined;
           if (!reason) indexedFiles++;
-          this.#options.onFileResult?.({
+          observe({
             path: file.path, indexed: !reason, ...(reason ? { reason } : {}),
             discoveredFunctions: positions.length + missingPositions,
             preparedFunctions: filePrepared, resolvedFunctions: fileResolved,
@@ -347,7 +480,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           client.notify("textDocument/didClose", { textDocument: { uri } });
           consecutiveTimeouts = 0;
           } catch (error) {
-            this.#options.onFileResult?.({
+            observe({
               path: file.path, indexed: false,
               reason: error instanceof Error ? error.message : "unknown_error",
             });
@@ -361,6 +494,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             client = new LspSession(rootPath, executable);
             await client.initialize(rootPath);
           }
+        }
+        for (const [index, file] of swiftFiles.entries()) {
+          if (!reported.has(file.path)) observe({ path: file.path, indexed: false,
+            reason: index >= maxFiles ? "file_limit" : "function_limit" });
         }
         if ((visitedFunctions > 0 && preparedFunctions === 0)
           || (indexedFiles === 0 && preparedFunctions === 0)) {
@@ -395,6 +532,9 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           language: "swift", fileCount: swiftFiles.length,
           semanticEligibleFileCount: swiftFiles.length,
           semanticIndexedFileCount: indexedFiles,
+          ...(gapCounts.size ? { semanticFileGapReasons: [...gapCounts]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([reason, fileCount]) => ({ reason, fileCount })) } : {}),
           fidelity: "semantic-call", providerIds: [PROVIDER_ID],
           degraded: indexedFiles < swiftFiles.length,
         }],

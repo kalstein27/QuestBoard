@@ -88,6 +88,8 @@ export interface CodeLanguageCapabilityReport {
   observedRelationKinds: readonly CodeRelationKind[];
   semanticCoverage: CodeSemanticCoverageState;
   gapReason: CodeLanguageGapReason | null;
+  /** Reasons for semantic-file shortfalls, when the provider supplies them. */
+  semanticFileGapReasons?: readonly { reason: string; fileCount: number }[];
   installOptions: readonly CodeProviderInstallOption[];
 }
 
@@ -438,6 +440,8 @@ export class CodeMapProviderRegistry {
           gapReason,
         ),
         gapReason,
+        ...(graphCoverage?.semanticFileGapReasons
+          ? { semanticFileGapReasons: graphCoverage.semanticFileGapReasons } : {}),
         installOptions,
       };
     });

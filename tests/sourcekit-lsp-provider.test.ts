@@ -71,16 +71,36 @@ function answer(method, p) {
     if (file === 'E.swift') return null;
     if (file === 'F.swift') return [];
     if (file === 'G.swift') return [{ name: 'flat()', kind: 12, location: { uri, range: range(0, 5) } }];
+    if (file === 'H.swift') return [symbol('caller()', 0)]; // stale SourceKit coordinates
+    if (file === 'J.swift') return [symbol('target()', 0)]; // stale SourceKit coordinates
+    if (file === 'K.swift') return [symbol('first()', 0)]; // partial documentSymbol list
+    if (file === 'L.swift') return [symbol('maker()', 0)];
+    if (file === 'M.swift') return [{ ...symbol('init()', 1), selectionRange: range(1, 2) }];
     if (file === 'A.swift') return [{ ...symbol('Controller', 0, 23), children: [symbol('caller()', 1, 6)] }];
     return [symbol(file === 'B.swift' ? 'target()' : 'unknown()')];
   }
   if (method === 'textDocument/prepareCallHierarchy') {
     if (file === 'C.swift') return null;
+    if (file === 'H.swift') return p.position.line === 2 ? [item('caller()', uri, 0)] : null;
+    if (file === 'J.swift') return p.position.line === 2 ? [item('target()', uri, 0)] : null;
+    if (file === 'K.swift') return p.position.line === 0 ? [item('first()', uri, 0)]
+      : p.position.line === 1 ? [item('second()', uri, 0)] : null;
+    if (file === 'L.swift') return [item('maker()', uri, 0)];
+    if (file === 'M.swift') return [item('Widget.init()', uri, 1, 2)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
   if (method === 'callHierarchy/outgoingCalls') {
     if (file === 'D.swift') return null;
+    if (file === 'H.swift') return [{
+      to: item('target()', uriFor('J.swift'), 0),
+      fromRanges: [range(0, 16), range(2, 16), range(2, 26)],
+    }];
+    if (file === 'K.swift') return p.item.name === 'second()'
+      ? [{ to: item('target()', uriFor('J.swift'), 0), fromRanges: [range(1, 16)] }] : [];
+    if (file === 'L.swift') return [{
+      to: item('Widget.init()', uriFor('M.swift'), 1, 2), fromRanges: [range(0, 15)],
+    }];
     if (file !== 'A.swift') return [];
     return [
       { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26)] },
@@ -140,6 +160,12 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
     assert.deepEqual(relation.evidence?.map(e => [e.location.path, e.location.startLine, e.location.startColumn]),
       [["A.swift", 2, 17], ["A.swift", 2, 27]]);
     assert.equal(relation.provenance?.[0]?.providerId, "sourcekit-lsp");
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons, [
+      { reason: "call_hierarchy_unavailable", fileCount: 1 },
+      { reason: "document_symbol_positions_unavailable", fileCount: 1 },
+      { reason: "document_symbols_unavailable", fileCount: 1 },
+      { reason: "outgoing_calls_unavailable", fileCount: 1 },
+    ]);
     assert.deepEqual(observations, [
       { path: "A.swift", indexed: true, discoveredFunctions: 1, preparedFunctions: 1, resolvedFunctions: 1 },
       { path: "B.swift", indexed: true, discoveredFunctions: 1, preparedFunctions: 1, resolvedFunctions: 1 },
@@ -150,6 +176,85 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
       { path: "G.swift", indexed: false, reason: "document_symbol_positions_unavailable", discoveredFunctions: 1, preparedFunctions: 0, resolvedFunctions: 0 },
     ]);
   } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test("Swift stale LSP coordinates use unambiguous current declarations and discard old call sites", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-stale-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "H.swift"), "// old\n// old\nfunc caller() { target(); target() }\n");
+    await writeFile(join(root, "J.swift"), "// old\n// old\nfunc target() {}\n");
+    await writeFile(join(root, "K.swift"), "func first() {}\nfunc second() { target() }\n");
+    const observations: Array<{ path: string; indexed: boolean; reason?: string }> = [];
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["H.swift", "J.swift", "K.swift"].map(path => ({ path })) },
+      onFileResult: result => observations.push(result),
+    });
+    const graph = await provider.indexProject({ projectId: "stale-swift", rootPath: root });
+    const caller = graph.nodes.find(node => node.name === "caller");
+    const target = graph.nodes.find(node => node.name === "target");
+    const second = graph.nodes.find(node => node.name === "second");
+    assert.equal(caller?.location?.startLine, 3);
+    assert.equal(target?.location?.startLine, 3);
+    assert.equal(second?.location?.startLine, 2); // recovered from an incomplete documentSymbol response
+    assert.equal(graph.relations.length, 2);
+    assert.deepEqual(graph.relations.find(rel => rel.from === caller?.id)?.evidence
+      ?.map(item => item.location.startLine), [3, 3]);
+    assert.equal(graph.relations.find(rel => rel.from === second?.id)?.to, target?.id);
+    assert.deepEqual(observations.map(entry => [entry.path, entry.indexed]),
+      [["H.swift", false], ["J.swift", true], ["K.swift", true]]);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons,
+      [{ reason: "source_evidence_mismatch", fileCount: 1 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift constructor calls retain proven call sites when source spells Widget() rather than init()", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-constructor-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "L.swift"), "func maker() { Widget() }\n");
+    await writeFile(join(root, "M.swift"), "struct Widget {\n  init() {}\n}\n");
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["L.swift", "M.swift"].map(path => ({ path })) },
+    });
+    const graph = await provider.indexProject({ projectId: "constructor-swift", rootPath: root });
+    const call = graph.relations.find(relation => relation.kind === "calls");
+    assert.equal(graph.nodes.find(node => node.id === call?.to)?.name, "init");
+    assert.deepEqual(call?.evidence?.map(item => [item.location.path, item.location.startLine]),
+      [["L.swift", 1]]);
+    assert.equal(graph.coverage?.degraded, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift file and function caps expose skipped files instead of silently claiming coverage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-limits-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "H.swift"), "// old\n// old\nfunc caller() { target() }\n");
+    await writeFile(join(root, "Z.swift"), " ".repeat(512 * 1024 + 1));
+    const observations: Array<{ path: string; indexed: boolean; reason?: string }> = [];
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "H.swift", "Z.swift"].map(path => ({ path })) },
+      maxFunctions: 3, onFileResult: result => observations.push(result),
+    });
+    const graph = await provider.indexProject({ projectId: "limited-swift", rootPath: root });
+    assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 2);
+    assert.deepEqual(observations.map(entry => [entry.path, entry.reason ?? null]),
+      [["B.swift", null], ["H.swift", null], ["Z.swift", "file_size_or_content_limit"]]);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons,
+      [{ reason: "file_size_or_content_limit", fileCount: 1 }]);
+    const capped = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "H.swift"].map(path => ({ path })) },
+      maxFunctions: 1, onFileResult: result => observations.push(result),
+    });
+    const partial = await capped.indexProject({ projectId: "capped-swift", rootPath: root });
+    assert.equal(partial.coverage?.degraded, true);
+    assert.deepEqual(observations.slice(-2).map(entry => [entry.path, entry.reason ?? null]),
+      [["B.swift", null], ["H.swift", "function_limit"]]);
+    assert.deepEqual(partial.coverage?.languages[0]?.semanticFileGapReasons,
+      [{ reason: "function_limit", fileCount: 1 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Swift unresolved outgoing calls cannot replace the last-good graph with empty semantics", async () => {

@@ -94,6 +94,8 @@ export interface CodeLanguageCoverage {
   /** Repository files intentionally outside the semantic provider project scope. */
   semanticExcludedFileCount?: number;
   semanticExclusionReason?: "provider_project_scope";
+  /** Bounded, provider-reported counts of eligible files without complete semantic coverage. */
+  semanticFileGapReasons?: readonly { reason: string; fileCount: number }[];
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
   /** True only when a configured provider that could contribute to this language is stale/failed. */
