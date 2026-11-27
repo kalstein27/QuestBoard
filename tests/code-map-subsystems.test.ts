@@ -434,3 +434,38 @@ test("PHP Core hierarchy splits into second-level subsystem groups by default", 
     else process.env.QUESTBOARD_CODE_MAP_SUBSYSTEM_DEPTH = old;
   }
 });
+
+test("self-contained subsystems expose bounded raw owners without synthetic boundary edges", () => {
+  const web = Array.from({ length: 11 }, (_, i) =>
+    sourceNode("web-" + i, "handler" + i, "web/app.js", i + 1));
+  const graph: CodeGraphSnapshot = {
+    schemaVersion: CODE_GRAPH_SCHEMA_VERSION, projectId: "internal-anchors",
+    rootPath: "/tmp/internal-anchors", indexedAt: "2026-11-27T00:00:00Z",
+    nodes: [...web, sourceNode("boundary", "dispatch", "src/server/main.ts", 1),
+      sourceNode("service", "run", "src/application/service.ts", 1),
+      sourceNode("helper", "helper", "src/server/main.ts", 5),
+      sourceNode("isolated", "isolated", "scripts/setup.ts", 1)],
+    relations: [
+      ...web.slice(1).map((node, i) => call("internal-" + i, node.id, "web-0", i + 2, "web/app.js")),
+      call("internal-extra", "web-10", "web-1", 20, "web/app.js"),
+      call("boundary-call", "boundary", "service", 2, "src/server/main.ts"),
+      call("helper-call", "helper", "boundary", 6, "src/server/main.ts"),
+    ],
+  };
+  const result = deriveCodeSourceSubsystems(graph);
+  const group = result.nodes.find(n => n.pathPrefix === "web")!;
+  assert.equal(group.notableNodeCount, 10);
+  assert.equal(group.notableNodes.length, 8);
+  assert.equal(group.notableNodesTruncated, true);
+  assert.equal(group.notableNodes[0]?.nodeId, "web-10");
+  assert.deepEqual(group.notableNodes[0]?.roles, ["internal_relation_owner"]);
+  assert.equal(group.notableNodes[0]?.directOutgoingRelationCount, 2);
+  assert.deepEqual(new Set(group.notableNodes[0]?.directSourceRelationIds), new Set(["internal-9", "internal-extra"]));
+  assert.equal(group.incomingCrossBoundaryCallCount + group.outgoingCrossBoundaryCallCount, 0);
+  assert.deepEqual(result.relations.flatMap(r => r.sourceRelationIds), ["boundary-call"]);
+  assert.equal(result.relationAccounting.sameSubsystemCount, 12);
+  assert.deepEqual(result.nodes.find(n => n.pathPrefix === "src/server")?.notableNodes.map(n => n.nodeId), ["boundary"]);
+  assert.equal(result.nodes.find(n => n.pathPrefix === "scripts")?.notableNodeCount, 0);
+  const reversed = deriveCodeSourceSubsystems({ ...graph, nodes: [...graph.nodes].reverse(), relations: [...graph.relations].reverse() });
+  assert.deepEqual(reversed.nodes, result.nodes);
+});

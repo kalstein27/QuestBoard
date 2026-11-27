@@ -37,6 +37,7 @@ export type CodeSourceSubsystemNodeRole =
   | "boundary_caller"
   | "boundary_callee"
   | "registration_handler"
+  | "internal_relation_owner"
   | "high_fanout_raw_owner";
 
 export type CodeSourceSubsystemNodeSelectionReason =
@@ -375,16 +376,20 @@ function subsystemFlowRole(
 function notableNode(
   node: CodeNode,
   stats: MutableNodeStats,
+  allowInternalFallback = false,
 ): CodeSourceSubsystemNotableNode | undefined {
   const crossBoundaryCount =
     stats.incomingCrossBoundaryRelationCount + stats.outgoingCrossBoundaryRelationCount;
   const sourceRegistration =
     isSourceRegistrationNode(node) && stats.directOutgoingRelationCount > 0;
-  if (crossBoundaryCount === 0 && !sourceRegistration) return undefined;
+  const internalOwner = allowInternalFallback && crossBoundaryCount === 0
+    && !sourceRegistration && stats.directOutgoingRelationCount > 0;
+  if (crossBoundaryCount === 0 && !sourceRegistration && !internalOwner) return undefined;
 
   const highFanoutRawOwner =
     stats.outgoingCrossBoundaryCallCount >= 12 && stats.targetSubsystems.size >= 3;
   const roles: CodeSourceSubsystemNodeRole[] = [];
+  if (internalOwner) roles.push("internal_relation_owner");
   const reasons: CodeSourceSubsystemNodeSelectionReason[] = [];
 
   if (sourceRegistration) {
@@ -593,13 +598,18 @@ export function deriveCodeSourceSubsystems(
   }
 
   const allSubsystems: CodeSourceSubsystem[] = [...subsystems.values()].map((group) => {
-    const candidateNotables = group.nodeIds.flatMap((nodeId) => {
+    const collectNotables = (allowInternalFallback: boolean) => group.nodeIds.flatMap((nodeId) => {
       const node = nodesById.get(nodeId);
       const nodeStat = stats.get(nodeId);
       if (!node || !nodeStat) return [];
-      const projected = notableNode(node, nodeStat);
+      const projected = notableNode(node, nodeStat, allowInternalFallback);
       return projected ? [projected] : [];
     });
+    const boundaryNotables = collectNotables(false);
+    // A self-contained subsystem may have many real calls but no boundary
+    // anchors. Keep existing boundary rankings; surface direct raw owners only
+    // as a fallback, never invent a subsystem self-edge or entrypoint role.
+    const candidateNotables = boundaryNotables.length > 0 ? boundaryNotables : collectNotables(true);
     const notableNodes = boundedNotableNodes(candidateNotables);
     const representativeNodes = [...group.nodeIds]
       .map((nodeId) => nodesById.get(nodeId))
