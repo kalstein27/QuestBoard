@@ -67,6 +67,29 @@ function answer(method, p) {
   }
   const uri = p.textDocument?.uri ?? p.item?.uri;
   const file = basename(fileURLToPath(uri));
+  // Model SourceKit becoming ready for one owner only after other declarations are queried.
+  if (file === 'W.swift') {
+    if (method === 'textDocument/documentSymbol') return [symbol('early()', 0), symbol('later()', 1)];
+    if (method === 'textDocument/prepareCallHierarchy') {
+      if (p.position.line === 0) return answer.wLaterPrepared ? [item('early()', uri, 0)] : null;
+      answer.wLaterPrepared = true;
+      return [item('later()', uri, 1)];
+    }
+    if (method === 'callHierarchy/outgoingCalls') return p.item.name === 'early()'
+      ? [{ to: item('target()', uriFor('B.swift')), fromRanges: [range(0, 15)] }] : [];
+  }
+  if (file === 'X.swift') {
+    if (method === 'textDocument/documentSymbol') return [symbol('absent()', 0), symbol('available()', 1)];
+    if (method === 'textDocument/prepareCallHierarchy') {
+      if (p.position.line === 0) {
+        answer.xAbsentQueries = (answer.xAbsentQueries ?? 0) + 1;
+        return answer.xAbsentQueries > 2 ? [item('absent()', uri, 0)] : null;
+      }
+      return [item('available()', uri, 1)];
+    }
+    if (method === 'callHierarchy/outgoingCalls') return p.item.name === 'absent()'
+      ? [{ to: item('target()', uriFor('B.swift')), fromRanges: [range(0, 16)] }] : [];
+  }
   if (method === 'textDocument/documentSymbol') {
     if (file === 'E.swift') return null;
     if (file === 'F.swift') return [];
@@ -483,6 +506,51 @@ test("Swift parent call evidence never borrows a nested local function's call si
       [[5, 3]], "nested inner() call cannot be attributed to outer()");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+test("Swift retries initially empty preparation once after scanning the same file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-deferred-prepare-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "W.swift"), "func early() { target() }\nfunc later() {}\n");
+    const observations: unknown[] = [];
+    const graph = await new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "W.swift"].map(path => ({ path })) },
+      onFileResult: result => observations.push(result),
+    }).indexProject({ projectId: "deferred-prepare", rootPath: root });
+    assert.deepEqual(observations.find(item => (item as { path: string }).path === "W.swift"), {
+      path: "W.swift", indexed: true, discoveredFunctions: 2, preparedFunctions: 2, resolvedFunctions: 2,
+    });
+    const call = graph.relations.find(rel =>
+      graph.nodes.find(node => node.id === rel.from)?.name === "early");
+    assert.equal(graph.nodes.find(node => node.id === call?.to)?.name, "target");
+    assert.deepEqual(call?.evidence?.map(e => [e.location.path, e.location.startLine, e.location.startColumn]),
+      [["W.swift", 1, 16]]);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.failureReasons, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test("Swift persistent empty preparation stops after one deferred retry without invented calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-persistent-prepare-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "X.swift"), "func absent() { target() }\nfunc available() {}\n");
+    const observations: unknown[] = [];
+    const graph = await new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "X.swift"].map(path => ({ path })) },
+      onFileResult: result => observations.push(result),
+    }).indexProject({ projectId: "persistent-prepare", rootPath: root });
+    assert.deepEqual(observations.find(item => (item as { path: string }).path === "X.swift"), {
+      path: "X.swift", indexed: false, reason: "call_hierarchy_unavailable",
+      discoveredFunctions: 2, preparedFunctions: 1, resolvedFunctions: 1,
+    });
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.failureReasons,
+      [{ reason: "prepare_empty", functionCount: 1 }]);
+    assert.equal(graph.nodes.some(node => node.name === "absent"), false);
+    assert.equal(graph.relations.length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
 
 test("Swift unresolved outgoing calls cannot replace the last-good graph with empty semantics", async () => {
   const root = await mkdtemp(join(tmpdir(), "questboard-swift-unresolved-"));

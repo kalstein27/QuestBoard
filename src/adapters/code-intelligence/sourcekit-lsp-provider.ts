@@ -554,9 +554,11 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           let filePrepared = 0;
           let fileResolved = 0;
           let rejectedEvidence = 0;
-          for (const method of positions.slice(0, count)) {
+          const methods = positions.slice(0, count);
+          for (let index = 0; index < methods.length; index++) {
+            const method = methods[index]!;
             const { name: queriedName, position } = method;
-            visitedFunctions++;
+            if (index < count) visitedFunctions++;
             let functionFailure: string | null = "prepare_empty";
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
@@ -681,7 +683,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 }
               }
             }
-            if (functionFailure) recordFunctionFailure(file.path, queriedName, position.line + 1, functionFailure);
+            // A later same-file query can make SourceKit's initially empty owner available.
+            // Revisit only original empty replies once; keep all owner/evidence guards unchanged.
+            if (functionFailure === "prepare_empty" && index < count && count > 1) methods.push(method);
+            else if (functionFailure) recordFunctionFailure(file.path, queriedName, position.line + 1, functionFailure);
           }
           const reason = symbols == null ? "document_symbols_unavailable"
             : missingPositions > 0 ? "document_symbol_positions_unavailable"
