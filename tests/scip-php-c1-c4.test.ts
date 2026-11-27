@@ -317,6 +317,80 @@ final class ShopHandler {
     foreach ($rows as $conflict) { $conflict->setPackageType(1); } // g7 duplicate
   }
 }
+final class HStore { public function commit(): void {} }
+final class HStat {
+  public function setPlayDate(int $n): void {}
+  public function setRecordG(int $n): void {}
+}
+final class HService {
+  public function compact(array $selected): void {
+    $found = array_filter($selected, fn($m) => true);
+    /**@var MissionState $mission */
+    $mission = array_pop($found);
+    $mission->setCount(1); // h3 compact
+    /** @var MissionState $normal */
+    $normal = array_pop($found);
+    $normal->setCount(1); // h3 spaced
+    /*@var MissionState $ordinary */
+    $ordinary = array_pop($found);
+    $ordinary->setCount(1); // h3 ordinary
+  }
+  /** @param HStat[] $statList */
+  public function sum(array $statList): ?HStat {
+    $base = null;
+    foreach ($statList as $stat) {
+      if ($base === null) {
+        $base = $stat;
+        $base->setPlayDate(1); // h4 initial
+      } else {
+        $base->setRecordG(2); // h4 carried
+      }
+    }
+    return $base;
+  }
+  /** @param HStat[] $statList */
+  public function conflicting(array $statList): void {
+    $base = null;
+    foreach ($statList as $stat) {
+      if ($base === null) {
+        $base = $stat;
+        $base = new Wallet();
+      } else {
+        $base->setRecordG(2); // h4 conflict
+      }
+    }
+  }
+  public static function reset(?Model $object): Inventory { return new Inventory(); }
+  /** @param Inventory|null $object */
+  public static function switchExit(?Model $object, int $type): void {
+    switch ($type) {
+      case 0: return;
+      case 1: $object = new Wallet(); return;
+      case 2: $object = self::reset($object); break;
+      case 3: break;
+      default: throw new \\RuntimeException();
+    }
+    $object->setIncreaseTime(1); // h5 exit
+  }
+  /** @param Inventory|null $object */
+  public static function switchConflict(?Model $object, int $type): void {
+    switch ($type) {
+      case 0: $object = new Wallet(); break;
+      default: break;
+    }
+    $object->setIncreaseTime(1); // h5 conflict
+  }
+  public function dynamic(string $className): void {
+    $x = new $className();
+    /** @var NormalSchedule|EventSchedule $x */
+    $x->getScoutId(); // h6 union
+    $x->getScoutId(); // h6 outside
+    $alias = &$x;
+    $x = new $className();
+    /** @var NormalSchedule|EventSchedule $x */
+    $x->getScoutId(); // h6 reference
+  }
+}
 final class MissionState { public function setCount(int $n): void {} }
 final class MissionHandler {
   /** @var MissionState[] */
@@ -375,6 +449,21 @@ try {
 } catch (\\Throwable $e) {}
 if (ServerType::LIVE === 2) { exit; } // file constant
 ResetJob::run($argv[1] ?? ResetJob::DEFAULT_COUNT); // file default
+/**
+ * @var string $storeName
+ * @var HStore $topStore
+ */
+foreach ($storeGroup as $storeName => $topStore) {
+  $topStore->commit(); // h2 file
+}
+$topStore->commit(); // h2 outside
+/** @var HStore $refStore */
+foreach ($storeGroup as &$refStore) { $refStore->commit(); } // h2 reference
+/** @var HStore $changedStore */
+foreach ($storeGroup as $changedStore) {
+  $changedStore = new Wallet();
+  $changedStore->commit(); // h2 conflict
+}
 `;
 
 test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve lexical owners", async t => {
@@ -491,6 +580,22 @@ test("C1-C4: actual SCIP and PHP AST recover exact call/read sites and preserve 
     check("Schedule", "setType", "calls", "// f5 index", "demote");
     check("Schedule", "setType", "calls", "// f5 conflict", "", false);
     check("Schedule", "setType", "calls", "// f5 scalar", "", false);
+    check("HStore", "commit", "calls", "// h2 file", "Followup.php");
+    check("HStore", "commit", "calls", "// h2 outside", "", false);
+    check("HStore", "commit", "calls", "// h2 reference", "", false);
+    check("HStore", "commit", "calls", "// h2 conflict", "", false);
+    check("MissionState", "setCount", "calls", "// h3 compact", "compact");
+    check("MissionState", "setCount", "calls", "// h3 spaced", "compact");
+    check("MissionState", "setCount", "calls", "// h3 ordinary", "", false);
+    check("HStat", "setPlayDate", "calls", "// h4 initial", "sum");
+    check("HStat", "setRecordG", "calls", "// h4 carried", "sum");
+    check("HStat", "setRecordG", "calls", "// h4 conflict", "", false);
+    check("Inventory", "setIncreaseTime", "calls", "// h5 exit", "switchExit");
+    check("Inventory", "setIncreaseTime", "calls", "// h5 conflict", "", false);
+    check("NormalSchedule", "getScoutId", "calls", "// h6 union", "dynamic");
+    check("EventSchedule", "getScoutId", "calls", "// h6 union", "dynamic");
+    check("NormalSchedule", "getScoutId", "calls", "// h6 outside", "", false);
+    check("EventSchedule", "getScoutId", "calls", "// h6 reference", "", false);
     assert.deepEqual(failures, []);
     const file = graph.nodes.find(node => node.canonicalIdentity === "file:" + path)!;
     const timestamp = graph.nodes.find(node => node.name === "getTimeStamp" && node.canonicalIdentity.includes("/Clock#"))!;

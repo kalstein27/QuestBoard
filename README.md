@@ -106,6 +106,7 @@ The Web UI exposes Quest, Flow, and Code workspaces plus Agent Follow presence c
 | `QUESTBOARD_CODE_MAP_STORAGE_ROOT` | External Code Map index/cache directory | `~/.local/share/questboard/code-map` |
 | `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH` | Set to `0` to disable isolated background indexing | enabled |
 | `QUESTBOARD_CODE_MAP_ISOLATED_READ` | Set to `0` to disable isolated bounded reads | enabled |
+| `QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS` | One idle read worker retention (0 = until replaced or shutdown; 1–2147483647 ms = idle deadline) | `600000` |
 | `QUESTBOARD_CODE_MAP_ISOLATED_HEAP_MIB` | Shared Node worker old-space limit (64–4096 MiB) | `512` |
 | `QUESTBOARD_CODE_MAP_ISOLATED_REFRESH_HEAP_MIB` | Index worker-specific old-space override (64–4096 MiB) | shared limit |
 | `QUESTBOARD_CODE_MAP_ISOLATED_READ_HEAP_MIB` | Read worker-specific old-space override (64–4096 MiB) | shared limit |

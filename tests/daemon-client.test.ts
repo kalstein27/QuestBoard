@@ -60,6 +60,33 @@ test("daemon client keeps Code Map refresh alive beyond the ordinary request tim
   assert.equal(result.result.structuredContent.refresh.mode, "full");
 });
 
+test("H1 slow MCP read returns retry without cancelling or duplicating the cold read", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+    calls++;
+    if (calls === 1) await gate;
+    assert.equal(init?.signal?.aborted, false);
+    const { message } = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { ready: true } } }));
+  }) as typeof fetch;
+  const client = new QuestBoardDaemonClient("http://127.0.0.1:4317", fetchImpl, { requestTimeoutMs: 1000 });
+  const msg = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "questboard_query_code_map" } });
+  const first = await client.forwardMcp("cold", msg(1)) as any;
+  assert.equal(first.result.structuredContent.error.code, "code_map_read_pending");
+  assert.equal(first.id, 1);
+  const retry = await client.forwardMcp("cold", msg(2)) as any;
+  assert.equal(retry.id, 2);
+  assert.equal(calls, 1);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  const ready = await client.forwardMcp("cold", msg(3)) as any;
+  assert.equal(ready.id, 3);
+  assert.equal(ready.result.structuredContent.ready, true);
+  assert.equal(calls, 2);
+});
+
 test("daemon identity pin refuses a different database for the same profile", async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), "questboard-daemon-identity-"));
   const identityPath = join(tempRoot, "daemon-identity.json");

@@ -16,6 +16,7 @@ import { createIsolatedCodeMapReadExecutor } from "./code-map-isolated-read.js";
 import { createIsolatedCodeMapRefreshExecutor } from "./code-map-isolated-refresh.js";
 import { startQuestBoardHttpRuntime } from "./runtime.js";
 import { stopIsolatedCodeMapReadWorkers } from "./code-map-isolated-read.js";
+import { resolveIsolatedReadIdleMs } from "./code-map-isolated-read.js";
 import {
   parseManagedServiceHealthPort,
   resolveQuestBoardRuntimePaths,
@@ -50,10 +51,11 @@ if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_REFRESH !=
 }
 if (codeMapRuntime.service && codeMapEnv.QUESTBOARD_CODE_MAP_ISOLATED_READ !== "0") {
   // Bounded reads and server-owned P2 mutation preflights reuse one pinned
-  // idle worker briefly. Flow Apply still commits synchronously in SQLite, with an exact
+  // idle worker. Flow Apply still commits synchronously in SQLite, with an exact
   // persisted-snapshot revision fence before and after transactional writes.
   codeMapRuntime.service.setIsolatedReadExecutor(
-    createIsolatedCodeMapReadExecutor(codeMapEnv, { idleTimeoutMs: 30_000 }),
+    createIsolatedCodeMapReadExecutor(codeMapEnv, { idleTimeoutMs: resolveIsolatedReadIdleMs(codeMapEnv) }),
+    { prewarmOnRefresh: true },
   );
 }
 const codeMapInvestigationSyncService = codeMapRuntime.service
@@ -114,6 +116,9 @@ const managedHealthRuntime = managedServiceMode
   : null;
 if (managedHealthRuntime) {
   console.log(`QuestBoard managed-service health listening on ${managedHealthRuntime.url}`);
+}
+if (codeMapRuntime.service?.isolatedReadsEnabled) {
+  void codeMapRuntime.service.prewarmIsolatedRead(repository.listProjects().map(project => project.id)).catch(() => {});
 }
 
 let closing = false;

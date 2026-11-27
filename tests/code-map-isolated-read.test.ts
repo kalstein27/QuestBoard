@@ -15,6 +15,7 @@ import { CodeScopeBindingService } from "../src/application/code-scope-binding.j
 import type { CodeMapManualRelationReader } from "../src/application/code-map-augmentation.js";
 import type { QuestBoardRepository } from "../src/application/quest-board-repository.js";
 import { createConfiguredCodeMapRuntime } from "../src/server/code-map-config.js";
+import { resolveIsolatedReadIdleMs, stopIsolatedCodeMapReadWorkers } from "../src/server/code-map-isolated-read.js";
 import { createIsolatedCodeMapReadExecutor } from "../src/server/code-map-isolated-read.js";
 
 function isolatedFixture() {
@@ -81,6 +82,32 @@ test("G4 warm isolated reads reuse one worker and replace it when snapshot revis
     assert.equal(await parent.lastGoodSnapshotAvailableAsync(f.projectId), true);
     console.log("G4 warm query ms:", repeatMs.toFixed(1), "warm status ms:", statusMs.toFixed(1));
   } finally { f.dispose(); }
+});
+
+test("H1 configured retention and startup prewarming keep an exact worker", { timeout: 30_000 }, async () => {
+  assert.equal(resolveIsolatedReadIdleMs({}), 600_000);
+  assert.equal(resolveIsolatedReadIdleMs({ QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS: "0" }), 0);
+  assert.equal(resolveIsolatedReadIdleMs({ QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS: "3600000" }), 3_600_000);
+  assert.throws(() => resolveIsolatedReadIdleMs({ QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS: "-1" }), /READ_IDLE_MS/);
+  const f = isolatedFixture();
+  try {
+    const seed = createConfiguredCodeMapRuntime(f.env, f.reader).service!;
+    await seed.refresh({ projectId: f.projectId, rootPath: f.canonicalRoot });
+    const parent = createConfiguredCodeMapRuntime(f.env, f.reader).service!;
+    parent.getCached = () => { throw new Error("Parent hydration forbidden"); };
+    const pids: number[] = [];
+    parent.setIsolatedReadExecutor(createIsolatedCodeMapReadExecutor(f.env, { idleTimeoutMs: 0, onWorkerStarted: ({pid}) => pids.push(pid) }));
+    await parent.prewarmIsolatedRead([f.projectId]);
+    assert.equal(pids.length, 1);
+    const start = performance.now();
+    await parent.queryAsync(f.projectId, { operation: "find_nodes", query: "Handler.php" });
+    assert.ok(performance.now() - start < 1000);
+    assert.equal(pids.length, 1);
+    writeFileSync(join(f.root, "src", "New.php"), "<?php class NewClass {}");
+    await seed.refresh({ projectId: f.projectId, rootPath: f.canonicalRoot });
+    await parent.prewarmIsolatedRead([f.projectId]);
+    assert.equal(pids.length, 2);
+  } finally { stopIsolatedCodeMapReadWorkers(); f.dispose(); }
 });
 
 test("P2 async queries match local reads and never hydrate the parent raw graph", { timeout: 40_000 }, async () => {

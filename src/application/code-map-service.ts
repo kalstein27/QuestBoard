@@ -350,6 +350,7 @@ export class CodeMapService {
   readonly #refreshTasks = new Map<string, Promise<void>>();
   #isolatedRefreshExecutor: CodeMapIsolatedRefreshExecutor | undefined;
   #isolatedReadExecutor: CodeMapIsolatedReadExecutor | undefined;
+  #prewarmOnRefresh = false;
   readonly #verifiedSnapshotAvailability = new Map<string, { rootPath: string; revision: string; indexed: boolean }>();
 
   /** Refresh polling only needs availability, not the complete graph summary. */
@@ -372,9 +373,19 @@ export class CodeMapService {
   }
 
   /** Isolate graph-heavy *read* work while preserving existing sync domain APIs. */
-  setIsolatedReadExecutor(executor: CodeMapIsolatedReadExecutor): void {
+  setIsolatedReadExecutor(executor: CodeMapIsolatedReadExecutor, options: { prewarmOnRefresh?: boolean } = {}): void {
     if (this.#isolatedReadExecutor) throw new Error("Code Map isolated read executor already configured");
     this.#isolatedReadExecutor = executor;
+    this.#prewarmOnRefresh = options.prewarmOnRefresh === true;
+  }
+
+  /** Warm only one existing snapshot; no indexing or graph hydration in the daemon. */
+  async prewarmIsolatedRead(projectIds: readonly string[]): Promise<void> {
+    if (!this.#isolatedReadExecutor) return;
+    const store = this.#persistence?.store;
+    const candidates = projectIds.filter(id => this.#persistence?.rootPathForProject?.(id) && store?.revisionToken?.(id));
+    candidates.sort((a, b) => (this.refreshJob(b)?.finishedAt ?? "").localeCompare(this.refreshJob(a)?.finishedAt ?? ""));
+    if (candidates[0]) await this.snapshotReadSummary(candidates[0]);
   }
 
   get isolatedReadsEnabled(): boolean {
@@ -924,6 +935,7 @@ export class CodeMapService {
       };
       this.#refreshJobs.set(request.projectId, completed);
       this.#persistRefreshJob(completed);
+      if (this.#prewarmOnRefresh) void this.prewarmIsolatedRead([request.projectId]).catch(() => {});
     } catch (error) {
       const finishedAt = this.#now();
       const failed: CodeMapRefreshJobReceipt = {

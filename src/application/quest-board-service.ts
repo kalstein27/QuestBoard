@@ -938,7 +938,6 @@ export class QuestBoardService {
     if (!group) throw new EntityNotFoundError("FlowWorkGroup", groupId);
     return group;
   }
-
   getFlowWorkGroupGraph(groupId: string): FlowWorkGroupGraph {
     const group = this.getFlowWorkGroup(groupId);
     const memberships = this.repository.listFlowWorkGroupMemberships(group.projectId)

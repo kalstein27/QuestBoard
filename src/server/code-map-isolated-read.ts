@@ -19,7 +19,7 @@ export interface IsolatedCodeMapReadOptions {
   maxOldSpaceMiB?: number;
   maxConcurrent?: number;
   maxQueued?: number;
-  /** Retain at most one idle worker, pinned to one immutable snapshot. */
+  /** Retain one pinned idle worker; undefined is disposable, 0 is indefinite. */
   idleTimeoutMs?: number;
   onProcessMetrics?: (metrics: { childMaxRssMiB: number }) => void;
   /** Optional read-worker lifecycle observer for isolated diagnostics/tests. */
@@ -54,6 +54,7 @@ function takeIdle(idle: IdleWorker, key: string): Worker | undefined {
 function retainIdle(idle: IdleWorker, worker: Worker, timeoutMs: number): void {
   if (idle.worker) retire(idle.worker);
   idle.worker = worker;
+  if (timeoutMs === 0) return;
   worker.timer = setTimeout(() => {
     if (idle.worker === worker) idle.worker = undefined;
     retire(worker);
@@ -94,7 +95,7 @@ async function runOne(
     throw new CodeMapQueryError("code_map_query_invalid", "Isolated Code Map input exceeds the IPC cap");
   const childEnv = isolatedCodeMapEnv(env);
   const idleTimeoutMs = options.idleTimeoutMs ?? 0;
-  const warm = idleTimeoutMs > 0 && Boolean(request.snapshotRevision);
+  const warm = options.idleTimeoutMs !== undefined && Boolean(request.snapshotRevision);
   const key = JSON.stringify([request.projectId, request.rootPath, request.snapshotRevision ?? ""]);
 
   return await new Promise<unknown>((resolve, reject) => {
@@ -234,7 +235,7 @@ export function createIsolatedCodeMapReadExecutor(
   const idleTimeoutMs = options.idleTimeoutMs ?? 0;
   if (!Number.isInteger(concurrent) || concurrent < 1 || concurrent > 4
     || !Number.isInteger(maxQueued) || maxQueued < 0 || maxQueued > 128
-    || !Number.isInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 120_000)
+    || !Number.isInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647)
     throw new RangeError("Invalid isolated Code Map read queue limits");
   const idle: IdleWorker = {};
   let running = 0;
@@ -270,4 +271,13 @@ export function createIsolatedCodeMapReadExecutor(
       pump();
     });
   };
+}
+
+export function resolveIsolatedReadIdleMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS?.trim();
+  if (!raw) return 600_000;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < 0 || value > 2_147_483_647)
+    throw new RangeError("QUESTBOARD_CODE_MAP_ISOLATED_READ_IDLE_MS must be an integer from 0 to 2147483647");
+  return value;
 }

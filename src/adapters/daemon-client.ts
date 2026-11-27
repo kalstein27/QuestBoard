@@ -33,6 +33,7 @@ export interface QuestBoardDaemonClientOptions {
 
 export class QuestBoardDaemonClient {
   readonly baseUrl: string;
+  private pendingSlowRead: Promise<unknown> | undefined;
 
   constructor(
     baseUrl: string,
@@ -105,13 +106,41 @@ export class QuestBoardDaemonClient {
   }
 
   async forwardMcp(sessionId: string, message: unknown): Promise<unknown | null> {
-    const response = await this.postJson(
-      "/_questboard/mcp-proxy",
-      { sessionId, message },
-      this.requestTimeoutMs(mcpToolName(message)),
-    );
-    if (response.status === 204) return null;
-    return await response.json() as unknown;
+    const tool = mcpToolName(message);
+    const timeoutMs = this.requestTimeoutMs(tool);
+    const request = async () => {
+      const response = await this.postJson("/_questboard/mcp-proxy", { sessionId, message }, timeoutMs);
+      return response.status === 204 ? null : await response.json() as unknown;
+    };
+    // Only read-only Code Map tools may outlive this MCP reply. A timed-out
+    // cold read keeps its HTTP connection and can populate the resident worker.
+    // Never replay or detach a mutation.
+    const id = (message as { id?: unknown } | null)?.id;
+    if (!tool || !CODE_MAP_READ_AGENT_TOOLS.has(tool) || (typeof id !== "number" && typeof id !== "string")) return request();
+    const retry = () => ({
+      jsonrpc: "2.0", id,
+      result: {
+        isError: true,
+        content: [{ type: "text", text: "Code Map read is preparing or still running; retry the same read shortly." }],
+        structuredContent: { error: { code: "code_map_read_pending", retryable: true, retryAfterMs: 1000 } },
+      },
+    });
+    if (this.pendingSlowRead) return retry();
+    const pending = request();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = Symbol("read-pending");
+    try {
+      const result = await Promise.race([pending, new Promise<typeof deadline>(resolve => {
+        timer = setTimeout(() => resolve(deadline), Math.min(3500, Math.max(1, Math.floor(timeoutMs * 0.7))));
+      })]);
+      if (result !== deadline) return result;
+      this.pendingSlowRead = pending;
+      const clear = () => { if (this.pendingSlowRead === pending) this.pendingSlowRead = undefined; };
+      void pending.then(clear, clear);
+      return retry();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private requestTimeoutMs(toolName: string | undefined): number {
