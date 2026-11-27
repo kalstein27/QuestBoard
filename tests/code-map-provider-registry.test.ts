@@ -77,7 +77,20 @@ test("provider capability report names concrete mixed-language gaps instead of g
     health: "ready",
     diagnostics: [],
   }));
-  const report = registry.report(mixedGraph());
+  const base = mixedGraph();
+  const diagnostics = {
+    attemptedCount: 2, preparedCount: 1, resolvedCount: 1,
+    partiallyIndexedFileCount: 1, missingDeclarationPositionCount: 0,
+    rejectedEvidenceRangeCount: 1,
+    failureReasons: [{ reason: "prepare_empty", functionCount: 1 }],
+    failureExamples: [{ path: "src/main.ts", symbol: "other", lspLine: 3, reason: "prepare_empty" }],
+  };
+  const graph: CodeGraphSnapshot = { ...base, coverage: {
+    ...base.coverage!,
+    languages: base.coverage!.languages.map((entry) => entry.language === "typescript"
+      ? { ...entry, semanticFunctionDiagnostics: diagnostics } : entry),
+  } };
+  const report = registry.report(graph);
 
   assert.equal(report.indexed, true);
   assert.equal(report.health, "healthy");
@@ -90,6 +103,8 @@ test("provider capability report names concrete mixed-language gaps instead of g
   assert.equal(report.languages.find((entry) => entry.language === "typescript")?.semanticCoverage, "complete");
   assert.equal(report.languages.find((entry) => entry.language === "typescript")?.gapReason, null);
   assert.deepEqual(report.languages.find((entry) => entry.language === "typescript")?.providerIds, ["scip-typescript"]);
+  assert.deepEqual(report.languages.find((entry) => entry.language === "typescript")?.semanticFunctionDiagnostics,
+    diagnostics);
   for (const language of ["swift", "shellscript", "powershell"]) {
     const entry = report.languages.find((candidate) => candidate.language === language);
     assert.ok(entry, language);

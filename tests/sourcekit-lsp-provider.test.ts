@@ -161,6 +161,19 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
     assert.equal(graph.coverage?.degraded, true);
     assert.equal(graph.coverage?.languages[0]?.semanticEligibleFileCount, 7);
     assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 3);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics, {
+      attemptedCount: 4, preparedCount: 3, resolvedCount: 2,
+      partiallyIndexedFileCount: 0, missingDeclarationPositionCount: 1,
+      rejectedEvidenceRangeCount: 0,
+      failureReasons: [
+        { reason: "outgoing_unavailable", functionCount: 1 },
+        { reason: "prepare_empty", functionCount: 1 },
+      ],
+      failureExamples: [
+        { path: "C.swift", symbol: "unknown", lspLine: 1, reason: "prepare_empty" },
+        { path: "D.swift", symbol: "unknown", lspLine: 1, reason: "outgoing_unavailable" },
+      ],
+    });
     assert.equal(graph.relations.length, 1);
     const relation = graph.relations[0]!;
     assert.equal(relation.kind, "calls");
@@ -216,6 +229,8 @@ test("Swift queries stale SourceKit coordinates but normalizes verified current-
       [["H.swift", false], ["J.swift", true], ["K.swift", true]]);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons,
       [{ reason: "source_evidence_mismatch", fileCount: 1 }]);
+    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.partiallyIndexedFileCount, 1);
+    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceRangeCount, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

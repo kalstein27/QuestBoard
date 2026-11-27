@@ -303,6 +303,8 @@ function languageCoverage(
         ...(semanticExcludedFileCount ? { semanticExclusionReason: "provider_project_scope" as const } : {}),
         ...(semanticScopes.length === 1 && semanticScopes[0]?.semanticFileGapReasons
           ? { semanticFileGapReasons: semanticScopes[0].semanticFileGapReasons } : {}),
+        ...(semanticScopes.length === 1 && semanticScopes[0]?.semanticFunctionDiagnostics
+          ? { semanticFunctionDiagnostics: semanticScopes[0].semanticFunctionDiagnostics } : {}),
         fidelity,
         providerIds,
         degraded: affectedByProviderFailure,

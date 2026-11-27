@@ -141,7 +141,19 @@ const inventory = new StaticInventory([
 const request = { projectId: "mixed", rootPath: "/workspace/mixed" };
 
 test("composite Code Map keeps mixed-language files while preserving semantic provider facts and provenance", async () => {
-  const scip = new MutableProvider("scip-typescript", ["typescript", "javascript"], "semantic-call", tsGraph());
+  const source = tsGraph();
+  const diagnostics = {
+    attemptedCount: 3, preparedCount: 3, resolvedCount: 3,
+    partiallyIndexedFileCount: 0, missingDeclarationPositionCount: 0,
+    rejectedEvidenceRangeCount: 0, failureReasons: [], failureExamples: [],
+  };
+  const instrumented: CodeGraphSnapshot = { ...source, coverage: {
+    ...source.coverage!,
+    languages: source.coverage!.languages.map((entry) => ({
+      ...entry, semanticFunctionDiagnostics: diagnostics,
+    })),
+  } };
+  const scip = new MutableProvider("scip-typescript", ["typescript", "javascript"], "semantic-call", instrumented);
   const provider = new CompositeCodeIntelligenceProvider([scip], inventory, {
     now: () => "2026-09-28T02:00:00.000Z",
   });
@@ -162,6 +174,8 @@ test("composite Code Map keeps mixed-language files while preserving semantic pr
   assert.equal(graph.coverage?.degraded, false);
   assert.equal(graph.coverage?.languages.find((entry) => entry.language === "typescript")?.fidelity, "semantic-call");
   assert.equal(graph.coverage?.languages.find((entry) => entry.language === "swift")?.fidelity, "file-only");
+  assert.deepEqual(graph.coverage?.languages.find((entry) => entry.language === "typescript")?.semanticFunctionDiagnostics,
+    diagnostics);
 });
 
 test("composite Code Map records repository files outside semantic provider project scope as intentional exclusions", async () => {

@@ -96,6 +96,18 @@ export interface CodeLanguageCoverage {
   semanticExclusionReason?: "provider_project_scope";
   /** Bounded, provider-reported counts of eligible files without complete semantic coverage. */
   semanticFileGapReasons?: readonly { reason: string; fileCount: number }[];
+  /** Diagnostic only: complete-file counts above retain their existing strict meaning. */
+  semanticFunctionDiagnostics?: {
+    attemptedCount: number;
+    preparedCount: number;
+    resolvedCount: number;
+    partiallyIndexedFileCount: number;
+    missingDeclarationPositionCount: number;
+    rejectedEvidenceRangeCount: number;
+    failureReasons: readonly { reason: string; functionCount: number }[];
+    /** Bounded examples, with LSP query positions (not asserted current-source locations). */
+    failureExamples: readonly { path: string; symbol: string; lspLine: number; reason: string }[];
+  };
   fidelity: CodeFidelityLevel;
   providerIds: readonly string[];
   /** True only when a configured provider that could contribute to this language is stale/failed. */

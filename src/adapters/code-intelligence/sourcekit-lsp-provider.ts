@@ -346,6 +346,17 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
     let visitedFunctions = 0;
     let preparedFunctions = 0;
     let resolvedFunctions = 0;
+    let partiallyIndexedFiles = 0;
+    let missingDeclarationPositions = 0;
+    let rejectedEvidenceRanges = 0;
+    const functionFailures = new Map<string, number>();
+    const failureExamples: { path: string; symbol: string; lspLine: number; reason: string }[] = [];
+    const recordFunctionFailure = (path: string, symbol: string, lspLine: number, reason: string) => {
+      functionFailures.set(reason, (functionFailures.get(reason) ?? 0) + 1);
+      if (failureExamples.length < 16
+        && failureExamples.filter((example) => example.reason === reason).length < 4)
+        failureExamples.push({ path, symbol, lspLine, reason });
+    };
     const maxFiles = this.#options.maxFiles ?? 150;
     const maxFunctions = this.#options.maxFunctions ?? 5000;
     const sourceCache = new Map<string, Promise<SwiftSource | null>>();
@@ -419,18 +430,21 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           const symbols = await client.request<DocumentSymbol[] | null>(
             "textDocument/documentSymbol", { textDocument: { uri } }, 15000);
           const { positions, missingPositions } = methodPositions(symbols ?? [], currentSource);
+          missingDeclarationPositions += missingPositions;
           const count = Math.min(positions.length, maxFunctions - visitedFunctions);
           let filePrepared = 0;
           let fileResolved = 0;
           let rejectedEvidence = 0;
           for (const { name: queriedName, position } of positions.slice(0, count)) {
             visitedFunctions++;
+            let functionFailure: string | null = "prepare_empty";
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
             const timeoutMs = attempt === 0 ? 8000 : 30000;
             const prepared = await client.request<HierarchyItem[] | null>(
               "textDocument/prepareCallHierarchy", { textDocument: { uri }, position }, timeoutMs);
             if (!prepared?.length) break;
+            functionFailure = "owner_rejected";
             let ownerFound = false;
             let outgoingResolved = true;
             for (const item of prepared) {
@@ -497,6 +511,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             if (ownerFound) {
               preparedFunctions++;
               filePrepared++;
+              functionFailure = outgoingResolved ? null : "outgoing_unavailable";
               if (outgoingResolved) {
                 fileResolved++;
                 resolvedFunctions++;
@@ -511,9 +526,13 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 client.notify("textDocument/didOpen", {
                   textDocument: { uri, languageId: "swift", version: 1, text: source },
                 });
-                if (attempt === 1) throw error;
+                if (attempt === 1) {
+                  recordFunctionFailure(file.path, queriedName, position.line + 1, "request_timeout");
+                  throw error;
+                }
               }
             }
+            if (functionFailure) recordFunctionFailure(file.path, queriedName, position.line + 1, functionFailure);
           }
           const reason = symbols == null ? "document_symbols_unavailable"
             : missingPositions > 0 ? "document_symbol_positions_unavailable"
@@ -523,6 +542,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             : rejectedEvidence > 0 ? "source_evidence_mismatch"
             : undefined;
           if (!reason) indexedFiles++;
+          else if (fileResolved > 0) partiallyIndexedFiles++;
+          rejectedEvidenceRanges += rejectedEvidence;
           observe({
             path: file.path, indexed: !reason, ...(reason ? { reason } : {}),
             discoveredFunctions: positions.length + missingPositions,
@@ -583,6 +604,17 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
           language: "swift", fileCount: swiftFiles.length,
           semanticEligibleFileCount: swiftFiles.length,
           semanticIndexedFileCount: indexedFiles,
+          semanticFunctionDiagnostics: {
+            attemptedCount: visitedFunctions,
+            preparedCount: preparedFunctions,
+            resolvedCount: resolvedFunctions,
+            partiallyIndexedFileCount: partiallyIndexedFiles,
+            missingDeclarationPositionCount: missingDeclarationPositions,
+            rejectedEvidenceRangeCount: rejectedEvidenceRanges,
+            failureReasons: [...functionFailures].sort(([a], [b]) => a.localeCompare(b))
+              .map(([reason, functionCount]) => ({ reason, functionCount })),
+            failureExamples,
+          },
           ...(gapCounts.size ? { semanticFileGapReasons: [...gapCounts]
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([reason, fileCount]) => ({ reason, fileCount })) } : {}),

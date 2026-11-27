@@ -3,6 +3,7 @@ import {
   normalizeCodeLanguage,
   type CodeFidelityLevel,
   type CodeGraphSnapshot,
+  type CodeLanguageCoverage,
   type CodeRelationKind,
 } from "./code-intelligence.js";
 import type { CodeMapPreflightReport } from "./code-map-preflight.js";
@@ -90,6 +91,8 @@ export interface CodeLanguageCapabilityReport {
   gapReason: CodeLanguageGapReason | null;
   /** Reasons for semantic-file shortfalls, when the provider supplies them. */
   semanticFileGapReasons?: readonly { reason: string; fileCount: number }[];
+  /** Preserved provider diagnostics; does not redefine strict indexedFileCount. */
+  semanticFunctionDiagnostics?: NonNullable<CodeLanguageCoverage["semanticFunctionDiagnostics"]>;
   installOptions: readonly CodeProviderInstallOption[];
 }
 
@@ -442,6 +445,8 @@ export class CodeMapProviderRegistry {
         gapReason,
         ...(graphCoverage?.semanticFileGapReasons
           ? { semanticFileGapReasons: graphCoverage.semanticFileGapReasons } : {}),
+        ...(graphCoverage?.semanticFunctionDiagnostics
+          ? { semanticFunctionDiagnostics: graphCoverage.semanticFunctionDiagnostics } : {}),
         installOptions,
       };
     });
