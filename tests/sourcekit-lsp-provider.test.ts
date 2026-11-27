@@ -144,7 +144,7 @@ function answer(method, p) {
     }];
     if (file !== 'A.swift') return [];
     return [
-      { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26)] },
+      { to: item('target()', uriFor('B.swift')), fromRanges: [range(1, 16), range(1, 26), range(1, 16)] },
       { to: item('unknown()', uriFor('C.swift')), fromRanges: [] },
       { to: item('external()', 'file:///outside/External.swift'), fromRanges: [range(1, 40)] },
     ];
@@ -197,6 +197,7 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
       attemptedCount: 4, preparedCount: 3, resolvedCount: 2,
       partiallyIndexedFileCount: 0, missingDeclarationPositionCount: 1,
       rejectedEvidenceRangeCount: 0,
+      deduplicatedEvidenceRangeCount: 1, rejectedEvidenceReasons: [],
       failureReasons: [
         { reason: "outgoing_unavailable", functionCount: 1 },
         { reason: "prepare_empty", functionCount: 1 },
@@ -258,11 +259,13 @@ test("Swift queries stale SourceKit coordinates but normalizes verified current-
       ?.map(item => item.location.startLine), [3, 3]);
     assert.equal(graph.relations.find(rel => rel.from === second?.id)?.to, target?.id);
     assert.deepEqual(observations.map(entry => [entry.path, entry.indexed]),
-      [["H.swift", false], ["J.swift", true], ["K.swift", true]]);
-    assert.deepEqual(graph.coverage?.languages[0]?.semanticFileGapReasons,
-      [{ reason: "source_evidence_mismatch", fileCount: 1 }]);
-    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.partiallyIndexedFileCount, 1);
-    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceRangeCount, 1);
+      [["H.swift", true], ["J.swift", true], ["K.swift", true]]);
+    assert.equal(graph.coverage?.languages[0]?.semanticFileGapReasons, undefined);
+    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.partiallyIndexedFileCount, 0);
+    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceRangeCount, 0);
+    assert.equal(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.deduplicatedEvidenceRangeCount, 1);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
+      []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -389,6 +392,8 @@ test("Swift multiline nearby source evidence is recovered but ambiguous evidence
       [["O.swift", 2]]);
     assert.equal(graph.relations.some(rel =>
       graph.nodes.find(node => node.id === rel.from)?.location?.path === "P.swift"), false);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
+      [{ reason: "ambiguous_nearby_site", rangeCount: 1 }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -23,6 +23,9 @@ type Range = { start: Position; end: Position };
 type DocumentSymbol = { name: string; kind: number; selectionRange: Range; children?: DocumentSymbol[] };
 type HierarchyItem = { name: string; kind: number; uri: string; range: Range; selectionRange: Range; data?: unknown };
 type OutgoingCall = { to: HierarchyItem; fromRanges: Range[] };
+type EvidenceRejectionReason =
+  | "invalid_lsp_range" | "outside_caller_span" | "column_mismatch"
+  | "ambiguous_nearby_site" | "unverified_call_token";
 type RpcReply = { id: number; result?: unknown; error?: { code?: number; message?: string } };
 
 const PROVIDER_ID = "sourcekit-lsp";
@@ -70,10 +73,14 @@ function sourcePosition(source: SwiftSource, name: string, start: Position): Pos
 function verifiedCallRange(
   source: SwiftSource, range: Range, callee: CodeNode,
   callerStartLine: number, callerEndLine: number, sourceLineShift: number,
+  onReject?: (reason: EvidenceRejectionReason) => void,
 ): Range | null {
   const start = range?.start;
   if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
-    || start.line < 0 || start.character < 0) return null;
+    || start.line < 0 || start.character < 0) {
+    onReject?.("invalid_lsp_range");
+    return null;
+  }
   // SourceKit semantic facts can point to stale lines and multiline calls.
   // Verify only the named opening token at an exact/uniquely corrected site.
   const names = [callee.name];
@@ -84,13 +91,16 @@ function verifiedCallRange(
   }
   const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   const invocation = new RegExp("\\b(?:" + escaped + ")\\s*(?:\\(|\\{)", "g");
+  let columnMismatch = false;
   const at = (lineIndex: number): Range | null => {
     if (lineIndex < callerStartLine - 1 || lineIndex >= callerEndLine - 1
       || lineIndex >= source.lines.length) return null;
     const line = source.lines[lineIndex];
     if (!line || line.trimStart().startsWith("//")) return null;
-    const matches = [...line.matchAll(invocation)]
+    const allMatches = [...line.matchAll(invocation)];
+    const matches = allMatches
       .filter((match) => Math.abs((match.index ?? -1000) - start.character) <= 3);
+    if (allMatches.length > 0 && matches.length === 0) columnMismatch = true;
     if (matches.length !== 1) return null;
     const column = matches[0]!.index!;
     return { start: { line: lineIndex, character: column },
@@ -111,7 +121,14 @@ function verifiedCallRange(
       }
     }
   }
-  return candidates.size === 1 ? candidates.values().next().value! : null;
+  if (candidates.size === 1) return candidates.values().next().value!;
+  if (candidates.size > 1) onReject?.("ambiguous_nearby_site");
+  else if (columnMismatch) onReject?.("column_mismatch");
+  else if (anchors.every(anchor =>
+    anchor < callerStartLine - 9 || anchor >= callerEndLine + 7))
+    onReject?.("outside_caller_span");
+  else onReject?.("unverified_call_token");
+  return null;
 }
 
 function semanticIndexFailure(cause: unknown): Error & { code: string } {
@@ -387,6 +404,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
     let partiallyIndexedFiles = 0;
     let missingDeclarationPositions = 0;
     let rejectedEvidenceRanges = 0;
+    let deduplicatedEvidenceRanges = 0;
+    const rejectedEvidenceReasons = new Map<EvidenceRejectionReason, number>();
     const functionFailures = new Map<string, number>();
     const failureExamples: { path: string; symbol: string; lspLine: number; reason: string }[] = [];
     const recordFunctionFailure = (path: string, symbol: string, lspLine: number, reason: string) => {
@@ -526,10 +545,16 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                 const evidence = suppliedRanges
                   .map((range) => {
                     const verified = verifiedCallRange(callerSource, range, callee,
-                      callerStartLine, callerEndLine, sourceLineShift);
+                      callerStartLine, callerEndLine, sourceLineShift, (reason) => {
+                        rejectedEvidence++;
+                        rejectedEvidenceReasons.set(reason, (rejectedEvidenceReasons.get(reason) ?? 0) + 1);
+                      });
                     if (!verified) return null;
                     const key = verified.start.line + ":" + verified.start.character;
-                    if (matchedPositions.has(key)) return null;
+                    if (matchedPositions.has(key)) {
+                      deduplicatedEvidenceRanges++;
+                      return null;
+                    }
                     matchedPositions.add(key);
                     return verified;
                   })
@@ -544,7 +569,6 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                     },
                     label: "SourceKit-LSP outgoingCall",
                   }));
-                rejectedEvidence += suppliedRanges.length - evidence.length;
                 if (!evidence.length) continue;
                 nodes.set(callee.id, callee);
                 const key = caller.id + ":calls:" + callee.id;
@@ -661,6 +685,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             partiallyIndexedFileCount: partiallyIndexedFiles,
             missingDeclarationPositionCount: missingDeclarationPositions,
             rejectedEvidenceRangeCount: rejectedEvidenceRanges,
+            deduplicatedEvidenceRangeCount: deduplicatedEvidenceRanges,
+            rejectedEvidenceReasons: [...rejectedEvidenceReasons]
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([reason, rangeCount]) => ({ reason, rangeCount })),
             failureReasons: [...functionFailures].sort(([a], [b]) => a.localeCompare(b))
               .map(([reason, functionCount]) => ({ reason, functionCount })),
             failureExamples,

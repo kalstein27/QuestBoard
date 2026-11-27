@@ -104,6 +104,10 @@ export interface CodeLanguageCoverage {
     partiallyIndexedFileCount: number;
     missingDeclarationPositionCount: number;
     rejectedEvidenceRangeCount: number;
+    /** Valid evidence ranges discarded as duplicate call sites, not failures. */
+    deduplicatedEvidenceRangeCount: number;
+    /** Only genuinely unverifiable source ranges count as rejections. */
+    rejectedEvidenceReasons: readonly { reason: string; rangeCount: number }[];
     failureReasons: readonly { reason: string; functionCount: number }[];
     /** Bounded examples, with LSP query positions (not asserted current-source locations). */
     failureExamples: readonly { path: string; symbol: string; lspLine: number; reason: string }[];

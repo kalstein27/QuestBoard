@@ -82,6 +82,8 @@ test("provider capability report names concrete mixed-language gaps instead of g
     attemptedCount: 2, preparedCount: 1, resolvedCount: 1,
     partiallyIndexedFileCount: 1, missingDeclarationPositionCount: 0,
     rejectedEvidenceRangeCount: 1,
+    deduplicatedEvidenceRangeCount: 2,
+    rejectedEvidenceReasons: [{ reason: "column_mismatch", rangeCount: 1 }],
     failureReasons: [{ reason: "prepare_empty", functionCount: 1 }],
     failureExamples: [{ path: "src/main.ts", symbol: "other", lspLine: 3, reason: "prepare_empty" }],
   };

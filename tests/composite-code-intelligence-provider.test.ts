@@ -146,6 +146,7 @@ test("composite Code Map keeps mixed-language files while preserving semantic pr
     attemptedCount: 3, preparedCount: 3, resolvedCount: 3,
     partiallyIndexedFileCount: 0, missingDeclarationPositionCount: 0,
     rejectedEvidenceRangeCount: 0, failureReasons: [], failureExamples: [],
+    deduplicatedEvidenceRangeCount: 0, rejectedEvidenceReasons: [],
   };
   const instrumented: CodeGraphSnapshot = { ...source, coverage: {
     ...source.coverage!,
