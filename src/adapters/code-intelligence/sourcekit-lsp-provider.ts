@@ -27,7 +27,8 @@ type RpcReply = { id: number; result?: unknown; error?: { code?: number; message
 
 const PROVIDER_ID = "sourcekit-lsp";
 const PROVENANCE = [{ providerId: PROVIDER_ID, fidelity: "semantic-call" as const, freshness: "fresh" as const }];
-const MAX_SWIFT_FILE_BYTES = 512 * 1024;
+// TouchPilot's ContentView.swift exceeds 512 KiB while remaining under 768 KiB.
+const MAX_SWIFT_FILE_BYTES = 768 * 1024;
 type SwiftSource = { lines: string[]; declarations: readonly { name: string; line: number; column: number }[] };
 
 function swiftSource(text: string): SwiftSource {
@@ -66,14 +67,15 @@ function sourcePosition(source: SwiftSource, name: string, start: Position): Pos
   return null;
 }
 
-function verifiedCallRange(source: SwiftSource, range: Range, callee: CodeNode): boolean {
+function verifiedCallRange(
+  source: SwiftSource, range: Range, callee: CodeNode,
+  callerStartLine: number, callerEndLine: number, sourceLineShift: number,
+): Range | null {
   const start = range?.start;
   if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
-    || start.line < 0 || start.character < 0) return false;
-  const line = source.lines[start.line];
-  if (!line || line.trimStart().startsWith("//")) return false;
-  // SourceKit can return ranges from older compiler-index revisions. Keep only
-  // evidence whose named invocation is present close to the returned column.
+    || start.line < 0 || start.character < 0) return null;
+  // SourceKit semantic facts can point to stale lines and multiline calls.
+  // Verify only the named opening token at an exact/uniquely corrected site.
   const names = [callee.name];
   if (callee.name === "init") {
     // Swift constructor calls are often `Widget()`, not the literal `init()`.
@@ -81,11 +83,35 @@ function verifiedCallRange(source: SwiftSource, range: Range, callee: CodeNode):
     if (owner) names.push(owner);
   }
   const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  const invocation = new RegExp(`\\b(?:${escaped})\\s*(?:\\([^)]*\\)|\\{)`, "g");
-  for (const match of line.matchAll(invocation)) {
-    if (Math.abs((match.index ?? -1000) - start.character) <= 32) return true;
+  const invocation = new RegExp("\\b(?:" + escaped + ")\\s*(?:\\(|\\{)", "g");
+  const at = (lineIndex: number): Range | null => {
+    if (lineIndex < callerStartLine - 1 || lineIndex >= callerEndLine - 1
+      || lineIndex >= source.lines.length) return null;
+    const line = source.lines[lineIndex];
+    if (!line || line.trimStart().startsWith("//")) return null;
+    const matches = [...line.matchAll(invocation)]
+      .filter((match) => Math.abs((match.index ?? -1000) - start.character) <= 3);
+    if (matches.length !== 1) return null;
+    const column = matches[0]!.index!;
+    return { start: { line: lineIndex, character: column },
+      end: { line: lineIndex, character: column + matches[0]![0].length } };
+  };
+  const anchors = [...new Set([start.line + sourceLineShift, start.line])];
+  for (const anchor of anchors) {
+    const exact = at(anchor);
+    if (exact) return exact;
   }
-  return false;
+  // Limit drift correction to +/-8 lines. Multiple matches are ambiguous.
+  const candidates = new Map<number, Range>();
+  for (const anchor of anchors) {
+    for (let offset = 1; offset <= 8; offset++) {
+      for (const line of [anchor - offset, anchor + offset]) {
+        const candidate = at(line);
+        if (candidate) candidates.set(line, candidate);
+      }
+    }
+  }
+  return candidates.size === 1 ? candidates.values().next().value! : null;
 }
 
 function semanticIndexFailure(cause: unknown): Error & { code: string } {
@@ -421,27 +447,29 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               const outgoing = await client.request<OutgoingCall[] | null>(
                 "callHierarchy/outgoingCalls", { item }, timeoutMs);
               if (!Array.isArray(outgoing)) outgoingResolved = false;
+              const callerSource = await loadSource(caller.location!.path);
+              if (!callerSource) continue;
+              const callerStartLine = caller.location!.startLine!;
+              const callerEndLine = callerSource.declarations.find((decl) =>
+                decl.line > callerStartLine && decl.column <= caller.location!.startColumn!)?.line
+                ?? callerSource.lines.length + 1;
+              const sourceLineShift = callerStartLine - 1 - lspSelection.line;
               for (const call of outgoing ?? []) {
                 const callee = await nodeForItem(rootPath, call.to, loadSource);
                 if (!callee || !call.fromRanges?.length) continue;
-                const callerSource = await loadSource(caller.location!.path);
-                if (!callerSource) continue;
                 const suppliedRanges = call.fromRanges.slice(0, 24);
-                const sourceLineShift = caller.location!.startLine! - 1 - lspSelection.line;
+                const matchedPositions = new Set<string>();
                 const evidence = suppliedRanges
                   .map((range) => {
-                    // Prefer the verified caller's shift when SourceKit's
-                    // declaration is stale. A matching name at the old line
-                    // could otherwise be an unrelated call in current source.
-                    const shifted = {
-                      start: { ...range.start, line: range.start.line + sourceLineShift },
-                      end: { ...range.end, line: range.end.line + sourceLineShift },
-                    };
-                    if (sourceLineShift && verifiedCallRange(callerSource, shifted, callee)) return shifted;
-                    return verifiedCallRange(callerSource, range, callee) ? range : null;
+                    const verified = verifiedCallRange(callerSource, range, callee,
+                      callerStartLine, callerEndLine, sourceLineShift);
+                    if (!verified) return null;
+                    const key = verified.start.line + ":" + verified.start.character;
+                    if (matchedPositions.has(key)) return null;
+                    matchedPositions.add(key);
+                    return verified;
                   })
                   .filter((range): range is Range => range !== null)
-                  .filter((range) => range.start.line + 1 >= caller.location!.startLine!)
                   .map((range) => ({
                     location: {
                       path: caller.location!.path,

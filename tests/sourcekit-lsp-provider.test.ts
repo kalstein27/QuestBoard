@@ -76,6 +76,8 @@ function answer(method, p) {
     if (file === 'K.swift') return [symbol('first()', 0)]; // partial documentSymbol list
     if (file === 'L.swift') return [symbol('maker()', 0)];
     if (file === 'M.swift') return [{ ...symbol('init()', 1), selectionRange: range(1, 2) }];
+    if (file === 'N.swift') return [symbol('big()', 0)];
+    if (file === 'O.swift' || file === 'P.swift') return [symbol('caller()', 0)];
     if (file === 'A.swift') return [{ ...symbol('Controller', 0, 23), children: [symbol('caller()', 1, 6)] }];
     return [symbol(file === 'B.swift' ? 'target()' : 'unknown()')];
   }
@@ -89,6 +91,8 @@ function answer(method, p) {
       : p.position.line === 1 ? [item('second()', uri, 0)] : null;
     if (file === 'L.swift') return [item('maker()', uri, 0)];
     if (file === 'M.swift') return [item('Widget.init()', uri, 1, 2)];
+    if (file === 'N.swift') return [item('big()', uri, 0)];
+    if (file === 'O.swift' || file === 'P.swift') return [item('caller()', uri, 0)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
@@ -102,6 +106,9 @@ function answer(method, p) {
       ? [{ to: item('target()', uriFor('J.swift'), 0), fromRanges: [range(1, 16)] }] : [];
     if (file === 'L.swift') return [{
       to: item('Widget.init()', uriFor('M.swift'), 1, 2), fromRanges: [range(0, 15)],
+    }];
+    if (file === 'O.swift' || file === 'P.swift') return [{
+      to: item('target()', uriFor('B.swift')), fromRanges: [range(0, 2)],
     }];
     if (file !== 'A.swift') return [];
     return [
@@ -236,7 +243,7 @@ test("Swift file and function caps expose skipped files instead of silently clai
     const executable = await swiftLspFixture(root);
     await writeFile(join(root, "B.swift"), "func target() {}\n");
     await writeFile(join(root, "H.swift"), "// old\n// old\nfunc caller() { target() }\n");
-    await writeFile(join(root, "Z.swift"), " ".repeat(512 * 1024 + 1));
+    await writeFile(join(root, "Z.swift"), " ".repeat(768 * 1024 + 1));
     const observations: Array<{ path: string; indexed: boolean; reason?: string }> = [];
     const provider = new SourceKitLspProvider({ executable,
       inventory: { listFiles: async () => ["B.swift", "H.swift", "Z.swift"].map(path => ({ path })) },
@@ -258,6 +265,40 @@ test("Swift file and function caps expose skipped files instead of silently clai
       [["B.swift", null], ["H.swift", "function_limit"]]);
     assert.deepEqual(partial.coverage?.languages[0]?.semanticFileGapReasons,
       [{ reason: "function_limit", fileCount: 1 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift target-scale source is no longer skipped at the former 512 KiB limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-large-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "N.swift"), "func big() {}\n" + " ".repeat(532_831));
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => [{ path: "N.swift" }] },
+    });
+    const graph = await provider.indexProject({ projectId: "large-swift", rootPath: root });
+    assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 1);
+    assert.equal(graph.coverage?.languages[0]?.semanticFileGapReasons, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift multiline nearby source evidence is recovered but ambiguous evidence is rejected", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-nearby-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    await writeFile(join(root, "O.swift"), "func caller() {\n  target(\n    1\n  )\n}\n");
+    await writeFile(join(root, "P.swift"), "func caller() {\n  target()\n  target()\n}\n");
+    const provider = new SourceKitLspProvider({ executable,
+      inventory: { listFiles: async () => ["B.swift", "O.swift", "P.swift"].map(path => ({ path })) },
+    });
+    const graph = await provider.indexProject({ projectId: "nearby-swift", rootPath: root });
+    const from = graph.nodes.find(node => node.name === "caller" && node.location?.path === "O.swift");
+    const relation = graph.relations.find(rel => rel.from === from?.id);
+    assert.deepEqual(relation?.evidence?.map(ev => [ev.location.path, ev.location.startLine]),
+      [["O.swift", 2]]);
+    assert.equal(graph.relations.some(rel =>
+      graph.nodes.find(node => node.id === rel.from)?.location?.path === "P.swift"), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
