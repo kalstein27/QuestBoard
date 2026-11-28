@@ -100,7 +100,8 @@ function answer(method, p) {
     if (file === 'L.swift') return [symbol('maker()', 0)];
     if (file === 'M.swift') return [{ ...symbol('init()', 1), selectionRange: range(1, 2) }];
     if (file === 'N.swift') return [symbol('big()', 0)];
-    if (file === 'O.swift' || file === 'P.swift' || file === 'Y.swift') return [symbol('caller()', 0)];
+    if (file === 'O.swift' || file === 'P.swift' || file === 'Y.swift'
+      || file === 'AC.swift' || file === 'AF.swift') return [symbol('caller()', 0)];
     if (file === 'Q.swift' || file === 'R.swift') return [
       { ...symbol('Alpha', 0, 23), children: [
         { ...symbol('reduce(value:nextValue:)', 1, 6), selectionRange: range(1, 7) },
@@ -156,6 +157,7 @@ function answer(method, p) {
     if (file === 'U.swift') return [item('caller()', uri, 0)];
     if (file === 'V.swift') return [item('outer()', uri, 0)];
     if (file === 'Y.swift') return [item('caller()', uri, 0)];
+    if (file === 'AC.swift' || file === 'AF.swift') return [item('caller()', uri, 0)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
@@ -197,6 +199,11 @@ function answer(method, p) {
       { to: item('ScreenVideoSampleSupply.enqueue(_:measuring:expectedGeneration:path:)', uriFor('AA.swift'), 1, 7),
         fromRanges: [range(1, 14), range(2, 14)] },
     ];
+    if (file === 'AC.swift' || file === 'AF.swift') return [{
+      to: item('ScreenVideoRenderer.enqueue(_:codedSize:startsIndependentSequence:)',
+        uriFor('AE.swift'), 1, 7),
+      fromRanges: [range(1, 14)],
+    }];
     if (file !== 'A.swift') return [];
     // Compiler-index callees may carry the physical source URI rather than
     // the isolated workspace symlink URI. Both must normalize to the same node.
@@ -208,6 +215,14 @@ function answer(method, p) {
       { to: item('unknown()', uriFor('C.swift')), fromRanges: [] },
       { to: item('external()', 'file:///outside/External.swift'), fromRanges: [range(1, 40)] },
     ];
+  }
+  if (method === 'textDocument/definition') {
+    if (file === 'AC.swift') return { uri: uriFor('AD.swift'), range: range(1, 7) };
+    if (file === 'AF.swift') return [
+      { uri: uriFor('AD.swift'), range: range(1, 7) },
+      { uri: uriFor('AE.swift'), range: range(1, 7) },
+    ];
+    return null;
   }
   throw new Error('unexpected method ' + method);
 }
@@ -510,6 +525,36 @@ test("Swift callee labels reject stale same-name links for inline and multiline 
       [["Y.swift", 2], ["Y.swift", 3]]);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
       [{ reason: "callee_label_mismatch", rangeCount: 4 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift recovers a stale outgoing target only through a unique SourceKit definition", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-definition-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    const source = "func caller() {\n  videoSupply.enqueue(item, measuring: true)\n}\n";
+    await writeFile(join(root, "AC.swift"), source);
+    await writeFile(join(root, "AF.swift"), source);
+    await writeFile(join(root, "AD.swift"),
+      "struct ScreenVideoSampleSupply {\n  func enqueue(_ item: Int, measuring: Bool) {}\n}\n");
+    await writeFile(join(root, "AE.swift"),
+      "struct ScreenVideoRenderer {\n  func enqueue(_ item: Int, codedSize: Int?) {}\n}\n");
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () =>
+        ["AC.swift", "AF.swift", "AD.swift", "AE.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "definition-recovery", rootPath: root });
+    const caller = graph.nodes.find(node => node.name === "caller" && node.location?.path === "AC.swift");
+    const edges = graph.relations.filter(relation => relation.from === caller?.id);
+    assert.equal(edges.length, 1);
+    const target = graph.nodes.find(node => node.id === edges[0]?.to);
+    assert.equal(target?.location?.path, "AD.swift");
+    assert.equal(edges[0]?.evidence?.[0]?.label, "SourceKit-LSP definition");
+    assert.deepEqual(edges[0]?.evidence?.map(entry => [entry.location.path, entry.location.startLine]),
+      [["AC.swift", 2]]);
+    const ambiguousCaller = graph.nodes.find(node => node.name === "caller" && node.location?.path === "AF.swift");
+    assert.equal(graph.relations.some(relation => relation.from === ambiguousCaller?.id), false);
+    assert.equal(graph.relations.some(relation =>
+      graph.nodes.find(node => node.id === relation.to)?.location?.path === "AE.swift"), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

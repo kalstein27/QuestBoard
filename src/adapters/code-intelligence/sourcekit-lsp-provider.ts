@@ -26,6 +26,8 @@ type Range = { start: Position; end: Position };
 type DocumentSymbol = { name: string; kind: number; selectionRange: Range; children?: DocumentSymbol[] };
 type HierarchyItem = { name: string; kind: number; uri: string; range: Range; selectionRange: Range; data?: unknown };
 type OutgoingCall = { to: HierarchyItem; fromRanges: Range[] };
+type DefinitionLocation = { uri: string; range: Range };
+type DefinitionLink = { targetUri: string; targetSelectionRange: Range };
 type EvidenceRejectionReason =
   | "invalid_lsp_range" | "outside_caller_span" | "column_mismatch"
   | "ambiguous_nearby_site" | "unverified_call_token" | "nested_local_function"
@@ -920,6 +922,19 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                     end: { line: end.line - 1, character: end.character } }];
                 }) : [];
               const sourceLineShift = callerStartLine - 1 - lspSelection.line;
+              const addRelation = (target: CodeNode, evidence: NonNullable<CodeRelation["evidence"]>) => {
+                if (!evidence.length) return;
+                nodes.set(target.id, target);
+                const key = caller.id + ":calls:" + target.id;
+                const id = identity("relation", key);
+                const existing = relations.get(id);
+                const merged = [...new Map([...(existing?.evidence ?? []), ...evidence]
+                  .map(entry => [JSON.stringify(entry.location), entry])).values()];
+                relations.set(id, {
+                  id, from: caller.id, to: target.id, kind: "calls", confidence: 1,
+                  evidence: merged.slice(0, 24), provenance: PROVENANCE,
+                });
+              };
               for (const call of outgoing ?? []) {
                 const callee = await nodeForItem(rootPath, call.to, loadSource, this.#options.sourceRootAlias);
                 if (!callee || !call.fromRanges?.length) continue;
@@ -927,12 +942,14 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                   await loadSource(callee.location!.path), callee);
                 const suppliedRanges = call.fromRanges.slice(0, 24);
                 const matchedPositions = new Set<string>();
+                const mismatchedLabels: Range[] = [];
                 const evidence = suppliedRanges
                   .map((range) => {
                     const verified = verifiedCallRange(callerSource, range, callee,
                       callerStartLine, callerEndLine, sourceLineShift, (reason) => {
                         rejectedEvidence++;
                         rejectedEvidenceReasons.set(reason, (rejectedEvidenceReasons.get(reason) ?? 0) + 1);
+                        if (reason === "callee_label_mismatch") mismatchedLabels.push(range);
                       }, bodyEnd?.character, nestedFunctionBodies, declaredCalleeLabels);
                     if (!verified) return null;
                     const key = verified.start.line + ":" + verified.start.character;
@@ -954,17 +971,53 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                     },
                     label: "SourceKit-LSP outgoingCall",
                   }));
-                if (!evidence.length) continue;
-                nodes.set(callee.id, callee);
-                const key = caller.id + ":calls:" + callee.id;
-                const id = identity("relation", key);
-                const existing = relations.get(id);
-                const merged = [...new Map([...(existing?.evidence ?? []), ...evidence]
-                  .map((entry) => [JSON.stringify(entry.location), entry])).values()];
-                relations.set(id, {
-                  id, from: caller.id, to: callee.id, kind: "calls", confidence: 1,
-                  evidence: merged.slice(0, 24), provenance: PROVENANCE,
-                });
+                addRelation(callee, evidence);
+                // A stale callHierarchy target can have the correct call site
+                // but the wrong overload/owner. Ask SourceKit for the current
+                // definition only for demonstrably mismatched call labels.
+                for (const rejectedRange of mismatchedLabels.slice(0, 2)) {
+                  const { signature: _staleSignature, ...unlabeledCallee } = callee;
+                  const site = verifiedCallRange(callerSource, rejectedRange,
+                    unlabeledCallee, callerStartLine, callerEndLine,
+                    sourceLineShift, undefined, bodyEnd?.character, nestedFunctionBodies);
+                  if (!site) continue;
+                  let answer: DefinitionLocation | DefinitionLink
+                    | Array<DefinitionLocation | DefinitionLink> | null;
+                  try {
+                    answer = await client.request("textDocument/definition", {
+                      textDocument: { uri },
+                      position: { line: site.start.line, character: site.start.character + 1 },
+                    }, 5000);
+                  } catch { continue; } // Failed semantic lookup cannot create a fact.
+                  const definitions = Array.isArray(answer) ? answer : answer ? [answer] : [];
+                  if (definitions.length !== 1) continue;
+                  const definition = definitions[0]!;
+                  const targetUri = "targetUri" in definition ? definition.targetUri : definition.uri;
+                  const targetRange = "targetSelectionRange" in definition
+                    ? definition.targetSelectionRange : definition.range;
+                  if (!targetRange?.start) continue;
+                  const target = await nodeForItem(rootPath, {
+                    ...call.to, name: callee.name + "()", uri: targetUri,
+                    selectionRange: targetRange,
+                  }, loadSource, this.#options.sourceRootAlias);
+                  if (!target || target.location!.startLine !== targetRange.start.line + 1) continue;
+                  const labels = currentSwiftCalleeLabels(
+                    await loadSource(target.location!.path), target);
+                  if (!labels) continue;
+                  const confirmed = verifiedCallRange(callerSource, rejectedRange,
+                    target, callerStartLine, callerEndLine, sourceLineShift, undefined,
+                    bodyEnd?.character, nestedFunctionBodies, labels);
+                  if (!confirmed || confirmed.start.line !== site.start.line
+                    || confirmed.start.character !== site.start.character) continue;
+                  addRelation(target, [{
+                    location: {
+                      path: caller.location!.path,
+                      startLine: confirmed.start.line + 1, startColumn: confirmed.start.character + 1,
+                      endLine: confirmed.end.line + 1, endColumn: confirmed.end.character + 1,
+                    },
+                    label: "SourceKit-LSP definition",
+                  }]);
+                }
               }
             }
             if (ownerFound) {
