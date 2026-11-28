@@ -28,7 +28,8 @@ type HierarchyItem = { name: string; kind: number; uri: string; range: Range; se
 type OutgoingCall = { to: HierarchyItem; fromRanges: Range[] };
 type EvidenceRejectionReason =
   | "invalid_lsp_range" | "outside_caller_span" | "column_mismatch"
-  | "ambiguous_nearby_site" | "unverified_call_token" | "nested_local_function";
+  | "ambiguous_nearby_site" | "unverified_call_token" | "nested_local_function"
+  | "callee_label_mismatch";
 type RpcReply = { id: number; result?: unknown; error?: { code?: number; message?: string } };
 
 const PROVIDER_ID = "sourcekit-lsp";
@@ -122,6 +123,73 @@ function swiftFunctionBodyEnd(source: SwiftSource, startLine: number, startColum
   return null;
 }
 
+/** Reject only demonstrable named-argument mismatches, not inferred receiver types. */
+function matchesSwiftCalleeLabels(
+  source: SwiftSource, lineIndex: number, column: number, tokenLength: number,
+  signature: string | undefined,
+): boolean {
+  // A compact SourceKit name encodes external labels, e.g. Type.enqueue(_:codedSize:).
+  const compact = signature?.match(/\(([_A-Za-z0-9:]*)\)$/)?.[1];
+  if (compact === undefined || (compact && !/^(?:[A-Za-z_][A-Za-z_0-9]*:)+$/.test(compact)))
+    return true;
+  const labels = [...compact.matchAll(/([A-Za-z_][A-Za-z_0-9]*):/g)].map(match => match[1]!);
+  const text = source.lines.slice(lineIndex, lineIndex + 16).join("\n")
+    .slice(column + tokenLength - 1, column + tokenLength - 1 + 4096);
+  if (!text.startsWith("(")) return true; // trailing closure, no argument list
+
+  let parens = 0, nested = 0, expectArgument = false;
+  const supplied: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (text.startsWith("//", i)) {
+      i = text.indexOf("\n", i);
+      if (i < 0) return true;
+      continue;
+    }
+    if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) return true;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const triple = ch === '"' && text.startsWith('"""', i);
+      const mark = triple ? '"""' : ch;
+      const end = text.indexOf(mark, i + mark.length);
+      if (end < 0) return true;
+      // Escaped interpolations and raw Swift strings are not proven by this guard.
+      if (text.slice(i, end).includes("\\") || (i > 0 && text[i - 1] === "#")) return true;
+      i = end + mark.length - 1;
+      if (parens === 1 && nested === 0) expectArgument = false;
+      continue;
+    }
+    if (ch === "(") { parens++; if (parens === 1) expectArgument = true; continue; }
+    if (ch === ")") {
+      if (--parens === 0) {
+        // Supplied explicit labels must occur in order in the callee's signature.
+        let next = 0;
+        return supplied.every(label => {
+          const index = labels.indexOf(label, next);
+          if (index < 0) return false;
+          next = index + 1;
+          return true;
+        });
+      }
+      if (parens < 0) return true;
+      continue;
+    }
+    if (parens === 1 && (ch === "[" || ch === "{")) { nested++; continue; }
+    if (parens === 1 && (ch === "]" || ch === "}")) { nested--; if (nested < 0) return true; continue; }
+    if (parens !== 1 || nested > 0) continue;
+    if (ch === ",") { expectArgument = true; continue; }
+    if (!expectArgument || /\s/.test(ch)) continue;
+    const label = /^[A-Za-z_][A-Za-z_0-9]*(?=\s*:)/.exec(text.slice(i))?.[0];
+    if (label) supplied.push(label);
+    expectArgument = false;
+  }
+  return true; // Unterminated or overly long source is inconclusive, not a mismatch.
+}
+
 function verifiedCallRange(
   source: SwiftSource, range: Range, callee: CodeNode,
   callerStartLine: number, callerEndLine: number, sourceLineShift: number,
@@ -147,6 +215,7 @@ function verifiedCallRange(
   const invocation = new RegExp("\\b(?:" + escaped + ")\\s*(?:\\(|\\{)", "g");
   let columnMismatch = false;
   let nestedMatch = false;
+  let calleeLabelMismatch = false;
   const at = (lineIndex: number): Range | null => {
     if (lineIndex < callerStartLine - 1 || lineIndex >= callerEndLine - 1
       || lineIndex >= source.lines.length) return null;
@@ -166,6 +235,11 @@ function verifiedCallRange(
     }
     if (callerEndCharacter !== undefined
       && lineIndex === callerEndLine - 2 && column >= callerEndCharacter) return null;
+    if (!matchesSwiftCalleeLabels(source, lineIndex, column, matches[0]![0].length, callee.signature)) {
+      if (!calleeLabelMismatch) onReject?.("callee_label_mismatch");
+      calleeLabelMismatch = true;
+      return null;
+    }
     return { start: { line: lineIndex, character: column },
       end: { line: lineIndex, character: column + matches[0]![0].length } };
   };
@@ -175,6 +249,7 @@ function verifiedCallRange(
     if (exact) return exact;
   }
   if (nestedMatch) { onReject?.("nested_local_function"); return null; }
+  if (calleeLabelMismatch) return null;
   // Limit drift correction to +/-8 lines. Multiple matches are ambiguous.
   const candidates = new Map<number, Range>();
   for (const anchor of anchors) {
@@ -186,6 +261,7 @@ function verifiedCallRange(
     }
   }
   if (nestedMatch) { onReject?.("nested_local_function"); return null; }
+  if (calleeLabelMismatch) return null;
   if (candidates.size === 1) return candidates.values().next().value!;
   if (candidates.size > 1) onReject?.("ambiguous_nearby_site");
   else if (columnMismatch) onReject?.("column_mismatch");
@@ -302,9 +378,10 @@ function methodPositions(symbols: readonly DocumentSymbol[], source: SwiftSource
     method.ambiguousSignature =
       (signatureCounts.get(method.ownerPath + ":" + method.signature) ?? 0) > 1;
   }
-  if (symbols.length > 0 && missingPositions === 0) {
-    // Probe current lexical function tokens not exposed by a partial documentSymbol
-    // response. Only SourceKit prepare/outgoing confirmation can create call facts.
+  if (missingPositions === 0) {
+    // Empty documentSymbol can occur despite a valid compiler context. Probe
+    // current lexical functions as well; only SourceKit prepare/outgoing can
+    // authorize a semantic edge, never the lexical name alone.
     for (const decl of source.declarations) {
       const position = { line: decl.line - 1, character: decl.column - 1 };
       const key = `${position.line}:${position.character}`;
@@ -740,7 +817,10 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
             "textDocument/documentSymbol", { textDocument: { uri } }, 15000);
           const { positions, missingPositions } = methodPositions(symbols ?? [], currentSource);
           missingDeclarationPositions += missingPositions;
-          const count = Math.min(positions.length, maxFunctions - visitedFunctions);
+          // With no document symbols, avoid probing an unlimited unrelated
+          // tool/source file. A truncated probe remains an explicit file gap.
+          const emptySymbolProbeCap = symbols?.length ? maxFunctions : 16;
+          const count = Math.min(positions.length, maxFunctions - visitedFunctions, emptySymbolProbeCap);
           let filePrepared = 0;
           let fileResolved = 0;
           let rejectedEvidence = 0;

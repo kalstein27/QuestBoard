@@ -92,7 +92,7 @@ function answer(method, p) {
   }
   if (method === 'textDocument/documentSymbol') {
     if (file === 'E.swift') return null;
-    if (file === 'F.swift') return [];
+    if (file === 'F.swift' || file === 'I.swift') return [];
     if (file === 'G.swift') return [{ name: 'flat()', kind: 12, location: { uri, range: range(0, 5) } }];
     if (file === 'H.swift') return [symbol('caller()', 0)]; // stale SourceKit coordinates
     if (file === 'J.swift') return [symbol('target()', 0)]; // stale SourceKit coordinates
@@ -100,7 +100,7 @@ function answer(method, p) {
     if (file === 'L.swift') return [symbol('maker()', 0)];
     if (file === 'M.swift') return [{ ...symbol('init()', 1), selectionRange: range(1, 2) }];
     if (file === 'N.swift') return [symbol('big()', 0)];
-    if (file === 'O.swift' || file === 'P.swift') return [symbol('caller()', 0)];
+    if (file === 'O.swift' || file === 'P.swift' || file === 'Y.swift') return [symbol('caller()', 0)];
     if (file === 'Q.swift' || file === 'R.swift') return [
       { ...symbol('Alpha', 0, 23), children: [
         { ...symbol('reduce(value:nextValue:)', 1, 6), selectionRange: range(1, 7) },
@@ -128,6 +128,7 @@ function answer(method, p) {
     // The compiler index only understands its own stale line 0, while the
     // current source declares both functions on line 2.
     if (file === 'H.swift') return p.position.line === 0 ? [item('caller()', uri, 0)] : null;
+    if (file === 'I.swift') return [item('caller()', uri, 0)];
     if (file === 'J.swift') return p.position.line === 0 ? [item('target()', uri, 0)] : null;
     if (file === 'K.swift') return p.position.line === 0 ? [item('first()', uri, 0)]
       : p.position.line === 1 ? [item('second()', uri, 0)] : null;
@@ -154,11 +155,15 @@ function answer(method, p) {
       : p.position.line === 8 ? [item('Worker.sibling()', uri, 8, 5)] : null;
     if (file === 'U.swift') return [item('caller()', uri, 0)];
     if (file === 'V.swift') return [item('outer()', uri, 0)];
+    if (file === 'Y.swift') return [item('caller()', uri, 0)];
     if (file === 'A.swift') return [item('caller()', uri, 1)];
     return [item(file === 'B.swift' ? 'target()' : 'unknown()', uri)];
   }
   if (method === 'callHierarchy/outgoingCalls') {
     if (file === 'D.swift') return null;
+    if (file === 'I.swift') return [{
+      to: item('target()', uriFor('B.swift')), fromRanges: [range(0, 16)],
+    }];
     if (file === 'H.swift') return [{
       to: item('target()', uriFor('J.swift'), 0),
       fromRanges: [range(0, 16), range(0, 26), range(1, 16)],
@@ -182,6 +187,12 @@ function answer(method, p) {
       fromRanges: [range(0, 16), range(0, 45)] }];
     if (file === 'V.swift') return [{ to: item('target()', uriFor('B.swift')),
       fromRanges: [range(2, 4), range(4, 2)] }];
+    if (file === 'Y.swift') return [
+      { to: item('ScreenVideoRenderer.enqueue(_:codedSize:startsIndependentSequence:)', uriFor('Z.swift'), 1, 7),
+        fromRanges: [range(1, 14), range(2, 14)] },
+      { to: item('ScreenVideoSampleSupply.enqueue(_:measuring:expectedGeneration:path:)', uriFor('AA.swift'), 1, 7),
+        fromRanges: [range(1, 14), range(2, 14)] },
+    ];
     if (file !== 'A.swift') return [];
     // Compiler-index callees may carry the physical source URI rather than
     // the isolated workspace symlink URI. Both must normalize to the same node.
@@ -239,8 +250,8 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
     assert.equal(graph.coverage?.languages[0]?.semanticEligibleFileCount, 7);
     assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 3);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics, {
-      attemptedCount: 4, preparedCount: 3, resolvedCount: 2,
-      partiallyIndexedFileCount: 0, missingDeclarationPositionCount: 1,
+      attemptedCount: 5, preparedCount: 4, resolvedCount: 3,
+      partiallyIndexedFileCount: 1, missingDeclarationPositionCount: 1,
       rejectedEvidenceRangeCount: 0,
       deduplicatedEvidenceRangeCount: 1, rejectedEvidenceReasons: [],
       failureReasons: [
@@ -271,11 +282,28 @@ test("Swift hierarchical symbols preserve exact calls and report unresolved func
       { path: "B.swift", indexed: true, discoveredFunctions: 1, preparedFunctions: 1, resolvedFunctions: 1 },
       { path: "C.swift", indexed: false, reason: "call_hierarchy_unavailable", discoveredFunctions: 1, preparedFunctions: 0, resolvedFunctions: 0 },
       { path: "D.swift", indexed: false, reason: "outgoing_calls_unavailable", discoveredFunctions: 1, preparedFunctions: 1, resolvedFunctions: 0 },
-      { path: "E.swift", indexed: false, reason: "document_symbols_unavailable", discoveredFunctions: 0, preparedFunctions: 0, resolvedFunctions: 0 },
+      { path: "E.swift", indexed: false, reason: "document_symbols_unavailable", discoveredFunctions: 1, preparedFunctions: 1, resolvedFunctions: 1 },
       { path: "F.swift", indexed: true, discoveredFunctions: 0, preparedFunctions: 0, resolvedFunctions: 0 },
       { path: "G.swift", indexed: false, reason: "document_symbol_positions_unavailable", discoveredFunctions: 1, preparedFunctions: 0, resolvedFunctions: 0 },
     ]);
   } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test("Swift probes SourceKit for lexical functions when documentSymbol returns an empty array", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-empty-symbols-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    await writeFile(join(root, "I.swift"), "func caller() { target() }\n");
+    await writeFile(join(root, "B.swift"), "func target() {}\n");
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () => ["B.swift", "I.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "empty-doc-symbol", rootPath: root });
+    assert.equal(graph.coverage?.languages[0]?.semanticIndexedFileCount, 2);
+    assert.equal(graph.relations.length, 1);
+    assert.deepEqual(graph.relations[0]?.evidence?.map(e => [e.location.path, e.location.startLine]),
+      [["I.swift", 1]]);
+    assert.equal(graph.nodes.find(n => n.id === graph.relations[0]?.to)?.name, "target");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Swift queries stale SourceKit coordinates but normalizes verified current-source declarations and calls", async () => {
@@ -439,6 +467,37 @@ test("Swift multiline nearby source evidence is recovered but ambiguous evidence
       graph.nodes.find(node => node.id === rel.from)?.location?.path === "P.swift"), false);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
       [{ reason: "ambiguous_nearby_site", rangeCount: 1 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Swift callee labels reject stale same-name links for inline and multiline calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "questboard-swift-callee-labels-"));
+  try {
+    const executable = await swiftLspFixture(root);
+    const source = [
+      "func caller() {",
+      "  videoSupply.enqueue(item, measuring: true)",
+      "  videoSupply.enqueue(",
+      "    item, measuring: wrap(enabled: true)",
+      "  )",
+      "}",
+    ].join("\n") + "\n";
+    await writeFile(join(root, "Y.swift"), source);
+    await writeFile(join(root, "Z.swift"),
+      "struct ScreenVideoRenderer {\n  func enqueue(_ buffer: Int, codedSize: Int?) {}\n}\n");
+    await writeFile(join(root, "AA.swift"),
+      "struct ScreenVideoSampleSupply {\n  func enqueue(_ item: Int, measuring: Bool) {}\n}\n");
+    const graph = await new SourceKitLspProvider({
+      executable, inventory: { listFiles: async () =>
+        ["Y.swift", "Z.swift", "AA.swift"].map(path => ({ path })) },
+    }).indexProject({ projectId: "callee-labels", rootPath: root });
+    assert.equal(graph.relations.length, 1, "matching name and position alone must not certify a callee");
+    const target = graph.nodes.find(node => node.id === graph.relations[0]?.to);
+    assert.equal(target?.location?.path, "AA.swift");
+    assert.deepEqual(graph.relations[0]?.evidence?.map(e => [e.location.path, e.location.startLine]),
+      [["Y.swift", 2], ["Y.swift", 3]]);
+    assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
+      [{ reason: "callee_label_mismatch", rangeCount: 2 }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
