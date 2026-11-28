@@ -42,6 +42,37 @@ function swiftSource(text: string): SwiftSource {
   return { lines: text.split(/\r?\n/), declarations: swiftSourceFunctionDeclarations(text) };
 }
 
+/** A bounded, fail-open check of external labels from one verified declaration. */
+function currentSwiftCalleeLabels(source: SwiftSource | null, callee: CodeNode): string[] | undefined {
+  const line = callee.location?.startLine;
+  const column = callee.location?.startColumn;
+  if (!source || !line || !column) return undefined;
+  const declaration = source.lines.slice(line - 1, line + 15).join("\n")
+    .slice(column - 1, column + 4095);
+  if (!declaration.startsWith(callee.name)) return undefined;
+  const opening = declaration.indexOf("(", callee.name.length);
+  // Do not cross a generic signature or another declaration while searching.
+  if (opening < 0 || opening > 120 || /[{};]/.test(declaration.slice(0, opening))) return undefined;
+  let depth = 1;
+  let closing = -1;
+  for (let i = opening + 1; i < declaration.length; i++) {
+    if (declaration[i] === "(") depth++;
+    else if (declaration[i] === ")" && --depth === 0) { closing = i; break; }
+  }
+  if (closing < 0) return undefined;
+  const parameters = declaration.slice(opening + 1, closing).trim();
+  if (!parameters) return [];
+  // A complex type/default may contain commas. Never guess its boundaries.
+  if (/[()<>{}"']|\/[/*]/.test(parameters)) return undefined;
+  const labels: string[] = [];
+  for (const part of parameters.split(",")) {
+    const label = /^\s*(?:@\w+\s+)*(?:(\w+)\s+)?([A-Za-z_]\w*)\s*:/.exec(part);
+    if (!label) return undefined;
+    labels.push(label[1] ?? label[2]!);
+  }
+  return labels;
+}
+
 function functionName(name: string): string | null {
   // Accessors, operators and SDK declarations are not modeled as function-to-function calls.
   return name.match(/(?:^|\.)([A-Za-z_][A-Za-z_0-9]*)\s*\(/)?.[1] ?? null;
@@ -127,12 +158,15 @@ function swiftFunctionBodyEnd(source: SwiftSource, startLine: number, startColum
 function matchesSwiftCalleeLabels(
   source: SwiftSource, lineIndex: number, column: number, tokenLength: number,
   signature: string | undefined,
+  declaredLabels?: readonly string[],
 ): boolean {
   // A compact SourceKit name encodes external labels, e.g. Type.enqueue(_:codedSize:).
   const compact = signature?.match(/\(([_A-Za-z0-9:]*)\)$/)?.[1];
-  if (compact === undefined || (compact && !/^(?:[A-Za-z_][A-Za-z_0-9]*:)+$/.test(compact)))
+  if (declaredLabels === undefined
+    && (compact === undefined || (compact && !/^(?:[A-Za-z_][A-Za-z_0-9]*:)+$/.test(compact))))
     return true;
-  const labels = [...compact.matchAll(/([A-Za-z_][A-Za-z_0-9]*):/g)].map(match => match[1]!);
+  const labels = declaredLabels ?? [...(compact ?? "").matchAll(/([A-Za-z_][A-Za-z_0-9]*):/g)]
+    .map(match => match[1]!);
   const text = source.lines.slice(lineIndex, lineIndex + 16).join("\n")
     .slice(column + tokenLength - 1, column + tokenLength - 1 + 4096);
   if (!text.startsWith("(")) return true; // trailing closure, no argument list
@@ -196,6 +230,7 @@ function verifiedCallRange(
   onReject?: (reason: EvidenceRejectionReason) => void,
   callerEndCharacter?: number,
   nestedFunctionBodies: readonly Range[] = [],
+  declaredCalleeLabels?: readonly string[],
 ): Range | null {
   const start = range?.start;
   if (!start || !Number.isInteger(start.line) || !Number.isInteger(start.character)
@@ -235,7 +270,8 @@ function verifiedCallRange(
     }
     if (callerEndCharacter !== undefined
       && lineIndex === callerEndLine - 2 && column >= callerEndCharacter) return null;
-    if (!matchesSwiftCalleeLabels(source, lineIndex, column, matches[0]![0].length, callee.signature)) {
+    if (!matchesSwiftCalleeLabels(source, lineIndex, column, matches[0]![0].length,
+      callee.signature, declaredCalleeLabels)) {
       if (!calleeLabelMismatch) onReject?.("callee_label_mismatch");
       calleeLabelMismatch = true;
       return null;
@@ -887,6 +923,8 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
               for (const call of outgoing ?? []) {
                 const callee = await nodeForItem(rootPath, call.to, loadSource, this.#options.sourceRootAlias);
                 if (!callee || !call.fromRanges?.length) continue;
+                const declaredCalleeLabels = currentSwiftCalleeLabels(
+                  await loadSource(callee.location!.path), callee);
                 const suppliedRanges = call.fromRanges.slice(0, 24);
                 const matchedPositions = new Set<string>();
                 const evidence = suppliedRanges
@@ -895,7 +933,7 @@ export class SourceKitLspProvider implements CodeIntelligenceProvider {
                       callerStartLine, callerEndLine, sourceLineShift, (reason) => {
                         rejectedEvidence++;
                         rejectedEvidenceReasons.set(reason, (rejectedEvidenceReasons.get(reason) ?? 0) + 1);
-                      }, bodyEnd?.character, nestedFunctionBodies);
+                      }, bodyEnd?.character, nestedFunctionBodies, declaredCalleeLabels);
                     if (!verified) return null;
                     const key = verified.start.line + ":" + verified.start.character;
                     if (matchedPositions.has(key)) {

@@ -190,6 +190,10 @@ function answer(method, p) {
     if (file === 'Y.swift') return [
       { to: item('ScreenVideoRenderer.enqueue(_:codedSize:startsIndependentSequence:)', uriFor('Z.swift'), 1, 7),
         fromRanges: [range(1, 14), range(2, 14)] },
+      // SourceKit can return a human-readable signature, not compact labels.
+      // Match the current declaration before certifying the outgoing target.
+      { to: item('ScreenVideoRenderer.enqueue(_ buffer: Int, codedSize: Int?)', uriFor('Z.swift'), 1, 7),
+        fromRanges: [range(1, 14), range(2, 14)] },
       { to: item('ScreenVideoSampleSupply.enqueue(_:measuring:expectedGeneration:path:)', uriFor('AA.swift'), 1, 7),
         fromRanges: [range(1, 14), range(2, 14)] },
     ];
@@ -483,8 +487,16 @@ test("Swift callee labels reject stale same-name links for inline and multiline 
       "}",
     ].join("\n") + "\n";
     await writeFile(join(root, "Y.swift"), source);
-    await writeFile(join(root, "Z.swift"),
-      "struct ScreenVideoRenderer {\n  func enqueue(_ buffer: Int, codedSize: Int?) {}\n}\n");
+    await writeFile(join(root, "Z.swift"), [
+      "struct ScreenVideoRenderer {",
+      "  @discardableResult",
+      "  func enqueue(",
+      "    _ sampleBuffer: CMSampleBuffer,",
+      "    codedSize: CGSize?,",
+      "    startsIndependentSequence: Bool = false",
+      "  ) async -> EnqueueResult {}",
+      "}",
+    ].join("\n") + "\n");
     await writeFile(join(root, "AA.swift"),
       "struct ScreenVideoSampleSupply {\n  func enqueue(_ item: Int, measuring: Bool) {}\n}\n");
     const graph = await new SourceKitLspProvider({
@@ -497,7 +509,7 @@ test("Swift callee labels reject stale same-name links for inline and multiline 
     assert.deepEqual(graph.relations[0]?.evidence?.map(e => [e.location.path, e.location.startLine]),
       [["Y.swift", 2], ["Y.swift", 3]]);
     assert.deepEqual(graph.coverage?.languages[0]?.semanticFunctionDiagnostics?.rejectedEvidenceReasons,
-      [{ reason: "callee_label_mismatch", rangeCount: 2 }]);
+      [{ reason: "callee_label_mismatch", rangeCount: 4 }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
